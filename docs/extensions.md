@@ -1,6 +1,6 @@
 # Extensions reference
 
-24 extensions load from this package. Twelve are single files in `extensions/`, twelve are directories whose entry point is `index.ts`. Three more directories (`thinking-collapse/`, `tool-diff/`, `prompt-editor/`) contain pure-logic modules only — they have no `index.ts`, so pi never loads them as extensions, but the top-level files import them.
+24 extensions load from this package. Twelve are single files in `extensions/`, twelve are directories whose entry point is `index.ts`. Four more directories (`thinking-collapse/`, `tool-diff/`, `prompt-editor/`, `folder-history/`) contain pure-logic modules only — they have no `index.ts`, so pi never loads them as extensions, but the top-level files import them.
 
 Every extension is also documented in its own header comment (Chinese, except `rewind/`): the pi internals it relies on, the failure that motivated it and the trade-offs that are not visible in the code. This page is the map.
 
@@ -209,7 +209,7 @@ The preview works because `ctx.ui.setTheme()` has two distinct paths: passing a 
 
 ### `folder-history.ts` — cross-session command history
 
-Persists command history per working directory in `~/.pi/folder-history/<path-with-dashes>.jsonl` and injects previous sessions' entries into the editor's own history array, which makes the **native ↑/↓** walk across sessions.
+Persists command history per working directory in `~/.pi/folder-history/<path-with-dashes>.jsonl` and injects previous sessions' entries into the editor's own history array, which makes the **native ↑/↓** walk across sessions. The filename turns both `/` and `\` into `-` and strips `:`, so a Windows cwd `D:\foo\bar` becomes `D-foo-bar.jsonl` instead of a nested path under another drive.
 
 The mechanism matters: previous sessions' entries are appended to the tail of `Editor.history` (tail = older), so ↑ goes further back in time. No shortcut is registered — a registered `up` key would swallow cursor movement in multi-line prompts and arrow navigation in every selector. `PI_FOLDER_HISTORY_INJECT` (default `100`) caps how many entries come from earlier sessions.
 
