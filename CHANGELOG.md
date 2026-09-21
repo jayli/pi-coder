@@ -2,6 +2,12 @@
 
 All notable changes to this package. The extensions themselves are snapshot copies from the author's pi environment; their individual histories live in that repository.
 
+## Unreleased
+
+### Fixed
+
+- **`folder-history.ts`** — Windows `cwd` (`D:\Program Files\tty7`) was joined into `~/.pi/folder-history\D:\Program Files\tty7.jsonl` because only `/` was replaced, so `appendFileSync` threw ENOENT on every prompt. Filename sanitization now matches upstream `pi-command-history`: replace `[\\/]+` with `-` and strip `:`. Logic lives in `folder-history/path.ts` (no `index.ts`, so pi does not load the directory as an extension). Suite grows 624 → 631.
+
 ## 2.0.4 — 2026-09-20
 
 Snapshot sync: the statusline branch icon moved to a code point no font on this machine covers, all three themes dropped their pending-card background, and `pi-coder-catppuccin` joined the other two on the neutral grey thinking border. The `tool-pending-bar` extension that briefly marked pending cards landed upstream and was reverted before this sync, so it is not part of the snapshot.

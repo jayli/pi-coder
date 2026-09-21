@@ -13,7 +13,7 @@ These come from pi's extension discovery and they decide where a file may live:
 | `extensions/<dir>/*.test.ts` | No — only the directory's `index.ts` is loaded. |
 | `extensions/*.test.ts` (top level) | **Yes** — pi would try to load it. Never put tests at the top level. |
 
-`thinking-collapse/`, `tool-diff/` and `prompt-editor/` are the three helper-only directories here: `thinking-collapse.ts`, `tool-diff.ts` and `prompt-editor.ts` import them, and pi never loads them directly.
+`thinking-collapse/`, `tool-diff/`, `prompt-editor/` and `folder-history/` are the helper-only directories here: the matching top-level `.ts` files import them, and pi never loads them directly.
 
 Two consequences worth remembering:
 
@@ -23,13 +23,13 @@ Two consequences worth remembering:
 ## Tests
 
 ```bash
-npm test        # node --test — 624 tests, ~34 s
+npm test        # node --test — 631 tests, ~34 s
 ```
 
 Test files run in parallel (`os.availableParallelism()` — 15 on the machine this was written on). Under that load one case is unreliable: the real spawned MCP handshake in `mcp/client.test.ts` intermittently hits its own 5 s handshake budget (seen twice in four full runs here, and never in isolation). The whole suite passes reliably with reduced parallelism at the same wall time:
 
 ```bash
-node --test --test-concurrency=4      # 624 tests, ~34 s
+node --test --test-concurrency=4      # 631 tests, ~34 s
 ```
 
 The 5 s budget is inside the snapshot's `client.test.ts`, which this package keeps byte-identical — it belongs upstream in `clients/pi/`, not here.

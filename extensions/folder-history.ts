@@ -2,6 +2,8 @@
  * Folder-based Command History（本地改版，源自 npm:pi-command-history@0.2.0）
  *
  * 按工作目录持久化命令历史，跨会话复用。历史文件：~/.pi/folder-history/<path-with-dashes>.jsonl
+ * 文件名规则在 `./folder-history/path.ts`：`/` 和 `\` 都换成 `-`，去掉 `:`。
+ * 只替换 `/` 时 Windows cwd（`D:\foo`）会拼出 `~/.pi/folder-history\D:\foo.jsonl`，ENOENT。
  *
  * 与上游最大的差别：**不再注册任何快捷键**。
  * 上游用 ctrl+up / ctrl+down，在 macOS 上被系统 Mission Control 抢走（终端收不到），
@@ -34,6 +36,7 @@ import { CustomEditor } from "@earendil-works/pi-coding-agent";
 import { existsSync, mkdirSync, readFileSync, appendFileSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
+import { historyFileName } from "./folder-history/path.ts";
 
 const HISTORY_DIR = join(homedir(), ".pi", "folder-history");
 const MAX_HISTORY = 500; // 历史文件里保留的条数上限
@@ -43,8 +46,7 @@ const MAX_INJECT = Number(process.env.PI_FOLDER_HISTORY_INJECT || 100);
 const WRAPPED = Symbol.for("pi.folder-history.wrapped");
 
 function getHistoryFile(cwd: string): string {
-	const name = cwd.replace(/\//g, "-");
-	return join(HISTORY_DIR, `${name}.jsonl`);
+	return join(HISTORY_DIR, `${historyFileName(cwd)}.jsonl`);
 }
 
 /** 返回 oldest-first 的去重历史（按文件里的写入顺序）。 */

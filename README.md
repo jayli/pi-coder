@@ -136,13 +136,13 @@ cp "$PKG/themes/"*.json             ~/.pi/agent/themes/            # optional: a
 | [docs/extensions.md](docs/extensions.md) | Reference for all 24 extensions: commands, switches, caveats, storage. |
 | [docs/themes.md](docs/themes.md) | Theme files, the custom tokens, and the rules that make them load. |
 | [Palette reference](https://raw.githack.com/jayli/pi-coder/main/assets/pi-coder-palettes.html) | **Chinese.** Every variable and slot assignment for the three themes, with a terminal preview that switches between them. |
-| [docs/development.md](docs/development.md) | Running the 624 unit tests, verifying against a real pi, publishing. |
+| [docs/development.md](docs/development.md) | Running the 631 unit tests, verifying against a real pi, publishing. |
 | [docs/handbook.zh.md](docs/handbook.zh.md) | **Chinese.** The original handbook this package was extracted from: the author's machine, gateway setup, and the full rationale behind every design decision. |
 
 ## Development
 
 ```bash
-npm test        # node --test, 624 tests
+npm test        # node --test, 631 tests
 ```
 
 The pure-logic modules are deliberately free of `@earendil-works/pi-*` imports so they run under plain `node --test`; see [docs/development.md](docs/development.md) for the layout rules, the tmux verification procedure and the traps this codebase documents.
