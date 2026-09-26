@@ -1,6 +1,6 @@
 # Extensions reference
 
-30 extensions load from this package. Twelve are single files in `extensions/`, eighteen are directories whose entry point is `index.ts`. Five more directories (`thinking-collapse/`, `tool-diff/`, `prompt-editor/`, `bash-command-collapse/`, `read-path-collapse/`) contain pure-logic modules and tests only — they have no `index.ts`, so pi never loads them as extensions, but the top-level files import them or their tests cover them.
+31 extensions load from this package. Twelve are single files in `extensions/`, nineteen are directories whose entry point is `index.ts`. Five more directories (`thinking-collapse/`, `tool-diff/`, `prompt-editor/`, `bash-command-collapse/`, `read-path-collapse/`) contain pure-logic modules and tests only — they have no `index.ts`, so pi never loads them as extensions, but the top-level files import them or their tests cover them.
 
 Every extension is also documented in its own header comment (Chinese, except `rewind/`): the pi internals it relies on, the failure that motivated it and the trade-offs that are not visible in the code. This page is the map.
 
@@ -9,6 +9,7 @@ Every extension is also documented in its own header comment (Chinese, except `r
 | Command | Extension | Arguments |
 | --- | --- | --- |
 | `/ask` | `ask-user-question` | — Previews the questionnaire with a demo question. |
+| `/background` | `background-tasks` | `[<id>]` \| `kill <id>` — Without arguments lists the session's background tasks; with an id prints its status line plus the tail of its log; `kill` stops one. |
 | `/bash-preview` | `bash-command-collapse` | `off` \| `<1-50>` — Output preview lines; `off` restores pi's built-in preview. |
 | `/bash-timeout` | `bash-command-collapse` | — Prints the default, maximum and env-overridden bash timeout. |
 | `/clear` | `clear-command` | — Alias of `/new`. |
@@ -437,6 +438,30 @@ Four tools, all file operations wrapped in `withFileMutationQueue` (tool calls r
 - `PI_MEMORY=off` — disable the extension entirely.
 - `PI_MEMORY_DIR` — override the memory root directory (used for test isolation).
 
+### `background-tasks/` — the background-execution primitive pi lacks
+
+pi 0.87.1 has no way to run a command in the background (`run_in_background` appears nowhere in its dist, and `ExecOptions` carries only `signal` / `timeout` / `cwd`), so a long task blocks the foreground `bash` tool until its timeout. This extension supplies the missing primitive with three tools shaped like Claude Code's, plus one command:
+
+| Here | CC equivalent |
+| --- | --- |
+| `run_in_background` | `Bash` with `run_in_background: true` |
+| `background_output` | `BashOutput` — incremental by default; `offset` is an absolute character position |
+| `background_kill` | `KillShell` — SIGTERM to the whole process group, SIGKILL after a 2 s grace period |
+| `/background` | `/bashes` |
+
+**Completion wakes the model.** When a task reaches a terminal state the extension injects a `<background-task-notification>` message and triggers a follow-up turn — immediately when idle, queued after the current turn while streaming (`deliverAs: "followUp"`). That is why the tool descriptions say not to sleep or poll: the notification is terminal truth, and `background_output` is an inspection tool for when the output content is actually needed.
+
+**Tasks live and die with the pi session.** `session_shutdown` calls `killAll()`. `detached: true` exists only so the command leads its own process group and `kill(-pid)` takes the whole group (an `npm test` worker, each stage of a pipeline); the child is **not** `unref`'d, so nothing survives pi and no cross-restart recovery logic is needed. Two costs are recorded in the header: a SIGKILLed pi never runs shutdown, and `/reload` ends running tasks. Session *replacement* (`/clear`, `/new`, `/resume`) also fires `session_shutdown` while the extension instance survives, so `session_start` resets the `disposed` flag — otherwise tasks in the new session could never wake the model — and a registry identity check stops a late `exit` from a task the old session killed from injecting into the new one.
+
+**Background commands do not run inside the seatbelt delete boundary.** The foreground `bash` tool is wrapped by `bash-command-collapse.ts`; this extension spawns directly, which is semantically the user running `cmd &` themselves. Both the tool description and `/background`'s output print that warning, and destructive work is expected to stay in the foreground.
+
+Output is written twice: an in-memory ring buffer (`MAX_BUFFER_CHARS` 256 KB, oldest chunks dropped with an honest `droppedBefore` count) and a complete log file at `<agentDir>/bg-tasks/<sessionId>/<id>.log`, created synchronously because the tool result hands that path to the model immediately. stdout and stderr merge into one stream (equivalent to `2>&1`). A single read is capped at `MAX_READ_CHARS` (30 000) and returns the tail when exceeded. `registry.ts` is pure logic — spawn, clock, caps and grace period are all injectable — and `index.ts` only wires it up. Deliberately absent from this minimal version: recovery across pi restarts, an automatic timeout kill (CC's background bash has none either), agent-type tasks, a footer task dock, and split stdout/stderr.
+
+36 `node --test` cases: `registry.test.ts` (16) drives the full state machine with fake child processes whose pids sit above the system limit, so the group-kill path can never touch a real process; `index.test.ts` (20) loads the real extension through pi's loader and **really spawns** — completion notification, non-duplicating incremental reads, group kill reaching grandchildren, no orphans after shutdown, `/background` details not advancing the model's read offset, `disposed` reset after a session replacement, and a stale registry's late terminal state not injecting into the new session.
+
+- `PI_BACKGROUND_TASKS=off` — disable the extension entirely.
+- `PI_BACKGROUND_TASKS_DIR` — override the log root directory (used for test isolation).
+
 ### `auto-default-model/` — persistent model switches
 
 pi's `/model` picker only changes the current session; persisting it takes a separate Ctrl+S (`setModel(model, { persist: true })`). This extension performs that step automatically on every model switch — the picker, Ctrl+P cycling, a subagent profile switch, anything that calls `pi.setModel()`.
@@ -499,6 +524,8 @@ Every switch is an environment variable read at use time, not cached at load, so
 | --- | --- | --- | --- |
 | `PI_ASK_USER_QUESTION=off` | on | `ask-user-question` | Do not register the `ask_user_question` tool. |
 | `PI_AUTO_DEFAULT_MODEL=off` | on | `auto-default-model` | Do not persist model switches to `settings.json`. |
+| `PI_BACKGROUND_TASKS=off` | on | `background-tasks` | Do not register the background-task tools or `/background`. |
+| `PI_BACKGROUND_TASKS_DIR` | `<agentDir>/bg-tasks` | `background-tasks` | Override the log root directory (used for test isolation). |
 | `PI_BASH_HIGHLIGHT=off` | on | `bash-command-collapse` | Disable shell syntax highlighting in bash title rows. |
 | `PI_BASH_MIN_TIME_MS` | `2000` | `bash-command-collapse` | Only show the elapsed-time footer above this duration. |
 | `PI_BASH_PREVIEW` | `3` | `bash-command-collapse` | bash output preview lines (1–50); `off` restores pi's built-in preview. |
@@ -561,6 +588,7 @@ Every switch is an environment variable read at use time, not cached at load, so
 - **Three `tool_call` hooks coexist.** `plan-mode` rejects write-shaped commands while planning and pins the `write` tool to the approved plan path; `sandbox-boundary` checks `apply_patch` deletes; `destructive-guard` judges delete targets at all times. They are independent gates with different scopes, and a command can be refused by any of them. The lexical gate and the OS boundary overlap on purpose where they do — one is a pattern match that runs anywhere, the other only exists on macOS.
 - **The theme preview and the theme files are coupled.** `/theme` persists the name it previewed, and the name must match the `theme` field's expectations in [themes.md](themes.md).
 - **MCP tool names are namespaced.** `mcp__<server>__<tool>` collides with neither the builtins nor the extensions' own tools; names past 64 characters are truncated with a hash suffix, which stays inside the tool-name limit the model APIs enforce while keeping truncated names distinguishable.
+- **`background-tasks` sits outside the delete boundary.** `bash-command-collapse.ts` wraps the foreground `bash` tool in the seatbelt profile and `sandbox-boundary` gates `apply_patch`; `background-tasks` spawns directly, so neither applies to a background command. Nothing imports it and nothing imports from it — the gap is documented in its tool descriptions and in `/background`'s output rather than closed, because closing it would mean wrapping every background spawn in the same profile.
 - **Three extensions read theme tokens that pi's schema does not define** (`toolDiffAddedBg`, `toolDiffRemovedBg`, `bashOutput`) and degrade quietly when a theme omits them.
 
 ## State on disk
@@ -576,6 +604,7 @@ Every switch is an environment variable read at use time, not cached at load, so
 | `.pi/plans/<date>-<slug>.md` | `plan-mode` | The approved plan document, written into the project by the model (pinned to that one path by a `tool_call` hook). Upstream adds `.pi/` to the project's `.gitignore` — a plan is a working artefact. |
 | `~/.pi/agent/sandbox-allowlist.json` | `bash-command-collapse`, `sandbox-boundary` | The persistent delete allowlist. Machine-local state, an authorization decision rather than configuration, so it is deliberately not in any snapshot. |
 | `~/.pi/agent/memory/<project-slug>/` | `memory` | One file per memory (CC-compatible frontmatter) plus a mechanically derived `MEMORY.md` index and an optional `.disabled` marker. Per-project, keyed by the git root of `cwd`; `PI_MEMORY_DIR` moves the root. |
+| `~/.pi/agent/bg-tasks/<sessionId>/<id>.log` | `background-tasks` | The complete output of each background task (stdout and stderr merged), written synchronously at spawn. `PI_BACKGROUND_TASKS_DIR` moves the root. Nothing is restored across pi restarts — the session's tasks are killed on shutdown. |
 | In memory only | `core-rules` | Nothing — the injected message goes into the session log, and the only in-memory state is the content hash scan. |
 | In memory only | `recap` | The current summary; lost on `/new` or `/resume` by design. |
 | In memory only | `mcp` | Per-server status, the registered tool table and a 20-line diagnostic ring buffer per server. Config files are read, never written. |
