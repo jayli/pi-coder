@@ -387,9 +387,9 @@ async run artifacts）pi-subagents 已自带（`docs/observability.md`），无�
 ### 补回被压缩掉的「主动找并行」（2026-09-26）
 
 2026-09-25 那次把 Codex 闸门后的 **19 条**打法压成 **5 条**，砍掉的主要是 Codex 鼓励主动寻找并行机会
-的那一半。后果实测可见：`workflowScript` 在全部 62 个会话日志里**零调用**（`subagent` 共 9 次，全是
-`list` / `guide` / `status` / supervisor，没有一次真派活）——闸门 + 纪律保留、并行主动性砍掉、proactive
-档关闭，三层叠加后模型没有任何理由去碰编排层。
+的那一半。后果实测可见：`workflowScript` 在全部会话日志里**零调用**（按 `toolCall` 精确计数：`subagent`
+共 6 次，其中 3 次是 `{agent, task}` 直调派活、3 次是 `list` / `guide` 管理动作，没有一次上升到编排层；
+详见下一节）——闸门 + 纪律保留、并行主动性砍掉、proactive 档关闭，三层叠加后模型没有任何理由去碰编排层。
 
 补回两条（`AGENTS.md` 的 `## Delegation`，**闸门一字未动**，只加在「授权之后」的打法段）：
 
@@ -402,6 +402,40 @@ async run artifacts）pi-subagents 已自带（`docs/observability.md`），无�
 「任务大小、复杂度、工具调用数、想并行」依旧不构成授权，「要深入 / 要调研 / 要详细分析」依旧不算许可。
 proactive 档仍不采用。差别只在**授权成立之后**：以前模型拿到授权也不知道该主动切并行，现在会。
 `AGENTS.core.md` 的蒸馏版同步加了一句（core-rules 按 hash 检测，下个会话自动带替换声明重注）。
+
+### 编排触发机制：workflowScript 零调用的病根（2026-09-26）
+
+上一节补的是「授权之后要主动找并行」，但**没说用什么机制去并行**。实测后果（按 `toolCall` 精确计数，
+63 个会话文件）：`subagent` 工具调用共 **6 次**，其中真派活 **3 次**（全在 2026-09-16，全是直调
+`{agent, task}`），`workflowScript` / `workflowScriptPath` **零次**。
+
+与上一节两处口径差异，以本次为准：上一节记的「9 次」含 `guide` / `status` / `list` 等管理动作与
+非 `toolCall` 形态的提及，此处只数 `role:"assistant"` 的 `toolCall`（得 6）；上一节说「没有一次真派活」
+也不准——那 3 次 `{agent, task}` 直调是真派活，只是全部停在直调层、从未上升到编排层。两节结论一致：
+**编排层零调用**。
+
+能力其实全在 pi-subagents 0.71.0 里：`runs.run` / `runs.all` / `runs.lanes` / `runs.steer` /
+`outputSchema` / typed gate / worktree 隔离 / 三种预算，`subagent` 工具描述本身也写了 `workflowScript`
+（`src/extension/tool-description.js:19`）。缺的是**触发**：`AGENTS.md` 对 workflowScript 零提及，模型拿到
+授权也不知道有这层，只会发 N 个临时直调。
+
+补法与上一节同构——**做法 B（补打法），闸门一字未动**。`AGENTS.md` 的 `## Delegation` 加一条
+「Pick the orchestration mechanism once authorized」，判据直接取自官方 `docs/workflows.md`：
+
+| 工作形状 | 机制 |
+| --- | --- |
+| 单个有界子任务 | 直调 `subagent({ agent, task })` |
+| 需要稳定键控子代理 / 顺序 / 扇出 / 纠偏 / 重试 / 聚合 | **一次**顶层 `subagent` 调用带 `workflowScript`（或 `workflowScriptPath`），子代理全部在脚本内启动 |
+| 形状匹配打包模板 | 优先 `/prompt-workflow <name>`（包内 6 个：`parallel-review` / `review-loop` / `parallel-research` / `parallel-cleanup` / `gather-context-and-clarify` / `council`） |
+
+两条硬约束一并写进条款：**不做第二次顶层编排**（官方原文「make exactly one top-level `subagent`
+workflow call … rather than constructing a second top-level orchestration」），复合 workflow 加
+`timeoutMs` / `toolBudget` / `usageBudget`。条款末尾明写「这是 how，不是新的授权来源，不动闸门」——
+授权来源仍只有用户当前请求 / 适用的项目指令 / 技能。
+
+`AGENTS.core.md` 蒸馏版同步一条（core-rules 按 hash 检测，下个会话自动带替换声明重注），否则长会话里
+条款照样衰减。`/council` 不是注册的 slash command（`registerCommand` 全表里没有它，由 `council-mode`
+skill 驱动），所以条款里只写 `/prompt-workflow council` 这个真实入口。
 
 ### watchdog：开关与配置（2026-09-26 起默认开）
 

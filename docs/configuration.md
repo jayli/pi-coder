@@ -5,7 +5,7 @@
 | In this package | Destination | Purpose |
 | --- | --- | --- |
 | `config/AGENTS.md` | `~/.pi/agent/AGENTS.md` | The agent's global working rules: persistence, authorization, destructive-action care, shell hygiene, editing and verification rules, communication style. |
-| `config/AGENTS.core.md` | `~/.pi/agent/AGENTS.core.md` | The ~6 KB distilled core (`core-rules` re-injects it into the context mid-session). The extension **does nothing, silently**, when this file is missing. |
+| `config/AGENTS.core.md` | `~/.pi/agent/AGENTS.core.md` | The ~7 KB distilled core (`core-rules` re-injects it into the context mid-session). The extension **does nothing, silently**, when this file is missing. |
 | `config/settings.json` | `~/.pi/agent/settings.json` | Everything in the key table below. |
 | `config/web-search.json` | `~/.pi/agent/web-search.json` | `pi-web-access` configuration; one required key (see below). |
 | `config/pi-statusline.json` | `~/.pi/agent/pi-statusline.json` | Legacy. See [pi-statusline.json](#pi-statuslinejson-is-legacy). |

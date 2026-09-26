@@ -30,6 +30,7 @@ Distilled from `~/.pi/agent/AGENTS.md`; must never decay mid-session.
 ## Delegation
 - Invoke subagents only when the current request or an applicable project instruction/skill asks for delegation; depth/thoroughness/research requests do not count. Investigation is done inline by default.
 - Once authorized: plan first, delegate only bounded sidecar tasks that don't block your next step, keep parallel write sets disjoint, keep doing non-overlapping work while children run, never redo delegated work — and actively look for parallel opportunities in the same round (disjoint slices → one child per slice; independent questions out together).
+- Mechanism: one bounded child → `subagent({agent, task})`; keyed children / sequencing / fanout / steering / retry / aggregation → one top-level `subagent` call with `workflowScript`, all children launched inside it (never N ad-hoc calls). Prefer packaged `/prompt-workflow parallel-review | review-loop | parallel-research | parallel-cleanup | gather-context-and-clarify | council`. This is how, not a new authorization.
 
 ## Skills
 - Skills are listed in the system prompt's `<available_skills>` (name / description / absolute `SKILL.md` path); there is no `Skill` tool — loading one means `read`ing that path.
