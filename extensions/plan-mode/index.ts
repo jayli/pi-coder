@@ -1,13 +1,37 @@
 /**
- * pi-plan-mode — Claude Code 风格的 plan mode。
+ * pi-plan-mode — Claude Code 风格的 plan mode + 三态权限模式。
  *
- * 两态：bypass → plan（只读探索，模型出方案）。与 Claude Code 对齐：
+ * 三态：`dangerous`（pi 原生任意权限，沙箱删除拦截关闭）/ `bypass`（默认，沙箱
+ * 删除拦截开启）/ `plan`（只读探索，模型出方案）。plan 态与 Claude Code 对齐：
  *
  *   - `exit_plan_mode` 的参数是**一份完整方案文本**（cc 的 `ExitPlanMode(plan)` 同形），
  *     不是一串结构化步骤。
  *   - 批准后**没有 execute 态**：扩展把方案落成计划文档（`.pi/plans/`，模型自己 write），
- *     写完即回 bypass、还原写权限，「按文档实施」是一次性交给模型的指令。进度也交还
- *     模型 —— 它认为该建任务清单就自己 `task_set`，扩展不再镜像步骤、不再记进度。
+ *     写完即回 **returnPhase**（从哪个模式进的 plan 就回哪个）、还原写权限，「按文档
+ *     实施」是一次性交给模型的指令。进度也交还模型 —— 它认为该建任务清单就自己
+ *     `task_set`，扩展不再镜像步骤、不再记进度。
+ *
+ * ## 三态的切换与权限
+ *
+ * shift+tab 走**固定循环** `dangerous → bypass → plan → dangerous`（用户 2026-09-27 定）：
+ *
+ *   dangerous  ☢ 红色（error）    沙箱删除拦截**关闭**，pi 原生任意权限
+ *   bypass     ⏵ 绿色（success）  沙箱删除拦截**开启**（默认态）
+ *   plan       ⏸ 橙色（warning）  只读：工具收拢 + bash 写拦截，比沙箱更严
+ *
+ * **dangerous 只能由 shift+tab 切到** —— 没有 `/dangerous` 命令，`/plan` 也永远不把你
+ * 带进 dangerous（它只切 plan，离开 plan 时回 bypass）。模型路径（`enter_plan_mode`）
+ * 同样只能进 plan。
+ *
+ * plan 有三条出口，落点不同：
+ *
+ *   - shift+tab：固定循环的下一态 = **dangerous**（不看 returnPhase）
+ *   - `/plan`：**bypass**（安全默认）
+ *   - 计划文档写完、进入实施阶段：**returnPhase**（从哪来回哪去，可能是 dangerous）
+ *
+ * 沙箱开关通过 `bash-command-collapse/sandbox-mode.ts` 的 globalThis 单例传给两个沙箱
+ * 消费方（bash 的 seatbelt 包裹、apply_patch 的 tool_call 检查），它们在**执行期**读。
+ * 本扩展没装 / 被 `PI_PLAN_MODE=off` 关掉时单例永远是默认的 bypass，拦截照旧生效。
  *
  * ## 审批对话框（三选一）
  *
@@ -21,14 +45,14 @@
  *
  * ## 入口
  *
- *   shift+tab      切模式（正常 ⇄ plan）。pi 把它留给了内置的 app.thinking.cycle，
+ *   shift+tab      三态固定循环。pi 把 shift+tab 留给了内置的 app.thinking.cycle，
  *                  扩展抢不到（runner 会 skip 与内置冲突的 registerShortcut），所以
  *                  走 ctx.ui.onTerminalInput 在按键到达编辑器**之前**拦下并 consume。
  *                  代价是思考等级循环键被吃掉，本扩展首次启动时会把
  *                  ~/.pi/agent/keybindings.json 里的 app.thinking.cycle 改绑到 ctrl+shift+t
  *                  （只在该键仍是 pi 默认值时改；用户自己配过就尊重用户的选择）。
- *   /plan          手动切（等价于 shift+tab）
- *   /plan-status   看当前状态
+ *   /plan          切 plan（进 plan / 离开 plan 回 bypass）—— 永远不落到 dangerous
+ *   /plan-status   看当前模式
  *   --plan         启动即进 plan mode
  *   自动进入       注册 enter_plan_mode 工具 —— 模型判断任务偏大时自己调用，
  *                  这就是 Claude Code 的机制（不是关键词启发式）。路由判据全在这个
@@ -37,6 +61,13 @@
  *                  （CC 的 “must consent to entering plan mode”）：用户可以选「直接实施」
  *                  否掉，所以判据可以写松 —— 误判的代价是用户按一次键，不是白做一轮。
  *                  PI_PLAN_MODE_CONSENT=off 关掉这道弹框。
+ *
+ *   brainstorming 互斥闸   模型路径还有一道前置闸（用户 2026-09-26 定）：本次 run 里
+ *                  已经 read 过 superpowers `brainstorming` 技能的 SKILL.md 时，
+ *                  `enter_plan_mode` **不进 plan、也不弹同意框**，直接回一段「二选一」
+ *                  说明让模型按技能自己的流程走（brainstorming 自带设计→批准→文档→
+ *                  writing-plans，与 plan mode 完全重叠）。判定在 brainstorm.ts，只拦
+ *                  模型路径 —— 用户自己 shift+tab / /plan / --plan 进来不受影响。
  *
  * ## 约束（收工具 + 拦 bash，两道独立的闸）
  *
@@ -48,7 +79,8 @@
  *      工具表里都被拦；写文档子态里 write 只许写计划文档那一个路径。拒绝原因作为
  *      工具错误结果回给模型。判定细节见 plan.ts。
  *
- * 这是给配合的模型用的护栏，不是沙箱 —— 见 plan.ts 文件头的取舍说明。
+ * 这是给配合的模型用的护栏，不是沙箱 —— 见 plan.ts 文件头的取舍说明。真正的删除
+ * 拦截在 dangerous / bypass 两态由沙箱层负责（bypass 开、dangerous 关）。
  *
  * ## 计划落地
  *
@@ -65,17 +97,22 @@ import { Type } from "typebox";
 import {
 	type PlanDocMode,
 	type PlanState,
+	type ReturnPhase,
 	cancelPlan,
 	completeDocWrite,
 	enterDocWriting,
 	enterPlan,
+	exitDangerous,
+	exitPlanTo,
 	initialPlanState,
 	inspectBashCommand,
+	nextCyclePhase,
 	planModeToolSet,
 	rejectPlan,
 	restoredToolSet,
 	submitPlan,
 } from "./plan.ts";
+import { setSandboxMode } from "../bash-command-collapse/sandbox-mode.ts";
 import {
 	buildDocWriteContext,
 	buildDocWrittenMessage,
@@ -84,6 +121,7 @@ import {
 	truncatePlanForDialog,
 } from "./plan-text.ts";
 import { buildPlanDocPath } from "./plan-doc.ts";
+import { brainstormingLoadedInRun, messagesFromBranch } from "./brainstorm.ts";
 import { STATUS_KEY, formatPlanStatus } from "./render.ts";
 import { THINKING_FALLBACK_KEY, keybindingsPath, rebindThinkingKey } from "./keybinding.ts";
 
@@ -142,6 +180,7 @@ const ENTER_TOOL_DESCRIPTION = `进入 plan mode（只读探索）：先把方�
 - 需求明确的单个函数
 - 用户已经给了具体、详细的指令（照做即可，方案没有分叉）
 - 纯调研 / 探索 / 审阅（「哪些文件负责路由」、「对比 A 和 B 写份报告」、「审一下这个文档」——产出是结论，不是改动）
+- **本次 run 已经加载了 brainstorming 技能**（read 过它的 SKILL.md）——两者二选一：brainstorming 自带「澄清 → 2-3 方案 → 批准 → 设计文档 → writing-plans 实施计划」全流程，与本工具重叠，按它走就行（扩展也会拦下这次调用）
 
 ## 例子
 该用：「给应用加用户认证」（session vs JWT、token 存哪、中间件结构都要定）／「优化数据库查询」（多种路子、要先 profile）／「实现暗色主题」（主题系统的架构决定，波及很多组件）／「给用户资料页加个删除按钮」（看着简单，其实要定位置、确认框、API 调用、错误处理、状态更新）
@@ -150,10 +189,11 @@ const ENTER_TOOL_DESCRIPTION = `进入 plan mode（只读探索）：先把方�
 ## 注意
 - 这个工具需要用户同意：调用后会弹框，用户可以选「直接实施」否掉它。所以拿不准就调——误判的代价是用户按一次键，不是白做一轮。
 - 用户自己按 shift+tab / /plan / --plan 进入时不弹框（那已经是用户的决定）。
-- 进 plan 前还没 brainstorm 过的话，先 read brainstorming 技能的 SKILL.md（路径在系统提示词的 <available_skills> 清单里）并按它走：逐条澄清需求、给 2-3 个方案带取舍。plan mode 里它的文件布局不适用：不写 docs/superpowers/specs/、不 commit（一切写操作都被拦），设计产物由 exit_plan_mode 提交后统一落 .pi/plans/；技能里的「逐条提问」在这里就是 ask_user_question 工具。`;
+- **brainstorming 与本工具二选一，同一任务只用一套设计流程。** 本次 run 已加载 brainstorming → 全程按它走，不要调用本工具；未加载而任务命中上面的判据 → 照常调用。若已经在 plan 态里才想起 brainstorming，可以 read 它的方法论（逐条澄清、给 2-3 个方案带取舍），但它的文件布局在 plan mode 里不适用：不写 docs/superpowers/specs/、不 commit（一切写操作都被拦），设计产物由 exit_plan_mode 提交后统一落 .pi/plans/；技能里的「逐条提问」在这里就是 ask_user_question 工具。`;
 
 interface PersistedState {
 	phase: PlanState["phase"];
+	returnPhase?: ReturnPhase;
 	pending?: string;
 	toolsBeforePlan?: string[];
 	docMode?: PlanDocMode;
@@ -166,11 +206,16 @@ interface PersistedState {
  * 把落盘条目里的 phase 收敛到当前联合类型，认不出的一律当 `"bypass"`。
  *
  * 白名单式判定兜住一切历史值：2026-09-23 的 `normal` → `bypass` 改名、2026-09-24 删掉
- * 的 `execute` 态（旧会话恢复出来当 bypass —— 那次批准没有留下任何扩展持有的状态，
- * 直接放行不会丢东西）。
+ * 的 `execute` 态、以及 2026-09-27 三态化之前的旧会话（它们只写过 bypass / plan）。
+ * **认不出的值绝不落到 dangerous** —— 那是唯一会关掉沙箱的态，必须由用户亲手切到。
  */
 function normalizePhase(value: unknown): PlanState["phase"] {
-	return value === "plan" ? "plan" : "bypass";
+	return value === "plan" || value === "dangerous" ? value : "bypass";
+}
+
+/** 落盘条目里的 returnPhase 同样白名单式收敛：认不出的当没记过（收尾时退回 bypass）。 */
+function normalizeReturnPhase(value: unknown): ReturnPhase | undefined {
+	return value === "dangerous" ? "dangerous" : value === "bypass" ? "bypass" : undefined;
 }
 
 /** 落盘条目里的 docMode 同样白名单式收敛：认不出的当没选过。 */
@@ -224,6 +269,7 @@ export default function planMode(pi: ExtensionAPI) {
 	function persist(): void {
 		const payload: PersistedState = {
 			phase: state.phase,
+			returnPhase: state.returnPhase,
 			pending: state.pending,
 			toolsBeforePlan: state.toolsBeforePlan,
 			docMode: state.docMode,
@@ -248,6 +294,7 @@ export default function planMode(pi: ExtensionAPI) {
 			const entry = entries[index] as { type?: string; customType?: string; data?: PersistedState };
 			if (entry.type !== "custom" || entry.customType !== ENTRY_TYPE || !entry.data) continue;
 			state.phase = normalizePhase(entry.data.phase);
+			state.returnPhase = normalizeReturnPhase(entry.data.returnPhase);
 			state.pending = normalizePending(entry.data.pending);
 			state.toolsBeforePlan = entry.data.toolsBeforePlan;
 			state.docMode = normalizeDocMode(entry.data.docMode);
@@ -276,12 +323,17 @@ export default function planMode(pi: ExtensionAPI) {
 		return planModeToolSet(active, allowWrite).filter((name) => name !== ENTER_TOOL);
 	}
 
-	function enter(ctx: ExtensionContext | undefined, reason: "user" | "model"): void {
+	/**
+	 * 进 plan 模式。已在 plan 里则原样返回（不覆盖工具快照与来路）。
+	 * `reason` 只影响提示文案。
+	 */
+	function enterPlanMode(ctx: ExtensionContext | undefined, reason: "user" | "model"): void {
 		if (state.phase === "plan") return;
 		// 快照必须取在摘工具**之前** —— 退出时靠它原样还原（含二十多个扩展工具）
 		const before = pi.getActiveTools();
 		Object.assign(state, enterPlan(state, before));
 		pi.setActiveTools(planToolSet(before));
+		setSandboxMode(state.phase);
 		persist();
 		render(ctx);
 		if (ctx?.hasUI) {
@@ -294,18 +346,72 @@ export default function planMode(pi: ExtensionAPI) {
 		}
 	}
 
-	function leave(ctx: ExtensionContext | undefined, notify = true): void {
+	/**
+	 * 离开 plan 到指定的非-plan 态，还原工具表。三条出口共用：
+	 * shift+tab（cancelPlan → dangerous）、`/plan`（exitPlanTo → bypass）、
+	 * 写完计划文档（completeDocWrite → returnPhase）。
+	 * `notifyMessage` 为空则不提示（tool_result 收尾那条路有自己的提示）。
+	 */
+	function leavePlan(
+		ctx: ExtensionContext | undefined,
+		next: PlanState,
+		notifyMessage?: string,
+		severity: "info" | "warning" = "info",
+	): void {
 		const tools = restoredToolSet(state, pi.getActiveTools());
-		Object.assign(state, cancelPlan(state));
+		Object.assign(state, next);
 		pi.setActiveTools(tools);
+		setSandboxMode(state.phase);
 		persist();
 		render(ctx);
-		if (notify && ctx?.hasUI) ctx.ui.notify("已退出 plan mode，写权限恢复。", "info");
+		if (notifyMessage && ctx?.hasUI) ctx.ui.notify(notifyMessage, severity);
 	}
 
-	function toggle(ctx: ExtensionContext | undefined): void {
-		if (state.phase === "bypass") enter(ctx, "user");
-		else leave(ctx);
+	/**
+	 * shift+tab：固定循环 dangerous → bypass → plan → dangerous。
+	 * 这是**唯一**能到达 dangerous 的路径（没有命令、没有模型路径能进去）。
+	 */
+	function cycleNext(ctx: ExtensionContext | undefined): void {
+		// 下一态统一由 `nextCyclePhase`（CYCLE_ORDER 那张表）算出来，这里只负责把
+		// 三种迁移各自的副作用做对 —— 改循环顺序只需改表，不用改这里。
+		const next = nextCyclePhase(state.phase);
+		if (next === "plan") {
+			// bypass → plan：收工具、注入只读上下文
+			enterPlanMode(ctx, "user");
+			return;
+		}
+		if (next === "dangerous") {
+			// plan → dangerous：固定循环的下一态，不看 returnPhase（见 cancelPlan 的注释）。
+			// 提示用 warning 级：这是唯一会关掉沙箱删除拦截的态，得说大声一点。
+			leavePlan(
+				ctx,
+				cancelPlan(state),
+				"☢ dangerous 模式：沙箱删除拦截已关闭，任意权限（pi 原生形态）。再按 shift+tab 回 ⏵ bypass。",
+				"warning",
+			);
+			return;
+		}
+		// dangerous → bypass：重新打开沙箱删除拦截（这一态没有任何扩展持有的状态）
+		Object.assign(state, exitDangerous(state));
+		setSandboxMode(state.phase);
+		persist();
+		render(ctx);
+		if (ctx?.hasUI) {
+			ctx.ui.notify("已退出 dangerous 模式，现在是 ⏵ bypass：沙箱删除拦截已开启。再按 shift+tab 进 plan mode。", "info");
+		}
+	}
+
+	/**
+	 * `/plan`：只切 plan，**永远不落到 dangerous**（dangerous 只能由 shift+tab 切到）。
+	 * 离开 plan 时去 **bypass**（安全默认）—— 不走固定循环的 dangerous，也不看
+	 * returnPhase：一条命令不该把用户悄悄送进沙箱关闭的态。
+	 */
+	function togglePlanCommand(ctx: ExtensionContext | undefined): void {
+		if (state.phase === "plan") {
+			leavePlan(ctx, exitPlanTo(state, "bypass"), "已退出 plan mode（/plan），现在是 ⏵ bypass：沙箱删除拦截已开启。");
+			return;
+		}
+		enterPlanMode(ctx, "user");
 	}
 
 	// =========================================================================
@@ -323,7 +429,10 @@ export default function planMode(pi: ExtensionAPI) {
 		}
 		attachInputListener(ctx);
 
-		if (pi.getFlag("plan") === true && state.phase !== "plan") enter(ctx, "user");
+		if (pi.getFlag("plan") === true && state.phase !== "plan") enterPlanMode(ctx, "user");
+		// 恢复/进入都做完之后再把当前态同步给沙箱层：dangerous 关拦截，其余开。
+		// 本扩展没装时单例永远是默认的 bypass，拦截照旧 —— 安全默认。
+		setSandboxMode(state.phase);
 		render(ctx);
 
 		if (!thinkingKeyChecked && (event.reason === "startup" || event.reason === "reload")) {
@@ -368,7 +477,7 @@ export default function planMode(pi: ExtensionAPI) {
 				if (!current || current.mode !== "tui") return undefined;
 				if (dialogOpen || restoreInProgress) return undefined;
 				if (!current.isIdle()) return undefined;
-				toggle(current);
+				cycleNext(current);
 				return { consume: true };
 			});
 		} catch {
@@ -388,19 +497,23 @@ export default function planMode(pi: ExtensionAPI) {
 	// =========================================================================
 
 	pi.registerCommand("plan", {
-		description: "切换 plan mode（只读探索 → 批准 → 写计划文档）",
+		description: "切换 plan mode（只读探索 → 批准 → 写计划文档）；离开 plan 回 bypass（dangerous 只能 shift+tab 切）",
 		handler: async (_args, ctx) => {
 			currentCtx = ctx;
-			toggle(ctx);
+			togglePlanCommand(ctx);
 		},
 	});
 
 	pi.registerCommand("plan-status", {
-		description: "显示 plan mode 状态",
+		description: "显示当前权限模式（dangerous / bypass / plan）",
 		handler: async (_args, ctx) => {
 			currentCtx = ctx;
+			if (state.phase === "dangerous") {
+				ctx.ui.notify("当前模式：☢ dangerous（沙箱删除拦截关闭，任意权限）。shift+tab 回 bypass。", "warning");
+				return;
+			}
 			if (state.phase === "bypass") {
-				ctx.ui.notify("plan mode: bypass（未启用）", "info");
+				ctx.ui.notify("当前模式：⏵ bypass（沙箱删除拦截开启）。shift+tab 进 plan mode。", "info");
 				return;
 			}
 			const lines: string[] = [];
@@ -423,6 +536,24 @@ export default function planMode(pi: ExtensionAPI) {
 	// 自动进入：模型工具
 	// =========================================================================
 
+	/**
+	 * 本次 run 里 brainstorming 技能在不在场（二选一闸的判定）。
+	 *
+	 * 读 `getBranch()` 而不是 `buildSessionProjection()`：分支是全量原始历史，压缩不会
+	 * 把 run 窗口弄丢（投影会把旧消息换成摘要）；而 `getBranch()` 从当前叶子往上走，
+	 * rewind / 分支导航之后被丢弃的分支天然不在里面，所以它也是分支正确的。
+	 *
+	 * 任何异常一律 fail-open（当作「没加载」）：误判成没加载只是回到旧行为（弹框），
+	 * 误判成加载了会静默剥夺 plan mode，代价不对称。
+	 */
+	function brainstormingActive(ctx: ExtensionContext): boolean {
+		try {
+			return brainstormingLoadedInRun(messagesFromBranch(ctx.sessionManager.getBranch()));
+		} catch {
+			return false;
+		}
+	}
+
 	if (!AUTO_DISABLED) {
 		pi.registerTool({
 			name: ENTER_TOOL,
@@ -434,6 +565,25 @@ export default function planMode(pi: ExtensionAPI) {
 			async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
 				currentCtx = ctx;
 				const reason = typeof params.reason === "string" && params.reason.trim() !== "" ? params.reason.trim() : "";
+				// brainstorming 互斥闸（在同意弹框**之前**）：本次 run 已加载 brainstorming 技能
+				// 就不进 plan、也不打扰用户 —— 两套流程重叠，二选一（用户 2026-09-26 定）。
+				// 判定失败一律 fail-open（照常弹框）：误判成「没加载」只是回到旧行为，
+				// 误判成「加载了」会静默剥夺 plan mode，代价不对称。
+				if (brainstormingActive(ctx)) {
+					return {
+						content: [
+							{
+								type: "text",
+								text:
+									`本次 run 已加载 brainstorming 技能，没有进入 plan mode。brainstorming 与 ${ENTER_TOOL} 二选一：` +
+									"按技能自己的流程走（逐条澄清、给 2-3 个方案带取舍、在对话里给出设计并等用户批准；" +
+									"架构级任务再写设计文档、转 writing-plans），不要再调用本工具。" +
+									`用户若确实想用 plan mode，请他自己按 shift+tab 或 /plan。`,
+							},
+						],
+						details: { phase: state.phase, brainstorming: true, consented: false },
+					};
+				}
 				// 同意弹框只在模型路径：shift+tab / /plan / --plan 走 enter(ctx, "user")，
 				// 那已经是用户自己的决定，再问一次是纯打扰。无 UI（pi -p）没有人会被打扰，
 				// 也不弹 —— 保持既有 headless 行为。
@@ -459,7 +609,7 @@ export default function planMode(pi: ExtensionAPI) {
 						};
 					}
 				}
-				enter(ctx, "model");
+				enterPlanMode(ctx, "model");
 				return {
 					content: [
 						{
@@ -660,17 +810,27 @@ export default function planMode(pi: ExtensionAPI) {
 		const tools = restoredToolSet(state, pi.getActiveTools());
 		Object.assign(state, outcome.state);
 		pi.setActiveTools(tools);
+		setSandboxMode(state.phase);
 		persist();
 		render(ctx);
-		if (ctx.hasUI) ctx.ui.notify(`计划文档已写好：${outcome.docPath}`, "info");
+		if (ctx.hasUI) {
+			// 收尾落在 returnPhase（从哪个模式进的 plan 就回哪个），所以要把落点说出来：
+			// 回到 dangerous 意味着沙箱删除拦截已关，不能让用户以为还在保护下。
+			const landed =
+				outcome.returnPhase === "dangerous"
+					? "☢ dangerous（沙箱删除拦截已关闭）"
+					: "⏵ bypass（沙箱删除拦截已开启）";
+			ctx.ui.notify(`计划文档已写好：${outcome.docPath}\n实施阶段回到 ${landed}`, "info");
+		}
 		return {
 			content: [{ type: "text", text: buildDocWrittenMessage(outcome.docMode, outcome.docPath) }],
 		};
 	});
 
-	// 回到 bypass 之后，把陈旧的 plan 上下文从模型上下文里过滤掉（不该看到过期的指令）
+	// 不在 plan 态时（bypass 或 dangerous），把陈旧的 plan 上下文从模型上下文里过滤掉
+	// （不该看到过期的指令）
 	pi.on("context", async (event) => {
-		if (state.phase !== "bypass") return undefined;
+		if (state.phase === "plan") return undefined;
 		return {
 			messages: event.messages.filter((message) => {
 				const type = (message as { customType?: string }).customType;

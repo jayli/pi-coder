@@ -1,6 +1,6 @@
 # Extensions reference
 
-29 extensions load from this package. Twelve are single files in `extensions/`, seventeen are directories whose entry point is `index.ts`. Five more directories (`thinking-collapse/`, `tool-diff/`, `prompt-editor/`, `bash-command-collapse/`, `read-path-collapse/`) contain pure-logic modules and tests only — they have no `index.ts`, so pi never loads them as extensions, but the top-level files import them or their tests cover them.
+30 extensions load from this package. Twelve are single files in `extensions/`, eighteen are directories whose entry point is `index.ts`. Five more directories (`thinking-collapse/`, `tool-diff/`, `prompt-editor/`, `bash-command-collapse/`, `read-path-collapse/`) contain pure-logic modules and tests only — they have no `index.ts`, so pi never loads them as extensions, but the top-level files import them or their tests cover them.
 
 Every extension is also documented in its own header comment (Chinese, except `rewind/`): the pi internals it relies on, the failure that motivated it and the trade-offs that are not visible in the code. This page is the map.
 
@@ -19,8 +19,9 @@ Every extension is also documented in its own header comment (Chinese, except `r
 | `/mcp` | `mcp` | — Status of every configured server: transport, tool count, protocol version, config source. |
 | `/mcp reload` | `mcp` | — Re-read the config files, reconnect and re-register tools. |
 | `/mcp <server>` | `mcp` | — One server's details and its recent diagnostics. |
-| `/plan` | `plan-mode` | — Toggle plan mode (same as `shift+tab`). |
-| `/plan-status` | `plan-mode` | — Print the current phase and the plan's steps. |
+| `/memory` | `memory` | — Auto-memory menu: status line, open the memory folder, show the index, enable/disable for this project. |
+| `/plan` | `plan-mode` | — Toggle `plan` mode; leaving `plan` returns to `bypass` (never to `dangerous`). |
+| `/plan-status` | `plan-mode` | — Print the current permission mode (`dangerous` / `bypass` / `plan`) and any pending plan. |
 | `/recap` | `recap` | — Summarizes the conversation now. |
 | `/rewind` | `rewind` | — Checkpoint menu; also Esc Esc at an empty prompt. |
 | `/sandbox-boundary` | `sandbox-boundary` | `forget <path>` \| `clear` \| `allow <path>` — Prints the delete boundary and the persistent allowlist; default form lists both. |
@@ -62,6 +63,8 @@ Two changes: the title row stays on exactly one line, and the block is shelled l
 ### `tool-diff.ts` — the `edit` and `write` tools
 
 Claude Code style diffs: full-line background for added and removed lines (including the line-number gutter), inline highlight of the changed span, and syntax highlighting. Both tools are re-registered with `renderShell: "self"`, which is what makes per-line backgrounds possible — the default shell paints whole blocks by status and would cover them.
+
+The definitions come from `createEditToolDefinition` / `createWriteToolDefinition`, **not** from `createEditTool` / `createWriteTool`. The latter are `wrapToolDefinition(createXToolDefinition(…))`, and `wrapToolDefinition` keeps only eight fields (`name`, `label`, `description`, `parameters`, `constrainedSampling`, `prepareArguments`, `executionMode`, `execute`) — so `promptSnippet` and `promptGuidelines` are silently dropped, the `edit` / `write` rows disappear from the system prompt's `<tools>` section (`visibleTools` filters on `!!toolSnippets[name]`) and the five guidance lines in `<rules>` go with them. Nothing errors: the tools still work, the model just cannot see them. pi's own `examples/extensions/built-in-tool-renderer.ts` uses `createEditTool()` and carries this bug, so it is not a safe pattern to copy. Registration spreads `{ ...originalTool }` rather than copying fields by name, which also preserves `executionMode` — losing that one can let `edit` run concurrently and race on a file.
 
 The two line backgrounds come from theme tokens that pi's official schema does not define: `toolDiffAddedBg` and `toolDiffRemovedBg`. When a theme omits them, the extension falls back to the much flatter `toolSuccessBg` / `toolErrorBg`. See [themes.md](themes.md#custom-tokens).
 
@@ -249,15 +252,43 @@ Typing `exit`, `quit` or `bye` as the entire prompt quits pi cleanly (sessions a
 
 ## Model and tooling
 
-### `plan-mode/` — Claude Code style plan mode
+### `plan-mode/` — Claude Code style plan mode + three-state permission mode
 
-Two phases: `bypass` → `plan` (read-only exploration, the model writes a plan). **There is no execute phase.** Approval restores write access and returns to `bypass`; "now implement what you just planned" is a one-shot instruction handed to the model, and progress is the model's own business — it builds a task list with `task_set` if it judges the work warrants one. Plan state lives in the session log (`pi.appendEntry("plan-mode")`, not in the model's context), and the plan document is written into `.pi/plans/` in the working directory.
+Three permission states (user decision, 2026-09-27), walked by `shift+tab` in a **fixed cycle**:
 
-Until 2026-09-24 this was three phases (`bypass` → `plan` → `execute`), where approval mirrored the steps into `simple-task` and tracked `[DONE:n]` markers against them. That whole "the extension owns the progress" mechanism is gone — the mirror contract, the markers, the step widget and the per-turn injection with it — because Claude Code's own `ExitPlanMode(plan)` takes a complete plan text and leaves the task list to the model.
+```
+dangerous ──shift+tab──▶ bypass ──shift+tab──▶ plan ──shift+tab──▶ dangerous
+```
 
-Four ways in: `shift+tab`, `/plan`, `--plan` at startup, and the model's own `enter_plan_mode` tool.
+| Mode | Icon / color | Permission meaning |
+| --- | --- | --- |
+| `dangerous` | `☢` / `error` (red) | pi's native any-permission form — the **seatbelt delete boundary is switched off entirely** |
+| `bypass` (default) | `⏵` / `success` (green) | **delete boundary on** (startup, `/resume` and any unrecognized historical value all converge here) |
+| `plan` | `⏸` / `warning` (orange) | read-only exploration — tools collapsed + bash write interception, stricter than the sandbox's "deletes only" |
+
+**`dangerous` is reachable only by `shift+tab`.** There is no `/dangerous` command, `/plan` never takes you there (it toggles `plan` only and returns to `bypass` on the way out), and the model path (`enter_plan_mode`) can likewise only enter `plan`. Turning protection off is therefore always a decision the user pressed, never one an automatic path arrives at.
+
+**`plan` has three exits with different landing states** — the one place the three-state design needs to remember where it came from:
+
+| Exit | Lands on | Why |
+| --- | --- | --- |
+| `shift+tab` | **`dangerous`** (the cycle's next state) | follow the cycle rather than returning the way it came, otherwise one press from `bypass` looks like nothing happened |
+| `/plan` | **`bypass`** (the safe default) | a command should not quietly drop the user into the sandbox-off state |
+| plan document written, implementation begins | **`returnPhase`** (wherever it came from, possibly `dangerous`) | the user approved the plan, so implementation runs under the permission posture they had chosen |
+
+`returnPhase` is recorded by `enterPlan` (the state before entering `plan`) and only the third exit uses it. Returning to `dangerous` says so explicitly in the notify ("delete boundary is off"), so the user cannot believe they are still protected.
+
+**How the sandbox switch travels.** plan-mode and the two delete-interception layers (the bash seatbelt wrapper in `bash-command-collapse.ts`, the `apply_patch` `tool_call` check in `sandbox-boundary/index.ts`) live in three extension files with one `globalThis` singleton between them: `getSandboxMode()` / `setSandboxMode()` in `bash-command-collapse/sandbox-mode.ts` (the same trick as `allowlist.ts`'s store cache — pi's loader does not guarantee two extensions share a module instance, while `globalThis` guarantees they read the same state). Both consumers read it at **execution time** and AND it with the registration-time env gate (`PI_SANDBOX` + platform): any one of them saying off turns it off. When plan-mode is not installed or is disabled with `PI_PLAN_MODE=off` the singleton stays at its default `bypass` and interception keeps working (fail-safe).
+
+**There is no execute phase** — aligned with Claude Code: approval restores write access and returns to `returnPhase`, "now implement what you just planned" is a one-shot instruction handed to the model, and progress is the model's own business — it builds a task list with `task_set` if it judges the work warrants one. Plan state lives in the session log (`pi.appendEntry("plan-mode")`, not in the model's context), and the plan document is written into `.pi/plans/` in the working directory.
+
+Until 2026-09-24 this was three phases (`bypass` → `plan` → `execute`), where approval mirrored the steps into `simple-task` and tracked `[DONE:n]` markers against them. That whole "the extension owns the progress" mechanism is gone — the mirror contract, the markers, the step widget and the per-turn injection with it — because Claude Code's own `ExitPlanMode(plan)` takes a complete plan text and leaves the task list to the model. It became three states again on 2026-09-27, but the third state is a **permission mode** (`dangerous`), not a progress phase (`execute`) — the two have nothing to do with each other.
+
+Four ways in: `shift+tab` (the three-state cycle), `/plan` (toggles `plan` only), `--plan` at startup, and the model's own `enter_plan_mode` tool.
 
 **The model's way in asks for consent first (Claude Code's mechanism).** `enter_plan_mode` no longer enters directly: it opens a two-option `select` — `进 plan mode（只读探索）` (the default, so Enter accepts the model's request) and `直接实施`. Choosing the second, or pressing Esc, does not enter plan mode; the tool result tells the model the user chose to implement directly and not to call the tool again, so it acts on the instruction in the same turn. Three deliberate points: Esc counts as a refusal (Claude Code's "must consent to entering plan mode"), which also makes "too much friction, skip it" a single keystroke; the dialog is **only on the model path** — `shift+tab` / `/plan` / `--plan` go through `enter(ctx, "user")` and are already the user's own decision; and a headless run (`pi -p`) skips it and enters, keeping the previous behaviour where nobody is interrupted.
+
+**The `brainstorming` mutual-exclusion gate (either-or, user decision 2026-09-26).** The superpowers `brainstorming` skill already carries the whole flow — clarify → 2–3 options → approval → design document → `writing-plans` implementation plan — which overlaps plan mode completely. So when the model calls `enter_plan_mode`, the handler scans the session branch **before** the consent dialog: if this run (everything after the last `role:"user"` message) contains an assistant `toolCall` that is a `read` of a path containing `/brainstorming/` (a fragment match, so a relocated skill library still counts; the judgement lives in `brainstorm.ts`, 13 pure-logic cases), it **neither enters plan mode nor shows a dialog** and instead returns an either-or explanation — follow the skill, do not call this tool again, and if the user wants plan mode they can press `shift+tab` or `/plan` themselves. Only the model path is gated; a user entering by hand never passes through it. Any error in the check fails **open** (the dialog shows as usual), because the costs are asymmetric: a false "not loaded" merely restores the old behaviour, while a false "loaded" would silently take plan mode away. Two known boundaries are recorded in `brainstorm.ts`'s header: reading `SKILL.md` with bash `cat` does not count as loading (only the `read` tool does, the same lexical standard `verify-loop` uses), and the exemption covers the current run only — the next prompt does not inherit it.
 
 **All the routing criteria live in the tool description (also Claude Code's shape).** `enter_plan_mode`'s `description` carries 7 positive conditions (a new feature / several viable approaches / changing existing behaviour or structure / an architectural tradeoff / **more than 2–3 files** / unclear requirements / a fork the user's preference decides — the last one spelled out as "if you were about to ask with `ask_user_question`, use this tool instead"), 4 exemptions (a one-or-two-line fix / a single function with clear requirements / **the user already gave specific detailed instructions** / **pure research, exploration or review**), and GOOD/BAD examples. The global `AGENTS.md`'s `## Uncertainty` keeps a single pointer to it instead of a second copy — Claude Code's system prompt likewise contains no plan rule at all. Criteria in the tool description are read at exactly the moment the model decides whether to call the tool, and they cannot drift away from `AGENTS.md`. This is why the criteria can afford to be loose: a misjudgement costs the user one keystroke at the consent dialog, not a forced round of plan → proposal → approval → document.
 
@@ -265,7 +296,7 @@ Four ways in: `shift+tab`, `/plan`, `--plan` at startup, and the model's own `en
 
 The dialog is **truncated to one screen** (`truncatePlanForDialog`), and the height is computed with pi-tui's own `wrapTextWithAnsi`, so it matches the real render including CJK line-breaking; the overflow line reports how many steps are left and points at the terminal scrollback, while the plan text handed to the model is never truncated. This is not cosmetic: pi pins the viewport to the bottom on every repaint and the confirm dialog is a non-scrollable `Text`, so a long plan is guaranteed to be cut off and manually scrolling up is undone by the next repaint.
 
-**The mode indicator has a fixed slot**: the head of the statusline's second row, with text in both phases — `⏵ bypass` (painted `toolDiffRemoved`, i.e. the delete-line red, so "full permissions" is visible at a glance) and `⏸ plan` / `⏸ plan · 4 steps` (`warning`). See [`statusline/`](#statusline--the-footer) for why the slot is pinned.
+**The mode indicator has a fixed slot**: the head of the statusline's second row, with text in all three states — `☢ dangerous` (painted `error`, red, so "the boundary is off" is visible at a glance), `⏵ bypass` (`success`, green — the red moved to `dangerous` when the third state arrived on 2026-09-27) and `⏸ plan`, `⏸ plan · 待批准` or `⏸ plan · 写文档中` (`warning`). See [`statusline/`](#statusline--the-footer) for why the slot is pinned.
 
 **Two independent gates, not one:**
 
@@ -321,8 +352,14 @@ A delete outside those roots is refused by the **kernel** (`EPERM`), not by a pa
 
 The dialogs are three-way: dangerous paths get `Deny` / `Allow once` / `Allow for this session`; ordinary paths get `Deny` / `Allow for this session（并记住该目录）` / `Allow once`. When a delete is refused the extension extracts the blocked paths from the failure output by **exclusion** (it keeps the in-line absolute-path scan and only skips lines containing `here document` and lines whose leading program is a shell or `sandbox-exec`) rather than by a program-name allowlist, which would silently drop the python3 `PermissionError`, `find:` and `ln:` shapes. **If it cannot extract a path it does not prompt** — it reports the original error plus a `[沙箱]` line pointing at `/sandbox-boundary allow <directory>`; the old "ask once per whole command, then rerun outside the sandbox" fallback is gone. An approved delete reruns **inside** the sandbox with the approved range widened, so the rest of the command stays supervised.
 
+A delete can also be masked by a command that succeeds overall: in `rm <outside> ; <ok>` the kernel refuses the `rm` with `EPERM` but the whole command exits 0, so pi does not throw and the catch branch (the dialog) never runs — the refusal would be swallowed silently. `maskedDenialPaths` catches that shape: when a **successful** command's output still contains a denial and the target file is in fact still there, the result gets one appended `[沙箱]` line naming the blocked paths and the authorization exit. It does not prompt and does not rerun (user decision 2026-09-26: annotate only) — the command still counts as succeeded, and the note just makes the swallowed refusal visible to both the model and the user. The false-positive guard is in the same function: a `grep "Operation not permitted" some.log` whose output merely contains those words is not treated as a blocked delete.
+
 - `PI_SANDBOX=off` — disable both the profile and the `apply_patch` gate (also automatic off macOS, where there is no `sandbox-exec`).
 - `PI_SANDBOX_EXTRA_WRITE` — colon-separated extra delete roots, `~` expanded, like `PATH`.
+
+### `bash-command-collapse/sandbox-mode.ts` — the runtime on/off singleton
+
+A `globalThis` singleton holding one of `dangerous` / `bypass` / `plan`, defaulting to `bypass`. It is how [`plan-mode/`](#plan-mode--claude-code-style-plan-mode--three-state-permission-mode)'s three-state cycle reaches the two delete-interception layers, which live in different extension files: `bash-command-collapse.ts` reads `getSandboxMode()` at **execution time** and skips the seatbelt wrapper entirely when it is `dangerous`, and `sandbox-boundary/index.ts` does the same for the `apply_patch` gate. Execution-time is the point — a registration-time read could never be flipped by a later `shift+tab`. Both consumers AND it with the registration-time env gate (`PI_SANDBOX` + platform), so any one of them saying off turns the boundary off; when plan-mode is absent or disabled the singleton stays `bypass` and interception is unchanged (fail-safe). `sandbox-mode.test.ts` covers the default, the set/reset round-trip and the cross-module identity.
 
 ### `bash-command-collapse/allowlist.ts` — the persistent allowlist
 
@@ -377,6 +414,28 @@ The block count is **not an in-memory counter**: it counts this extension's alre
 - `PI_VERIFY_EVALUATOR_MODEL` — evaluator model `provider/modelId`; default `litellm-any/qwen3.8-flash`, then the session model.
 - `PI_GOAL_CONTEXT_CHARS` — conversation character budget for the evaluator; default `120000`.
 - `PI_GOAL_TIMEOUT_MS` — evaluation call timeout; default `45000`.
+
+### `memory/` — Claude Code style auto-memory
+
+Cross-session learning, filling the biggest gap in issue #13. Storage follows CC: `~/.pi/agent/memory/<project-slug>/` holds a `MEMORY.md` index plus one file per memory, with CC-compatible frontmatter (`name` / `description` / `metadata.type` — one of `user` / `feedback` / `project` / `reference` — and `modified`). The slug is derived from the git root of `ctx.cwd` (`findProjectRoot`), so the same project keeps the same memory wherever the checkout lives.
+
+**The index is derived mechanically — the model never hand-writes it (option C).** After every `memory_write` the extension scans all body files' frontmatter and rebuilds `MEMORY.md` from scratch (idempotent: identical content is not rewritten, so mtime and caches stay stable). This removes the failure mode both CC and Qoder fight — "wrote a memory but forgot the index, so it is saved yet never recalled". Hand-editing a body file is picked up on the next `before_agent_start`, which also rebuilds the index. The index is capped (`INDEX_MAX_LINES` 200 / `INDEX_MAX_BYTES` 25000) with an overflow count.
+
+**Injection goes through `before_agent_start` mutating `systemPromptOptions.sections.memory`** — discipline text + index (an empty store injects nothing, and a disabled project injects nothing). A section lands in the system message, replays with the transcript and survives compaction; since the index only changes on writes its bytes are naturally stable, so none of the KV-cache snapshot machinery a log-based memory needs. The discipline text carries CC's three gates (applicable / durable / legible), the tense rule (save past-tense observations — measurements, decisions with rejected options, user corrections — never present-tense repo-state claims, which rot), the read-side verification duty (a memory naming a file/function/flag must be re-checked before acting on it, the same standard as `AGENTS.md`'s `## Verification`) and no secrets.
+
+Four tools, all file operations wrapped in `withFileMutationQueue` (tool calls run in parallel):
+
+- `memory_write` — write the body file and rebuild the index; the same name updates in place.
+- `memory_read` — read one memory's full body, or list all when the name is omitted.
+- `memory_forget` — delete the body file and update the index.
+- `memory_search` — zero-dependency keyword search, frontmatter hits weighted 3, body hits 1.
+
+`/memory` is the only user-facing surface (mirroring CC's three items): a status line, open the memory folder, show the index as a widget, and an enable/disable toggle (a per-project `.disabled` marker). `PI_MEMORY=off` disables the extension entirely; `PI_MEMORY_DIR` overrides the memory root (test isolation). Deliberately not in v1: background dream consolidation (a mount point is left), a USER/PROJECT dual scope (per-project only), semantic search, and a mechanical write gate — tense and secrets are enforced by the discipline text.
+
+26 `node --test` cases: `store.test.ts` (10) and `context.test.ts` (4) are pure logic; `index.test.ts` (12) loads the real extension through pi's loader, including a regression assertion for the issue #13 bug where the injected `promptSnippet` was stripped.
+
+- `PI_MEMORY=off` — disable the extension entirely.
+- `PI_MEMORY_DIR` — override the memory root directory (used for test isolation).
 
 ### `auto-default-model/` — persistent model switches
 
@@ -461,6 +520,8 @@ Every switch is an environment variable read at use time, not cached at load, so
 | `PI_GOAL_CONTEXT_CHARS` | `120000` | `verify-loop` | Conversation character budget sent to the `/goal` evaluator. |
 | `PI_GOAL_TIMEOUT_MS` | `45000` | `verify-loop` | `/goal` evaluation call timeout. |
 | `PI_LOGO=off` | on | `startup-logo` | Do not install the startup header. |
+| `PI_MEMORY=off` | on | `memory` | Disable auto-memory entirely. |
+| `PI_MEMORY_DIR` | `~/.pi/agent/memory` | `memory` | Override the memory root directory (used for test isolation). |
 | `PI_PLAN_MODE=off` | on | `plan-mode` | Disable plan mode entirely. |
 | `PI_PLAN_MODE_AUTO=off` | on | `plan-mode` | Do not register the model's `enter_plan_mode` tool; `shift+tab` and `/plan` still work. |
 | `PI_PLAN_MODE_CONSENT=off` | on | `plan-mode` | Do not ask for consent before the model's `enter_plan_mode` enters plan mode. |
@@ -496,6 +557,7 @@ Every switch is an environment variable read at use time, not cached at load, so
 - **`verify-loop` imports `recap/subagents.ts`.** The `/goal` evaluator skips its turn while a subagent is still running (CC's "background work defers evaluation"), and that probe is the pi-subagents in-process RPC `recap` already implements; the probe fails open, but `verify-loop` should not be installed without `recap`.
 - **`sandbox-boundary` imports `bash-command-collapse/sandbox.ts` and `allowlist.ts`.** The bash seatbelt profile and the `apply_patch` gate are two halves of one boundary and share one judgement plus one allowlist singleton, so those three must be installed together; installing `sandbox-boundary` alone would leave it with no boundary and no memory.
 - **`plan-mode` and `simple-task` are independent.** Until 2026-09-24 they shared the `plan-mirror.ts` contract and had to be installed together; an approved plan is now a document and progress is the model's own business, so nothing links them. `plan-mode` still writes the plan file with the `write` tool while its `tool_call` hook pins that path.
+- **`plan-mode` writes the sandbox mode; `bash-command-collapse` and `sandbox-boundary` read it.** The three-state cycle reaches the two delete-interception layers through the `getSandboxMode()` / `setSandboxMode()` singleton in `bash-command-collapse/sandbox-mode.ts` (a `globalThis` singleton, because pi's loader does not guarantee two extensions share a module instance). `dangerous` switches the seatbelt wrapper and the `apply_patch` gate off at execution time. Without `plan-mode` installed the singleton stays `bypass` and both gates behave exactly as before the three-state change (fail-safe), so `plan-mode` is optional for the sandbox — but the sandbox extensions must be present for `dangerous` to have anything to switch off.
 - **Three `tool_call` hooks coexist.** `plan-mode` rejects write-shaped commands while planning and pins the `write` tool to the approved plan path; `sandbox-boundary` checks `apply_patch` deletes; `destructive-guard` judges delete targets at all times. They are independent gates with different scopes, and a command can be refused by any of them. The lexical gate and the OS boundary overlap on purpose where they do — one is a pattern match that runs anywhere, the other only exists on macOS.
 - **The theme preview and the theme files are coupled.** `/theme` persists the name it previewed, and the name must match the `theme` field's expectations in [themes.md](themes.md).
 - **MCP tool names are namespaced.** `mcp__<server>__<tool>` collides with neither the builtins nor the extensions' own tools; names past 64 characters are truncated with a hash suffix, which stays inside the tool-name limit the model APIs enforce while keeping truncated names distinguishable.
@@ -513,6 +575,7 @@ Every switch is an environment variable read at use time, not cached at load, so
 | Session log (via `appendEntry`) | `verify-loop` | The active `/goal` (condition, status, evaluated turns, last verdict), rebuilt from `getBranch()` on `session_start` — resume restores it, a new session starts clean. The counters (gate blocks, goal continuations, no-progress turns) are **neither persisted nor in memory**: they are counted from the injected `verify-loop` messages in the model-visible projection, because `agent_start` re-fires on every boundary continuation and would zero an in-memory counter. |
 | `.pi/plans/<date>-<slug>.md` | `plan-mode` | The approved plan document, written into the project by the model (pinned to that one path by a `tool_call` hook). Upstream adds `.pi/` to the project's `.gitignore` — a plan is a working artefact. |
 | `~/.pi/agent/sandbox-allowlist.json` | `bash-command-collapse`, `sandbox-boundary` | The persistent delete allowlist. Machine-local state, an authorization decision rather than configuration, so it is deliberately not in any snapshot. |
+| `~/.pi/agent/memory/<project-slug>/` | `memory` | One file per memory (CC-compatible frontmatter) plus a mechanically derived `MEMORY.md` index and an optional `.disabled` marker. Per-project, keyed by the git root of `cwd`; `PI_MEMORY_DIR` moves the root. |
 | In memory only | `core-rules` | Nothing — the injected message goes into the session log, and the only in-memory state is the content hash scan. |
 | In memory only | `recap` | The current summary; lost on `/new` or `/resume` by design. |
 | In memory only | `mcp` | Per-server status, the registered tool table and a 20-line diagnostic ring buffer per server. Config files are read, never written. |
@@ -521,5 +584,5 @@ Every switch is an environment variable read at use time, not cached at load, so
 ## Adding, disabling and removing extensions
 
 - **Disable one** — `pi config` lists every resource from packages and local directories with an on/off toggle, in global or project scope. Or set the switch listed above when the extension has one.
-- **Remove one** — delete its file (or its directory) from the package, or copy the ones you want into `~/.pi/agent/extensions/` and stop installing the package. Deleting subdirectories is safe except for the directories other files import: the helper-only `thinking-collapse/`, `tool-diff/` and `prompt-editor/`, plus `simple-task/` (whose `gap.ts` is imported by `recap`), `recap/` (whose `subagents.ts` is imported by `verify-loop`) and `bash-command-collapse/` (whose `sandbox.ts` and `allowlist.ts` are imported by `sandbox-boundary`).
+- **Remove one** — delete its file (or its directory) from the package, or copy the ones you want into `~/.pi/agent/extensions/` and stop installing the package. Deleting subdirectories is safe except for the directories other files import: the helper-only `thinking-collapse/`, `tool-diff/` and `prompt-editor/`, plus `simple-task/` (whose `gap.ts` is imported by `recap`), `recap/` (whose `subagents.ts` is imported by `verify-loop`) and `bash-command-collapse/` (whose `sandbox.ts`, `allowlist.ts` and `sandbox-mode.ts` are imported by `sandbox-boundary`, and whose `sandbox-mode.ts` is also imported by `plan-mode`).
 - **Edit one** — work in a checkout and run pi against it; see [development.md](development.md).

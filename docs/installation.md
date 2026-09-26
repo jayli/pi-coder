@@ -52,8 +52,8 @@ Expected visible results of a successful load:
 - The footer is a single statusline line (`statusline`), plus a second line with the working directory (`cwd-statusline`).
 - The editor shows a `❯ ` prompt (`prompt-editor`).
 - A user message has a `▎ ` at the head of every line, including the blank lines above and below the text, in the theme's `accent` color (`user-message-bar`).
-- A bash run starts with a `• ` dot followed by `Run `, with **no background** behind the block (`bash-command-collapse`); pressing `shift+tab` switches to plan mode and the statusline's second line starts showing `⏵ bypass` / `⏸ plan · 4 steps` (`plan-mode`).
-- `/theme`, `/tasks`, `/recap`, `/rewind`, `/init`, `/clear`, `/exit`, `/ask`, `/mcp`, `/plan`, `/plan-status`, `/goal`, `/sandbox-boundary`, `/destructive-guard` and the `/bash-*` family (`/bash-preview`, `/bash-timeout`) all exist. Type `/` and scroll the command list.
+- A bash run starts with a `• ` dot followed by `Run `, with **no background** behind the block (`bash-command-collapse`); pressing `shift+tab` cycles the permission mode and the statusline's second line shows `⏵ bypass` → `⏸ plan` → `☢ dangerous` (`plan-mode`).
+- `/theme`, `/tasks`, `/recap`, `/rewind`, `/init`, `/clear`, `/exit`, `/ask`, `/mcp`, `/memory`, `/plan`, `/plan-status`, `/goal`, `/sandbox-boundary`, `/destructive-guard` and the `/bash-*` family (`/bash-preview`, `/bash-timeout`) all exist. Type `/` and scroll the command list.
 - `/sandbox-boundary` prints the delete boundary (project directory, the temp roots `/tmp` / `/var/folders` / `/var/tmp`, the regenerable caches) and a `持久白名单` line, and `~/.pi/agent/AGENTS.core.md` exists — `core-rules` does nothing, silently, without it.
 - `/destructive-guard` prints `模式：on` and a line of zeros for this session's counts. That extension is **retired upstream** and shipped here as a reference implementation; it stays quiet unless it has something to say.
 

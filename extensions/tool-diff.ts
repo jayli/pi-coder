@@ -22,19 +22,29 @@
  *   （updateDisplay() 里），所以标题行不会丢。
  *
  * 执行逻辑一律委托内置实现，只换渲染：
- *   `createEditTool(cwd)` / `createWriteTool(cwd)` 都是包根导出的，官方示例
- *   examples/extensions/built-in-tool-renderer.ts 就是这个模式。渲染器继承是**按 slot**
+ *   `createEditToolDefinition(cwd)` / `createWriteToolDefinition(cwd)` 都是包根导出的。
+ *   **必须用 `…Definition` 这一族，不能用 `createEditTool` / `createWriteTool`**：后者是
+ *   `wrapToolDefinition(createXToolDefinition(…))`，而 `wrapToolDefinition` 只保留 8 个字段
+ *   （name / label / description / parameters / constrainedSampling / prepareArguments /
+ *   executionMode / execute），`promptSnippet` 与 `promptGuidelines` 被静默剥掉 —— 于是
+ *   system prompt 的 `<tools>` 段里 edit / write 两行整体消失（`visibleTools` 按
+ *   `!!toolSnippets[name]` 过滤），`<rules>` 段里那 5 条 guidance（edit 4 条 + write 1 条）
+ *   也全部缺席。pi 官方示例 examples/extensions/built-in-tool-renderer.ts 用的正是
+ *   `createEditTool()`，**它自己就带这个 bug**，别照着抄。渲染器继承是**按 slot**
  *   合并的（renderers/index.js `withBuiltInRenderers`：
  *   `renderCall: definition.renderCall ?? builtIn.renderCall`）。两个工具都**自己写
  *   renderCall**、只留一行标题：内置 edit 的 renderCall 会渲染一份基于 args 的 diff 预览
  *   （`getEditCallRenderComponent`），内置 write 的会把整个 `content` 带语法高亮地铺出来，
  *   执行完后 renderResult 又画一张卡片 —— 同一份改动会显示两遍。
  *   （早期版本刻意省略 edit 的 renderCall 以继承那份流式预览，正是因为重复才改掉的。）
- *   注册时用 `{ ...originalTool }` 展开而不是逐字段抄：实测 edit 带 `prepareArguments`
- *   （write 没有），两者都没有 `promptSnippet` / `promptGuidelines`（都是 undefined，
- *   所以文档里"提示词元数据不继承"那条警告在这两个工具上不适用）。展开能顺带保住
- *   `executionMode` / `constrainedSampling` 等未来新增字段 —— 手抄字段名最容易漏掉这些，
- *   而 `executionMode` 一旦丢掉就可能让 edit 并发执行、造成文件竞态。
+ *   注册时用 `{ ...originalTool }` 展开而不是逐字段抄：定义体上除了 `execute` /
+ *   `parameters` / `description` 还带着 `promptSnippet` / `promptGuidelines`（就是上面那段
+ *   警告的主角）、`prepareArguments`（edit 有、write 没有）、`executionMode` /
+ *   `constrainedSampling` 等字段 —— 手抄字段名最容易漏掉这些，`executionMode` 一旦丢掉
+ *   就可能让 edit 并发执行、造成文件竞态，而提示词元数据丢掉是**静默**的（工具照样能调、
+ *   不报任何错，只是模型看不到那几行）。展开还能顺带保住 pi 未来新增的字段。
+ *   `renderShell: "self"` 与 `renderCall` / `renderResult` 写在展开**之后**，所以覆盖掉
+ *   定义体自带的内置渲染器。
  *
  * 标题行的流式形态（与底部 spinner 分工）：
  *   流式中是 `Edit <path> ●` / `Write <path> ●` —— 闪烁的 `●` 表示「正在接收字节流」。
@@ -103,8 +113,8 @@
 
 import type { EditToolDetails, ExtensionAPI, Theme, ThemeColor } from "@earendil-works/pi-coding-agent";
 import {
-	createEditTool,
-	createWriteTool,
+	createEditToolDefinition,
+	createWriteToolDefinition,
 	generateUnifiedPatch,
 	getLanguageFromPath,
 	highlightCode,
@@ -1151,7 +1161,7 @@ export default function (pi: ExtensionAPI): void {
 	const cwd = process.cwd();
 
 	// --- edit：renderCall 只留一行标题，不显示内置那份 diff 预览 ---
-	const originalEdit = createEditTool(cwd);
+	const originalEdit = createEditToolDefinition(cwd);
 	pi.registerTool({
 		...originalEdit,
 		renderShell: "self",
@@ -1202,7 +1212,7 @@ export default function (pi: ExtensionAPI): void {
 	});
 
 	// --- write：自带 renderCall（要在执行前读旧内容），renderResult 画真 diff ---
-	const originalWrite = createWriteTool(cwd);
+	const originalWrite = createWriteToolDefinition(cwd);
 	pi.registerTool({
 		...originalWrite,
 		renderShell: "self",

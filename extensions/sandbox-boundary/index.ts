@@ -40,6 +40,20 @@
  * 全部目标路径（不像 bash 要先失败再从 stderr 里抽）。所以这里没有「命令重跑一次」的代价，
  * `Allow once` 就是单纯放行这一次、不记忆。
  *
+ * ## 与 plan-mode 三态的关系（用户 2026-09-27 定）
+ *
+ * plan-mode 扩展持有三个权限模式（dangerous / bypass / plan），通过
+ * `bash-command-collapse/sandbox-mode.ts` 的 globalThis 单例告知本扩展：
+ *
+ * - **bypass**（默认）：本扩展正常生效。
+ * - **dangerous**：pi 原生的任意权限形态 —— 删除拦截整体关闭，`*** Delete File:`
+ *   不检查、不弹框（包括永不删除档）。只能由用户 shift+tab 切到，没有命令也没有
+ *   模型路径能进去，所以「关掉保护」永远是用户自己的决定。
+ * - **plan**：本扩展不关心这一态 —— plan 自己的两道闸已经禁掉一切写入与删除。
+ *
+ * plan-mode 没装、或被 `PI_PLAN_MODE=off` 关掉时，单例永远是默认的 bypass，
+ * 本扩展行为与三态化之前完全一致（fail-safe）。
+ *
  * ## 体验
  *
  * 写入**一次都不弹窗**，边界内（含可再生缓存 `~/.cache`、`~/Library/Caches` 等）的删除
@@ -67,6 +81,7 @@ import {
 	type WriteBoundary,
 } from "../bash-command-collapse/sandbox.ts";
 import { getAllowlistStore, getSessionScopes } from "../bash-command-collapse/allowlist.ts";
+import { getSandboxMode } from "../bash-command-collapse/sandbox-mode.ts";
 
 /**
  * 可能携带删除意图的工具。
@@ -112,7 +127,16 @@ function deleteTargetPaths(input: unknown): string[] {
 export default function (pi: ExtensionAPI) {
 	// 与 bash 沙箱共用同一个开关：PI_SANDBOX=off 时两边一起关，不会出现
 	// "bash 有边界、apply_patch 没边界"这种半开状态。
-	const enabled = isSandboxEnabled();
+	// 注册期读一次（env + 平台）；plan-mode 的 dangerous 模式是**执行期**的第二道闸，
+	// 同样两边一起关 —— 见下面 `sandboxActive()`。
+	const envEnabled = isSandboxEnabled();
+	/**
+	 * 这一刀拦不拦：env 总闸与运行期模式取与。
+	 * dangerous（plan-mode 三态之一，只能由用户 shift+tab 切到）= pi 原生任意权限，
+	 * apply_patch 的 `*** Delete File:` 不检查、不弹框。plan-mode 没装时单例恒为
+	 * 默认的 bypass，这里永远为 true。
+	 */
+	const sandboxActive = (): boolean => envEnabled && getSandboxMode() !== "dangerous";
 	const allowlistPath = process.env.PI_SANDBOX_ALLOWLIST?.trim() || join(getAgentDir(), "sandbox-allowlist.json");
 	const sessionScopes = getSessionScopes();
 	// 路径分类需要的 IO（realpath / isDirectory）由这里注入，sandbox.ts 保持纯逻辑。
@@ -137,7 +161,7 @@ export default function (pi: ExtensionAPI) {
 	let stats = { checked: 0, remembered: 0, confirmed: 0, blocked: 0 };
 
 	pi.on("tool_call", async (event, ctx) => {
-		if (!enabled) return undefined;
+		if (!sandboxActive()) return undefined;
 		if (!GUARDED_TOOLS.has(event.toolName)) return undefined;
 
 		const paths = deleteTargetPaths(event.input);
@@ -268,8 +292,15 @@ export default function (pi: ExtensionAPI) {
 	pi.registerCommand("sandbox-boundary", {
 		description: "显示可删边界与白名单；forget <path> 移除一条，clear 清空，allow <path> 预授权",
 		handler: (args, ctx) => {
-			if (!enabled) {
+			if (!envEnabled) {
 				ctx.ui.notify("边界检查已关闭（PI_SANDBOX=off 或非 macOS 平台）。", "info");
+				return;
+			}
+			if (getSandboxMode() === "dangerous") {
+				ctx.ui.notify(
+					"当前是 ☢ dangerous 模式：删除拦截整体关闭（任意权限）。shift+tab 回 ⏵ bypass 后边界与白名单重新生效。",
+					"warning",
+				);
 				return;
 			}
 			const boundary = boundaryFromEnv(ctx.cwd ?? process.cwd());

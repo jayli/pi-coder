@@ -716,6 +716,54 @@ function cleanExtractedPath(candidate: string | undefined): string | undefined {
 	return stripTrailingSlash(value);
 }
 
+/**
+ * 从一条**整体成功**（退出码 0）的命令输出里，找出被掩盖的越界删除目标。
+ *
+ * 为什么需要：pi 内置 bash 只在退出码非零时 throw，而升级弹框挂在 `catch` 上。
+ * 于是 `rm <越界> ; <任何成功的命令>` 这种形状里，内核照样 EPERM 拒了删除，
+ * 但整条命令退出码 0 —— `catch` 走不到，拒绝被静默吞掉（实测事故：
+ * `rm ~/.local/share/claude/versions/2.1.274 ; ls -la …`，没弹框也没提示）。
+ *
+ * 成功命令的输出不能只按字样判定 —— `grep "Operation not permitted" 日志`
+ * 是查沙箱问题的常用操作，它的命中行与真实拒绝**形状完全相同**（连 `rm:`
+ * 前缀都一样），按字样报就是误报。所以这里加两道过滤：
+ *
+ * 1. 只留**边界外且未被授权**的路径（`classifyOutsidePaths` 的 dangerous /
+ *    ordinary 两档）。边界内的删除本来就成功，不该出现在这里；已授权的路径
+ *    profile 里已放行，拦不住它的不是我们这层。`blocked`（永不删除档）也跳过：
+ *    那一档没有任何授权出口，而本函数的产出正是「去授权」这个动作。
+ * 2. 只留**磁盘上仍在**的路径。真实拒绝会把文件原样留下，所以「它还在」既是
+ *    误报过滤（grep 命中的日志行里那个路径通常不存在），也是提示本身的语义
+ *    前提 —— 说明文案要讲「文件仍在、可授权后删」，目标不存在时这句话是假的。
+ *
+ * 返回空数组 = 不需要追加任何说明。
+ */
+export function maskedDenialPaths(
+	output: string,
+	opts: {
+		readonly boundary: WriteBoundary;
+		readonly allowedRoots: readonly string[];
+		readonly sessionRoots: readonly string[];
+		readonly env: PathEnv;
+		/** 目标是否仍在磁盘上（注入以便纯单测）。 */
+		readonly exists: (path: string) => boolean;
+	},
+): string[] {
+	if (!looksLikeSandboxDenial(output)) return [];
+	const denied = extractDeniedPaths(output);
+	if (denied.length === 0) return [];
+
+	const classification = classifyOutsidePaths(denied, {
+		boundary: opts.boundary,
+		allowedRoots: opts.allowedRoots,
+		sessionRoots: opts.sessionRoots,
+		env: opts.env,
+	});
+
+	const authorizable = [...classification.dangerous.map((d) => d.path), ...classification.ordinary];
+	return authorizable.filter((p) => opts.exists(p));
+}
+
 /** `classifyOutsidePaths` 的结果：五档互斥，调用方据此决定弹不弹、弹哪种。 */
 export interface PathClassification {
 	/** 永不删除 → 直接拒，不弹框、无任何放行选项。带命中原因。 */

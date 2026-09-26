@@ -4,11 +4,38 @@
  * 不 import pi / pi-tui，所以 `node --test clients/pi/extensions/plan-mode/plan.test.ts`
  * 能直接跑到每个分支。
  *
- * ## 状态机（两态，与 Claude Code 对齐）
+ * ## 状态机（三态：dangerous / bypass / plan）
  *
- *   bypass ──shift+tab / enter_plan_mode──▶ plan ──exit_plan_mode + 用户批准──▶ 写文档子态 ──▶ bypass
- *     ▲                                     │                                        │
- *     └──────────── 用户打回 / shift+tab ────┘◀───────────── 打回（留在 plan）─────────┘
+ * shift+tab 走**固定循环** `dangerous → bypass → plan → dangerous`（`nextCyclePhase`）：
+ *
+ *   dangerous ──shift+tab──▶ bypass ──shift+tab / enter_plan_mode──▶ plan
+ *       ▲                                                            │
+ *       └────────────────────── shift+tab（固定循环）────────────────┘
+ *
+ * 三态的权限含义：
+ *
+ *   - **dangerous**：pi 原生的任意权限形态 —— 沙箱删除拦截整体关闭。只能由用户
+ *     shift+tab 切到（没有命令、没有模型路径能进来），所以 `cancelPlan` 落在这一态
+ *     是安全的：那是用户自己按出来的。
+ *   - **bypass**（默认）：沙箱删除拦截开启。启动、`/resume`、认不出的历史值都收敛到这里。
+ *   - **plan**：只读探索。这一态不靠沙箱 —— 它自己的两道闸（工具收拢 + bash 写拦截）
+ *     已经禁掉一切写入与删除，比沙箱的「只拦删除」更严。
+ *
+ * plan 有**三条出口**，落点不同（这是本状态机唯一需要记住来路的地方）：
+ *
+ *   plan ──exit_plan_mode + 用户批准──▶ 写文档子态 ──▶ returnPhase（从哪来回哪去）
+ *     │                                     │
+ *     └──── 用户打回（留在 plan）◀───────────┘
+ *     └──── shift+tab ──▶ dangerous（固定循环的下一态，不看 returnPhase）
+ *     └──── /plan ─────▶ bypass（安全默认：一条命令不该把用户送进沙箱关闭的态）
+ *
+ * `returnPhase` 由 `enterPlan` 记下（进 plan 之前的那一态，只会是 dangerous 或 bypass），
+ * 只有「写完计划文档、进入实施阶段」这条路径用它 —— 用户批准了方案，实施就该在他原本
+ * 选定的权限姿态下进行，而不是被 plan mode 顺手改掉。
+ *
+ * 注意固定循环是 dangerous → bypass → plan → dangerous，所以 **shift+tab 从 dangerous
+ * 到不了 plan**（中间隔着 bypass）；带着 dangerous 来路进 plan 的是模型路径
+ * （`enter_plan_mode`）与 `--plan`。
  *
  * **没有 execute 态**：批准之后写权限恢复、状态直接回 bypass，「按计划文档实施」是一次性
  * 交给模型的指令（工具结果里），不是扩展持有的一个阶段。进度也交还给模型 —— 它认为该建
@@ -70,7 +97,26 @@ export function planModeToolSet(activeTools: readonly string[], allowWrite = fal
 // 状态机
 // =============================================================================
 
-export type PlanPhase = "bypass" | "plan";
+export type PlanPhase = "dangerous" | "bypass" | "plan";
+
+/** plan 的「实施阶段」要回到的模式：进 plan 之前的那一态（plan 自己当然不算）。 */
+export type ReturnPhase = "dangerous" | "bypass";
+
+/**
+ * shift+tab 的固定循环顺序（用户 2026-09-27 定）。
+ * 顺序写死在这里，测试直接钉这张表 —— 改顺序就是改契约。
+ */
+export const CYCLE_ORDER: readonly PlanPhase[] = ["dangerous", "bypass", "plan"];
+
+/**
+ * shift+tab 的下一态：dangerous → bypass → plan → dangerous。
+ * 认不出的值退回 `bypass`（安全默认，与 `normalizePhase` 同口径）。
+ */
+export function nextCyclePhase(phase: PlanPhase): PlanPhase {
+	const index = CYCLE_ORDER.indexOf(phase);
+	if (index === -1) return "bypass";
+	return CYCLE_ORDER[(index + 1) % CYCLE_ORDER.length]!;
+}
 
 /**
  * 用户在审批对话框里选的路线（两条都写文档，区别只在写完要不要接着实施）。
@@ -81,6 +127,12 @@ export type PlanDocMode = "execute-with-doc" | "doc-only";
 
 export interface PlanState {
 	phase: PlanPhase;
+	/**
+	 * plan 阶段：进入前的模式（dangerous 或 bypass）。
+	 * 只有「计划文档写完、进入实施阶段」这条出口用它（`completeDocWrite`）；
+	 * shift+tab 离开 plan 走固定循环回 dangerous，不看这个字段。
+	 */
+	returnPhase?: ReturnPhase;
 	/** plan 阶段：进入前的活动工具快照，退出时原样还原。 */
 	toolsBeforePlan?: string[];
 	/**
@@ -116,7 +168,7 @@ export function initialPlanState(): PlanState {
 }
 
 /**
- * 进 plan 模式。已在 plan 里则原样返回（不覆盖工具快照）。
+ * 进 plan 模式。已在 plan 里则原样返回（不覆盖工具快照，也不覆盖 returnPhase）。
  * 文档相关的字段一并清掉：上一次计划留下的 docMode / docWriting / pendingDocPath /
  * pending 对新计划没有意义（docWriting 若残留，新一轮会直接注入写文档指令）。
  */
@@ -124,6 +176,8 @@ export function enterPlan(state: PlanState, activeTools: readonly string[]): Pla
 	if (state.phase === "plan") return state;
 	return {
 		phase: "plan",
+		// 记下来路：写完计划文档进入实施阶段时要回到这里（dangerous 进的就回 dangerous）。
+		returnPhase: state.phase === "dangerous" ? "dangerous" : "bypass",
 		toolsBeforePlan: [...activeTools],
 		pending: undefined,
 		docMode: undefined,
@@ -133,10 +187,11 @@ export function enterPlan(state: PlanState, activeTools: readonly string[]): Pla
 	};
 }
 
-/** 退出 plan 模式回到 bypass，工具快照随之清空（还原动作由调用方执行）。 */
-export function cancelPlan(state: PlanState): PlanState {
+/** 清空一切 plan 相关字段，只留指定的 phase（三条出口共用同一口径）。 */
+function cleared(phase: PlanPhase): PlanState {
 	return {
-		phase: "bypass",
+		phase,
+		returnPhase: undefined,
 		toolsBeforePlan: undefined,
 		pending: undefined,
 		docMode: undefined,
@@ -144,6 +199,42 @@ export function cancelPlan(state: PlanState): PlanState {
 		pendingDocPath: undefined,
 		planSummary: undefined,
 	};
+}
+
+/**
+ * 离开 plan 到指定的非-plan 模式，清空一切 plan 字段。
+ * 三条出口共用：`cancelPlan`（shift+tab，固定循环去 dangerous）与 `/plan`
+ * （回到 returnPhase，从哪来回哪去）。
+ */
+export function exitPlanTo(state: PlanState, phase: ReturnPhase): PlanState {
+	void state;
+	return cleared(phase);
+}
+
+/**
+ * shift+tab / 固定循环离开 plan：落到 **dangerous**（循环的下一态），
+ * 工具快照随之清空（还原动作由调用方执行）。
+ *
+ * 刻意不看 `returnPhase`：shift+tab 是「按循环走」，不是「原路返回」—— 用户按一次
+ * 就该看到下一个模式，否则从 bypass 进的 plan 按 shift+tab 会回到 bypass，看起来像
+ * 没切动。想回 bypass 再按一次即可（dangerous → bypass）。
+ *
+ * 落在 dangerous 是安全的：dangerous 只能由用户 shift+tab 切到（没有命令、没有模型
+ * 路径能进来），所以这里到达它必然是用户自己按出来的。
+ */
+export function cancelPlan(state: PlanState): PlanState {
+	void state;
+	return cleared("dangerous");
+}
+
+/**
+ * dangerous → bypass：重新打开沙箱删除拦截。
+ * 这一态没有任何扩展持有的状态（不收工具、不记快照），所以只是换个 phase。
+ * 不在 dangerous 里则原样返回（幂等）。
+ */
+export function exitDangerous(state: PlanState): PlanState {
+	if (state.phase !== "dangerous") return state;
+	return { ...state, phase: "bypass" };
 }
 
 /** 模型通过 exit_plan_mode 提交计划全文，等用户审批。 */
@@ -179,16 +270,20 @@ export function enterDocWriting(state: PlanState, docMode: PlanDocMode, docPath:
 }
 
 export interface DocWriteOutcome {
-	/** 收尾后的状态：phase 回到 bypass，文档字段清空。 */
+	/** 收尾后的状态：phase 回到 returnPhase，文档字段清空。 */
 	state: PlanState;
 	/** 用户选的路线，收尾指令据此分流。 */
 	docMode: PlanDocMode;
 	/** 计划文档的路径（收尾指令里要报给用户与模型）。 */
 	docPath: string;
+	/** 收尾落在哪个模式（= state.phase，单独给出来是为了让调用方不必再判一次）。 */
+	returnPhase: ReturnPhase;
 }
 
 /**
- * 写文档子态收尾：计划文档已经落盘（由调用方验过），状态回 bypass。
+ * 写文档子态收尾：计划文档已经落盘（由调用方验过），状态回 **returnPhase** ——
+ * 从哪个模式进的 plan，实施阶段就在哪个模式下进行（用户 2026-09-27 定）。
+ * 没有记录时退回 `bypass`（安全默认：宁可多一层删除拦截）。
  *
  * 不在子态里（docWriting 为假）返回 undefined —— 那不是收尾。
  *
@@ -199,10 +294,12 @@ export function completeDocWrite(state: PlanState): DocWriteOutcome | undefined 
 	if (state.phase !== "plan" || !state.docWriting) return undefined;
 	const docPath = state.pendingDocPath;
 	if (typeof docPath !== "string" || docPath === "") return undefined;
+	const returnPhase: ReturnPhase = state.returnPhase === "dangerous" ? "dangerous" : "bypass";
 	return {
-		state: cancelPlan(state),
+		state: cleared(returnPhase),
 		docMode: state.docMode ?? "execute-with-doc",
 		docPath,
+		returnPhase,
 	};
 }
 

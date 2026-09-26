@@ -370,13 +370,16 @@ import {
 	extractDeniedPaths,
 	isSandboxEnabled,
 	looksLikeSandboxDenial,
+	maskedDenialPaths,
 	memoryScopesFor,
 	sessionScopeFor,
 	wrapWithSandbox,
 	writableRoots,
 	type PathEnv,
+	type WriteBoundary,
 } from "./bash-command-collapse/sandbox.ts";
 import { getAllowlistStore, getSessionScopes, type AllowlistStore } from "./bash-command-collapse/allowlist.ts";
+import { getSandboxMode } from "./bash-command-collapse/sandbox-mode.ts";
 
 /**
  * 命令行**折叠态**保留的**视觉行**数（硬折行后一条超长单行命令也最多占这么多行）。
@@ -1504,9 +1507,15 @@ export default function (pi: ExtensionAPI) {
 
 	// ## 能力边界（seatbelt 沙箱）开关
 	//
-	// PI_SANDBOX=off 整体关闭；非 darwin 平台自动关闭（没有 sandbox-exec，
-	// 宁可没有这层保护也不要让命令因为找不到二进制而全部失败）。
-	// 注册时读一次：这是个启动期开关，运行中改 env 不该让同一条命令忽而沙箱忽而不沙箱。
+	// 两道独立的闸，取与：
+	//   1. `sandboxOn`（注册期读一次）：PI_SANDBOX=off 整体关闭；非 darwin 平台自动关闭
+	//      （没有 sandbox-exec，宁可没有这层保护也不要让命令因为找不到二进制而全部失败）。
+	//      注册时读一次是刻意的：这是个启动期开关，运行中改 env 不该让同一条命令忽而
+	//      沙箱忽而不沙箱。
+	//   2. `getSandboxMode() === "dangerous"`（**执行期**读）：plan-mode 的三态模式。
+	//      dangerous 是 pi 原生的任意权限形态，只能由用户 shift+tab 切到，所以它必须
+	//      在执行期判定 —— 注册期读一次就永远切不动了。plan-mode 没装时单例恒为默认的
+	//      bypass，这一道永远放行，行为与三态化之前完全一致。
 	const sandboxOn = isSandboxEnabled();
 	// 沙箱内用哪个 shell 跑原命令。跟 readShellOptions() 保持一致：用户配了 shellPath 就用它，
 	// 否则 /bin/bash。注意这是**沙箱内**的 shell，与 pi 自己 spawn 的外层 shell 无关。
@@ -1535,6 +1544,43 @@ export default function (pi: ExtensionAPI) {
 	const sessionScopes = getSessionScopes();
 	/** 取白名单 store。env 只在首次创建时用于加载过滤。 */
 	const allowlist = (): AllowlistStore => getAllowlistStore(allowlistPath, pathEnv);
+
+	/**
+	 * 给**整体成功**的命令结果补一行 `[沙箱]` 说明：`rm <越界> ; <成功命令>` 形状里
+	 * 删除被内核 EPERM 拒了但退出码 0，catch 分支（弹框）走不到，拒绝被静默吞掉。
+	 * 这里不弹框不重跑（用户 2026-09-26 定：只加提示）—— 命令本身仍算成功，
+	 * 只在结果末尾追加被拦路径与授权出口，让模型和用户都看得见。
+	 * 判定与误报过滤全在 `maskedDenialPaths`（见其文件内注释）。
+	 */
+	function annotateMaskedDenial<T extends { content?: Array<{ type: string; text?: string }> }>(
+		result: T,
+		boundary: WriteBoundary,
+	): T {
+		const text = (result.content ?? [])
+			.filter((c) => c.type === "text")
+			.map((c) => c.text ?? "")
+			.join("\n");
+		const masked = maskedDenialPaths(text, {
+			boundary,
+			allowedRoots: allowlist().roots(),
+			sessionRoots: sessionScopes.roots(),
+			env: pathEnv,
+			exists: (p) => {
+				try {
+					statSync(p);
+					return true;
+				} catch {
+					return false;
+				}
+			},
+		});
+		if (masked.length === 0) return result;
+		const note =
+			`\n\n[沙箱] 命令整体成功，但以下删除被沙箱拦下（文件仍在）：${masked.join("、")}。` +
+			`如需删除，用 /sandbox-boundary allow <目录> 授权后重试。` +
+			`可删边界：${writableRoots(boundary).join("、")}`;
+		return { ...result, content: [...(result.content ?? []), { type: "text", text: note }] };
+	}
 
 	// cwd 只是兜底：内置 execute 用的是 ctx.cwd（每次调用的当前 session cwd）。
 	const base: ToolDefinition<any, any, any> = createBashToolDefinition(process.cwd(), readShellOptions());
@@ -1644,7 +1690,9 @@ export default function (pi: ExtensionAPI) {
 			// 包裹只发生在这个局部 params 副本上：session 落盘的仍是模型原样发来的命令，
 			// 渲染器显示的也是原命令（不是那串 sandbox-exec 前缀）。
 			const command = typeof params?.command === "string" ? params.command : "";
-			if (!sandboxOn || command.trim() === "") {
+			// dangerous 模式（plan-mode 三态之一，只能 shift+tab 切到）：不包 seatbelt、
+			// 不弹框、不标注被拦路径 —— 命令按 pi 原生形态直接跑。
+			if (!sandboxOn || getSandboxMode() === "dangerous" || command.trim() === "") {
 				return base.execute(toolCallId, nextParams, signal, runOnUpdate, ctx);
 			}
 
@@ -1656,7 +1704,8 @@ export default function (pi: ExtensionAPI) {
 
 			let denialMessage: string | undefined;
 			try {
-				return await base.execute(toolCallId, { ...nextParams, command: wrapped }, signal, runOnUpdate, ctx);
+				const result = await base.execute(toolCallId, { ...nextParams, command: wrapped }, signal, runOnUpdate, ctx);
+				return annotateMaskedDenial(result, boundary);
 			} catch (err) {
 				// 内置 bash 在非零退出时 throw，输出正文就在 message 里 —— 那正是判定
 				// "是不是沙箱拦的" 的地方。只认 EPERM / Operation not permitted：
@@ -1716,7 +1765,8 @@ export default function (pi: ExtensionAPI) {
 				const retryRoots = [...allowlist().roots(), ...sessionScopes.roots()];
 				const retry = wrapWithSandbox(command, buildSeatbeltProfile(boundary, retryRoots), sandboxShellPath);
 				try {
-					return await base.execute(toolCallId, { ...nextParams, command: retry }, signal, runOnUpdate, ctx);
+					const result = await base.execute(toolCallId, { ...nextParams, command: retry }, signal, runOnUpdate, ctx);
+					return annotateMaskedDenial(result, boundary);
 				} catch (err) {
 					const message = err instanceof Error ? err.message : String(err);
 					if (looksLikeSandboxDenial(message)) {
@@ -1830,7 +1880,8 @@ export default function (pi: ExtensionAPI) {
 			const widenedRoots = [...allowlist().roots(), ...sessionScopes.roots(), ...onceRoots];
 			const widened = wrapWithSandbox(command, buildSeatbeltProfile(boundary, widenedRoots), sandboxShellPath);
 			try {
-				return await base.execute(toolCallId, { ...nextParams, command: widened }, signal, runOnUpdate, ctx);
+				const result = await base.execute(toolCallId, { ...nextParams, command: widened }, signal, runOnUpdate, ctx);
+				return annotateMaskedDenial(result, boundary);
 			} catch (err) {
 				const message = err instanceof Error ? err.message : String(err);
 				if (looksLikeSandboxDenial(message)) {

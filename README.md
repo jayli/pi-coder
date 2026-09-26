@@ -2,7 +2,7 @@
 
 # @bachi/pi-coder
 
-A complete [Pi](https://pi.dev) coding-agent environment packaged for npm: **29 extensions**, **3 themes**, and the global config files that make them work together.
+A complete [Pi](https://pi.dev) coding-agent environment packaged for npm: **30 extensions**, **3 themes**, and the global config files that make them work together.
 
 This is a working setup, not a collection of demos. Every extension is used daily, and each one documents the pi internals it depends on in its own file header — including the failure that motivated it and the things that look like they could be simplified but cannot be.
 
@@ -69,7 +69,8 @@ Without them two extensions degrade instead of failing: `recap` cannot tell whet
 | [`below-editor-after-statusline.ts`](extensions/below-editor-after-statusline.ts) | Moves `belowEditor` widgets underneath the statusline. |
 | [`folder-history.ts`](extensions/folder-history.ts) | Persists command history per working directory and injects it into the editor's native ↑/↓. |
 | [`theme-command.ts`](extensions/theme-command.ts) | `/theme` with live preview: arrow keys preview, Enter persists, Esc cancels. |
-| [`plan-mode/`](extensions/plan-mode/) | Claude Code style plan mode. **Two phases** (`bypass` → `plan`): `shift+tab` or `/plan` to enter, `edit`/`write` dropped and write-shaped `bash` blocked while planning. The model's own `enter_plan_mode` carries all the routing criteria in its tool description and asks for **consent first** — a two-option dialog where `直接实施` (or Esc) skips planning. `exit_plan_mode` submits the plan for approval — full markdown, a `slug` that names the document and an optional summary — and the three-way dialog either writes `.pi/plans/<date>-<slug>.md` and implements it, writes the document only, or rejects. There is no execute phase and no progress table of its own; the model builds a task list itself if one is warranted. |
+| [`plan-mode/`](extensions/plan-mode/) | Claude Code style plan mode plus a **three-state permission mode** (`dangerous` / `bypass` / `plan`). `shift+tab` walks the fixed cycle `dangerous → bypass → plan → dangerous`; `/plan` only ever toggles `plan` (never lands on `dangerous`), `--plan` starts in it. `dangerous` switches the seatbelt delete boundary **off** at runtime, `bypass` (the default) keeps it on, `plan` is read-only exploration with `edit`/`write` dropped and write-shaped `bash` blocked. The model's own `enter_plan_mode` carries all the routing criteria in its tool description, asks for **consent first** — a two-option dialog where `直接实施` (or Esc) skips planning — and is skipped entirely when the `brainstorming` skill was already loaded this run. `exit_plan_mode` submits the plan for approval — full markdown, a `slug` that names the document and an optional summary — and the three-way dialog either writes `.pi/plans/<date>-<slug>.md` and implements it, writes the document only, or rejects. There is no execute phase and no progress table of its own; the model builds a task list itself if one is warranted. |
+| [`memory/`](extensions/memory/) | Claude Code style auto-memory: `memory_write` / `memory_read` / `memory_forget` / `memory_search` plus `/memory` (status, open folder, show index, per-project toggle). One file per memory under `~/.pi/agent/memory/<project-slug>/` with CC-compatible frontmatter, and a `MEMORY.md` index the extension **derives mechanically** after every write — the model never hand-maintains it, so "wrote a memory but never updated the index" cannot happen. Injected through `systemPromptOptions.sections.memory` (discipline text + index), which survives compaction. `PI_MEMORY=off` disables it. |
 | [`core-rules/`](extensions/core-rules/) | Re-pushes the distilled global rules (`~/.pi/agent/AGENTS.core.md`, shipped as [`config/AGENTS.core.md`](config/AGENTS.core.md)) to the **end** of the context at session start, after a compaction and whenever the content changed — the full `AGENTS.md` sits at the front of the system prompt, where its recency decays. Nothing is injected when nothing changed. |
 | [`verify-loop/`](extensions/verify-loop/) | Verification discipline as code, mirroring two Claude Code mechanisms on pi's `agent_before_settle` boundary. **The gate**: when a turn settles after file changes with no bash command run after them, it injects a visible message and forces one more turn (cap 2, counted from the projection, not memory). **`/goal`**: a completion condition evaluated after every turn by one tool-less model call (`met` / `not_met` / `impossible`, fail-open), with no-progress detection, an 8-continuation cap and resume support. `PI_VERIFY_LOOP=off\|notify\|block` switches the gate. |
 | [`sandbox-boundary/`](extensions/sandbox-boundary/) | The non-shell half of the delete boundary: `bash` runs inside a seatbelt profile, but `write` / `edit` are direct `fs` calls, so `apply_patch`'s `*** Delete File:` lines are checked on the `tool_call` hook instead. Shares one whitelist and one persistent allowlist with the bash side. |
@@ -86,7 +87,7 @@ All three are laid out side by side in the [palette reference](https://raw.githa
 
 ### Commands
 
-`/ask` `/bash-preview` `/bash-timeout` `/clear` `/destructive-guard` `/exit` `/goal` `/init` `/mcp` `/plan` `/plan-status` `/recap` `/rewind` `/sandbox-boundary` `/tasks` `/theme`
+`/ask` `/bash-preview` `/bash-timeout` `/clear` `/destructive-guard` `/exit` `/goal` `/init` `/mcp` `/memory` `/plan` `/plan-status` `/recap` `/rewind` `/sandbox-boundary` `/tasks` `/theme`
 
 Esc Esc opens `/rewind` (requires `doubleEscapeAction: "none"`, which the shipped config sets).
 
@@ -102,6 +103,7 @@ Every switch is an environment variable, so it can be scoped per project or set 
 | `PI_DESTRUCTIVE_GUARD` | `on` | `block` rejects the confirm tier too, `notify` only reports what it would have caught, `off` disables the gate. |
 | `PI_FENCELESS_CODE=off` | on | Keep Markdown code fences. |
 | `PI_LOGO=off` | on | Do not install the startup header. |
+| `PI_MEMORY=off` | on | Disable auto-memory entirely; `PI_MEMORY_DIR` moves the memory root (used for test isolation). |
 | `PI_PLAN_MODE=off` | on | Disable plan mode entirely (`PI_PLAN_MODE_AUTO=off` only disables the model's `enter_plan_mode` tool, `PI_PLAN_MODE_CONSENT=off` only its consent dialog). |
 | `PI_READ_COLLAPSE=off` | on | Keep pi's built-in `read` title row. |
 | `PI_SANDBOX=off` | on | Disable the delete boundary (both the bash seatbelt profile and the `apply_patch` gate); also off automatically off macOS. `PI_SANDBOX_EXTRA_WRITE` adds delete roots, `PI_SANDBOX_ALLOWLIST` moves the persistent allowlist file. |
@@ -144,7 +146,7 @@ cp "$PKG/themes/"*.json             ~/.pi/agent/themes/            # optional: a
 | --- | --- |
 | [docs/installation.md](docs/installation.md) | Install, verify, upgrade, uninstall, and the local-checkout workflow. |
 | [docs/configuration.md](docs/configuration.md) | Every shipped config file, what was removed from the snapshot, and why. |
-| [docs/extensions.md](docs/extensions.md) | Reference for all 29 extensions: commands, switches, caveats, storage. |
+| [docs/extensions.md](docs/extensions.md) | Reference for all 30 extensions: commands, switches, caveats, storage. |
 | [docs/themes.md](docs/themes.md) | Theme files, the custom tokens, and the rules that make them load. |
 | [Palette reference](https://raw.githack.com/jayli/pi-coder/main/assets/pi-coder-palettes.html) | **Chinese.** Every variable and slot assignment for the three themes, with a terminal preview that switches between them. |
 | [docs/development.md](docs/development.md) | Running the 1222 unit tests, verifying against a real pi, publishing. |

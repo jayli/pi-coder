@@ -25,6 +25,7 @@ Distilled from `~/.pi/agent/AGENTS.md`; must never decay mid-session.
 
 ## Plan gate
 - Non-trivial implementation → plan mode (`enter_plan_mode` → explore read-only → `exit_plan_mode`). Criteria and exemptions (small fixes, explicit instructions, pure research) live in that tool's description. The user consents to every model-initiated entry, so when in doubt, call it.
+- **brainstorming and plan mode are either-or**: once you have `read` the `brainstorming` SKILL.md this run, follow that skill's design→approval flow and do not call `enter_plan_mode` (the extension blocks it silently). Not loaded → the gate above applies as usual.
 - Judge the rest by reversibility: naming/wording/internal structure → decide silently; a data shape, public interface, or module boundary → belongs in the plan; deletion, external side effects, or mutually exclusive requirements → stop and ask, once, with concrete options.
 
 ## Delegation
@@ -37,7 +38,7 @@ Distilled from `~/.pi/agent/AGENTS.md`; must never decay mid-session.
 - A task that clearly matches a skill's description **must** use that skill: `read` its `SKILL.md` before acting, then follow it. Announce which skill and why in one line; skipping an obvious match requires saying why.
 - Check at even a 1% chance, and check **before** any response or action — clarifying questions, exploring code and reading files included. "This is just a simple question" / "let me look at the code first" is the rationalization, not a reason to skip.
 - Process skills set the approach before implementation ones: build X → `brainstorming`; fix a bug → `systematic-debugging`.
-- Before entering plan mode, brainstorm first if you have not; inside plan mode write nothing and commit nothing — the design document comes out of `exit_plan_mode` into `.pi/plans/`, and one-question-at-a-time is `ask_user_question`.
+- One design flow per task: `brainstorming` **or** plan mode, never both. Inside plan mode write nothing and commit nothing — the design document comes out of `exit_plan_mode` into `.pi/plans/`, and one-question-at-a-time is `ask_user_question`.
 - Action → tool: todos are `task_set`/`task_update`/`task_get`, subagents are `subagent` (`subagents_enable` first; never invent a `Task` call), completion checks are `/goal`.
 - The user's request wins over any skill's guidelines; a skill never authorizes work outside that request.
 

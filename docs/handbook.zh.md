@@ -57,6 +57,7 @@ cp -R clients/pi/extensions/plan-mode          ~/.pi/agent/extensions/   # Claud
 cp -R clients/pi/extensions/sandbox-boundary   ~/.pi/agent/extensions/   # 删除边界闸（apply_patch 不走 shell，补 bash 沙箱管不到的那部分；write/edit 不拦；与 bash 沙箱共用三档授权与持久白名单）
 cp -R clients/pi/extensions/core-rules         ~/.pi/agent/extensions/   # 全局 AGENTS.md 蒸馏版的中途重注入（纯判定在 decision.ts）
 cp -R clients/pi/extensions/verify-loop        ~/.pi/agent/extensions/   # 验证闭环 + /goal 评估器（CC Stop hook / goal 同构；import ../recap/subagents.ts，依赖上一行已装 recap/）
+cp -R clients/pi/extensions/memory             ~/.pi/agent/extensions/   # 类 CC auto-memory（索引+正文，索引机械派生；见下文）
 # superpowers 无扩展：技能发现是 pi 原生扫 ~/.agents/skills，触发规则已并入全局 AGENTS.md 的 ## Skills 一节（Codex 形态：原生发现 + 提示词强化，2026-09-26 删除 skill-router 后的形态）
 # destructive-guard 已于 2026-09-24 从 live 退役（被 seatbelt 能力边界取代），不再安装
 mkdir -p ~/.pi/agent/themes && cp clients/pi/themes/*.json ~/.pi/agent/themes/
@@ -570,45 +571,95 @@ HTTP+SSE，否则 streamable HTTP）走远程；字符串值支持 `${VAR}` 与 
 | `ask-user-question/` | Claude Code `AskUserQuestion` 式的结构化提问工具（子会话里按 `ctx.hasUI` 自动摘掉） |
 | `mcp/` | MCP 服务器 → pi 工具（`mcp__<server>__<tool>`）；自带 stdio / streamable HTTP / 旧版 SSE 三种传输与 `/mcp` 命令。配置、约束与验证方式见上一节 |
 | `simple-task/` | 轻量任务清单（`task_set` / `task_update` / `task_get`）。计划批准后模型认为该建清单就自己 `task_set`，扩展不再代它建（2026-09-24 起与 plan-mode 无耦合）。三个工具都带 `renderShell: "self"`（用户 2026-09-26 定，与 bash / read 块同一套壳）：整块**没有底色**（pending / 成功 / 失败三色底都不画）、**没有上下边界空行**（默认壳 `Box(1, 1)` 的上下两条）；标题与结果都从**列 1** 起 —— 每行前置一个空格、不顶格（补回默认壳原本的那一列左边距，由 Text 的 `paddingX = 1` 画）；块上方只剩 pi self 模式固定的那一行留白。形状断言见 `render.test.ts`（3 个端到端用例，含「其他工具底色照旧」的对照） |
-| `plan-mode/` | Claude Code 式 plan mode（bypass → plan 两态）。`shift+tab` 切模式、`/plan`、`--plan` 启动即进；模型可自行调 `enter_plan_mode` 进入、用 `exit_plan_mode` 提交**一份完整方案文本**等用户批准；批准后模型把方案落成计划文档（`.pi/plans/`），写完自动收尾。详见下文 |
+| `plan-mode/` | Claude Code 式 plan mode + **三态权限模式**（`dangerous` / `bypass` / `plan`）。`shift+tab` 走固定循环 `dangerous → bypass → plan → dangerous`；`/plan` 只切 plan（永远不落到 dangerous）、`--plan` 启动即进；模型可自行调 `enter_plan_mode` 进入、用 `exit_plan_mode` 提交**一份完整方案文本**等用户批准；批准后模型把方案落成计划文档（`.pi/plans/`），写完自动收尾并回到**进入前的模式**。dangerous 关掉沙箱删除拦截，bypass 开启。详见下文 |
 | `core-rules/` | 对抗全局 AGENTS.md 的注意力衰退：把蒸馏版核心铁律（`~/.pi/agent/AGENTS.core.md`，约 6KB，仓库镜像 `clients/pi/AGENTS.core.md`）在会话开始 / 压缩后 / 内容变更三个时机持久化注入到上下文末尾（用户消息之后），照 Codex 的 world-state diff 语义（不变不发、变了带替换声明）。判定在 `decision.ts`；`PI_CORE_RULES=off` 关闭 |
 | `verify-loop/` | **验证闭环 + 评估器**（补 issue #12 权重最高的一格空白），对齐 CC 的两个原生件，落在 pi 官方的 `agent_before_settle` 边界上（"the final actionable boundary: it can append entries and request one continuation"）。**(1) 闸**（CC 的 `type:"command"` Stop hook）：每次 settle（仅 `outcome==="completed"`，abort / error 不触发 —— CC 的 Stop / StopFailure 分流）检查本次 run（最后一条 user 消息之后）：有文件改动（`edit`/`write`/`apply_patch`/`multiedit`，非文档路径）但**改动之后没跑过任何 bash 命令** → 追加一条 `display:true` 的注入消息（用户可见 = CC 的 "Stop hook feedback"；同时以 user 角色进模型上下文）并 `continue:true` 强制续跑一轮。**拦截次数不用内存计数器，而是数投影里已注入的同类消息** —— `agent_start` 在每次边界续跑时都会再 fire（`runAgentLoopContinue` 里 emit），挂在它上面的复位会在续跑链里把计数清零、上限失效；从投影数则天然分支正确、resume 后仍正确、无可变状态，且注入消息是 `role:"custom"`（不是 user），不会切断 run 窗口 —— 整条续跑链共用一个窗口，正是 CC「同一 turn 内连续 block」的语义。上限默认 2（`PI_VERIFY_LOOP_CAP`；CC 的通用 8 是给任意用户 hook 的）。**verification 口径 = 任何 bash 调用**：2026-09-25 第一次活体冒烟量到误报 —— 模型改完 `probe.js` 跑的是 `node --input-type=module -e "import('./probe.js')…"`，真证据但不匹配任何测试形状，被闸第二次拦下；词法判不了「这条命令是不是*相关的*测试」（那是评估器的活），所以闸只问「改动之后有没有观察过实际状态」。`PI_VERIFY_PATTERN=strict` 恢复只认测试/构建/lint 形状，或给自定义正则。**(2) `/goal`**（CC 的会话级 prompt 评估器，手动设定、之后每轮自动评估）：`/goal <条件>`（≤4000 字符，CC 同限）存 `appendEntry` 并立即以条件为指令起一轮；此后每次 settle 先问子代理在不在跑（在 → 本轮跳过，CC 的 "background work defers evaluation"，复用 `recap/subagents.ts` 的 RPC），再发一次**不带工具**的独立模型调用（条件 + `serializeConversation(convertToLlm(投影))` 截尾，默认 120k 字符），解析三裁决 JSON（`met`/`not_met`/`impossible`，裸 / 包 code fence 都认）：未达成 → 理由注入续跑；达成 / 不可能 → 记录条目并清除。**fail-open**：评估失败 / 超时 / 解析不出 → 放行（CC 的 hook 失败同样不拦回合）。无进展检测（连续 2 轮续跑零工具调用 → 停循环、goal 保留，CC："stops the loop … with the goal still set"）与 8 次续跑上限（`PI_GOAL_CAP`，CC 的数字）同样从投影数。resume 恢复活跃 goal 但重置轮数计时（CC："carries the condition over but resets the turn count"）；已达成 / 已不可能的不恢复。评估模型 `PI_VERIFY_EVALUATOR_MODEL=provider/modelId`，缺省 `litellm-any/qwen3.8-flash`，再退回当前会话模型；已知成本 —— 这些路由的 thinking 是 `gateway/config.yaml` 钉死的，评估调用也付 thinking（实测 3-20s）。**与 CC 的唯一有意偏离**：CC 默认不装任何 hook（用户在 settings.json 配置）；这里没有 hooks 配置层，所以闸**默认 block 开启**、触发条件收得极窄，`PI_VERIFY_LOOP=off|notify|block` 一键切换。2026-09-25 活体验证（隔离 agent dir + SDK 驱动）：闸拦一次后模型补验证放行；`/goal VALUE=42` 驱动模型真改文件到 `met`（证据是命令输出）；只口头声称的一轮被判 `not_met` → 注入理由 → 真干活 → `met`；不可满足条件判 `impossible` 并清除。量到的一个 pi 限制（非本扩展 bug）：会触发回合的扩展命令（`/goal`，以及既有的 `/init`）在 `-p` print 模式下不生效 —— `session.prompt()` 在命令的 `sendUserMessage` 回合开始前就返回。91 个 `node --test` 用例：`gate.test.ts`（24）/ `goal.test.ts`（23）/ `evaluator.test.ts`（23）纯逻辑 + `index.test.ts`（21）走 pi 真加载器（假子代理总线 + 假 model registry） |
-| `bash-command-collapse/sandbox.ts` + `allowlist.ts` | bash 命令的 seatbelt 删除能力边界（`bash-command-collapse.ts` 的 `execute` 里包裹）与**三档授权**（用户 2026-09-24 定）：**永不删除**（身份/凭据/手写配置：`~/.zshrc`、`~/.gitconfig`、`~/.env`、`~/.bash_history`、`~/.envrc`、`~/.tool-versions` 等 home 一级文件（49 项），以及 `~/.ssh`、`~/.gnupg`、`~/.aws`、`~/.kube`、`~/.docker`、`~/.azure`、`~/.gcloud`、`~/.terraform.d`、`~/.helm`、`~/.minikube`、`~/.password-store` 等子树（21 项）；**名字里可以带斜杠** —— `~/.config/gh`（`hosts.yml` 存 GitHub token）与 `~/.config/gcloud`（凭据库）是两条嵌套条目，2026-09-25 补，专门把「`~/.config` 整棵移出本档」之后落在两级的真凭据捞回来；代价是 `isSafeAllowlistRoot` / `isSafeSessionRoot` 的**祖先闸改为只查危险档**（用户 2026-09-25 选），否则 `~/.config` 会因「是 `~/.config/gh` 的祖先」而永远记不住 —— 安全上无损失，内核 deny 行在 allow 行之后无条件收回，`classifyOutsidePaths` 也先判 blocked 再判白名单，记住 `~/.config` 交不出 `~/.config/gh`；`~/.config`、`~/.pi`、`~/.claude`、`~/.codex` 于 2026-09-25 移出本档 —— 它们是工具状态目录，含 lock/缓存/会话日志，整棵子树不给删连 pi 自己清理 stale lock 都会被内核拦死，现走普通档弹框可记住）——**不弹框、无任何放行选项**，白名单 / 会话豁免 / `PI_SANDBOX_EXTRA_WRITE` 都压不过（profile 在 allow 行之后另起一行 deny 收回，内核级强制）；**危险目录**（系统根 / bin / 应用安装目录 / `~/Library` / 含 `.git`）每次删除必问、只支持会话级豁免（选项 `Deny` / `Allow once` / `Allow for this session`）；**普通目录**问一次（`Deny` / `Allow for this session（并记住该目录）` / `Allow once`），选中间那项后把目录范围写进持久白名单 `~/.pi/agent/sandbox-allowlist.json`（`PI_SANDBOX_ALLOWLIST` 可改位置），以后含 headless 都不再问。记住一个目录 = 把它并进 seatbelt profile 的 `file-write-unlink` 放行名单，删除在沙箱内直接成功。可删边界 = 项目目录 + 临时目录（`/tmp`、`/private/tmp`、`/var/folders`、`/private/var/folders`、`/var/tmp`、`/private/var/tmp`）+ **可再生缓存**（`~/.cache`、`~/.npm`、`~/.gradle/caches`、`~/.m2/repository`、`~/.cargo/registry`、`~/.bun/install/cache`、`~/.node-gyp`、`~/.Trash`、`~/Library/Caches`、`~/Library/Developer/Xcode/DerivedData` —— 删了能干净重建，静默放行；`~/Library/pnpm/store`、`~/.deno`、`~/.nvm` 含不可重建内容，**不在**名单）+ `PI_SANDBOX_EXTRA_WRITE`；`/var/tmp` 是 macOS 自带 bash 3.2 的 heredoc 临时目录（编译期写死、`TMPDIR` 改不动），不放行则沙箱内任何 heredoc 都 100% 失败。从失败输出里抽被拦路径用的是**排除法**（保留「行内绝对路径 token」兜底扫描，只排除含 `here document` 的行与行首 prog 是 shell / `sandbox-exec` 的行）而不是程序名白名单 —— 白名单会静默丢掉 python3 `PermissionError`、`find:`、`ln:` 这三类真实删除形状。**抽不出路径就不弹框**，原样报错并追加一行 `[沙箱]` 提示（出口是 `/sandbox-boundary allow <目录>`）；旧的「按整条命令会话级问一次、同意后沙箱外裸跑」降级路径已删。`/sandbox-boundary` 查看边界与白名单，`forget <path>` / `clear` / `allow <path>` 管理条目（`allow` 对永不删除路径直接拒）。完整口径与名单见仓库根 `CLAUDE.md` 的 `### Capability boundary` 一节 |
+| `memory/` | **类 CC auto-memory**（补 issue #13 权重最高的一格空白：记忆 / 跨会话学习）。存储照 CC：`~/.pi/agent/memory/<git根slug>/` 下 `MEMORY.md` 索引 + 一记忆一文件（CC 兼容 frontmatter：`name`/`description`/`metadata.type` 四选一 user/feedback/project/reference /`modified`）。**方案 C：索引由扩展机械派生，模型不手写** —— `memory_write` 写完正文后扫全部正文 frontmatter 自动重建索引（内容一致不落盘，幂等），消除 CC/Qoder 都在搏斗的「忘更新索引 → 写进去却永远召回不到」故障源；手改正文文件后下次 `before_agent_start` 自动纳入索引。注入走 `before_agent_start` 改 `systemPromptOptions.sections.memory`（纪律文本 + 索引，空库不注入）—— section 进 system message、随 transcript 重放、压缩后存活；索引只在写入时变化，字节天然稳定，**不需要 pi-memory 那套 KV 缓存快照机制**。纪律文本 = CC 三道闸（applicable/durable/legible）+ 时态判据（只存过去时观察，不存现在时仓库状态断言 —— 过去时永不过期，现在时必然腐烂）+ 读取端核实义务（记忆是快照不是地面真相，点名文件/函数/flag 的记忆行动前先核实，AGENTS.md `## Verification` 同款）+ 不存密钥。四个工具：`memory_write`（写正文+重建索引，同名=更新）、`memory_read`（读正文/列全部）、`memory_forget`（删除+索引更新）、`memory_search`（零依赖关键词检索，frontmatter 命中权重 3 / 正文 1）；全部文件读写包 `withFileMutationQueue`（工具调用并行执行）。`/memory` 命令（对标 CC 三项）：状态行 + 打开目录 + 显示索引 + 开关（per-project `.disabled` 标记）。`PI_MEMORY=off` 整体关闭，`PI_MEMORY_DIR` 覆盖记忆根（测试隔离）。**v1 刻意不做**：后台 dream 固化（留挂载点）、USER/PROJECT 双 scope（仅 per-project）、qmd 语义搜索、写入机械闸（时态/密钥靠纪律文本）。26 个 `node --test` 用例：`store.test.ts`（10）/ `context.test.ts`（4）纯逻辑 + `index.test.ts`（12）走 pi 真加载器（含 issue #13 那个 promptSnippet 被剥 bug 的回归断言）。设计文档 `docs/superpowers/specs/2026-09-26-pi-memory-design.md` |
+| `bash-command-collapse/sandbox.ts` + `allowlist.ts` | bash 命令的 seatbelt 删除能力边界（`bash-command-collapse.ts` 的 `execute` 里包裹）与**三档授权**（用户 2026-09-24 定）：**永不删除**（身份/凭据/手写配置：`~/.zshrc`、`~/.gitconfig`、`~/.env`、`~/.bash_history`、`~/.envrc`、`~/.tool-versions` 等 home 一级文件（49 项），以及 `~/.ssh`、`~/.gnupg`、`~/.aws`、`~/.kube`、`~/.docker`、`~/.azure`、`~/.gcloud`、`~/.terraform.d`、`~/.helm`、`~/.minikube`、`~/.password-store` 等子树（21 项）；**名字里可以带斜杠** —— `~/.config/gh`（`hosts.yml` 存 GitHub token）与 `~/.config/gcloud`（凭据库）是两条嵌套条目，2026-09-25 补，专门把「`~/.config` 整棵移出本档」之后落在两级的真凭据捞回来；代价是 `isSafeAllowlistRoot` / `isSafeSessionRoot` 的**祖先闸改为只查危险档**（用户 2026-09-25 选），否则 `~/.config` 会因「是 `~/.config/gh` 的祖先」而永远记不住 —— 安全上无损失，内核 deny 行在 allow 行之后无条件收回，`classifyOutsidePaths` 也先判 blocked 再判白名单，记住 `~/.config` 交不出 `~/.config/gh`；`~/.config`、`~/.pi`、`~/.claude`、`~/.codex` 于 2026-09-25 移出本档 —— 它们是工具状态目录，含 lock/缓存/会话日志，整棵子树不给删连 pi 自己清理 stale lock 都会被内核拦死，现走普通档弹框可记住）——**不弹框、无任何放行选项**，白名单 / 会话豁免 / `PI_SANDBOX_EXTRA_WRITE` 都压不过（profile 在 allow 行之后另起一行 deny 收回，内核级强制）；**危险目录**（系统根 / bin / 应用安装目录 / `~/Library` / 含 `.git`）每次删除必问、只支持会话级豁免（选项 `Deny` / `Allow once` / `Allow for this session`）；**普通目录**问一次（`Deny` / `Allow for this session（并记住该目录）` / `Allow once`），选中间那项后把目录范围写进持久白名单 `~/.pi/agent/sandbox-allowlist.json`（`PI_SANDBOX_ALLOWLIST` 可改位置），以后含 headless 都不再问。记住一个目录 = 把它并进 seatbelt profile 的 `file-write-unlink` 放行名单，删除在沙箱内直接成功。可删边界 = 项目目录 + 临时目录（`/tmp`、`/private/tmp`、`/var/folders`、`/private/var/folders`、`/var/tmp`、`/private/var/tmp`）+ **可再生缓存**（`~/.cache`、`~/.npm`、`~/.gradle/caches`、`~/.m2/repository`、`~/.cargo/registry`、`~/.bun/install/cache`、`~/.node-gyp`、`~/.Trash`、`~/Library/Caches`、`~/Library/Developer/Xcode/DerivedData` —— 删了能干净重建，静默放行；`~/Library/pnpm/store`、`~/.deno`、`~/.nvm` 含不可重建内容，**不在**名单）+ `PI_SANDBOX_EXTRA_WRITE`；`/var/tmp` 是 macOS 自带 bash 3.2 的 heredoc 临时目录（编译期写死、`TMPDIR` 改不动），不放行则沙箱内任何 heredoc 都 100% 失败。从失败输出里抽被拦路径用的是**排除法**（保留「行内绝对路径 token」兜底扫描，只排除含 `here document` 的行与行首 prog 是 shell / `sandbox-exec` 的行）而不是程序名白名单 —— 白名单会静默丢掉 python3 `PermissionError`、`find:`、`ln:` 这三类真实删除形状。**抽不出路径就不弹框**，原样报错并追加一行 `[沙箱]` 提示（出口是 `/sandbox-boundary allow <目录>`）；旧的「按整条命令会话级问一次、同意后沙箱外裸跑」降级路径已删。`/sandbox-boundary` 查看边界与白名单，`forget <path>` / `clear` / `allow <path>` 管理条目（`allow` 对永不删除路径直接拒）。同目录的 `sandbox-mode.ts` 是 plan-mode 三态的运行期开关单例（dangerous 关掉整个拦截层，见下文 plan mode 一节）。完整口径与名单见仓库根 `CLAUDE.md` 的 `### Capability boundary` 一节 |
 | `sandbox-boundary/` | 同一道删除边界的非 shell 侧：`apply_patch` 的 `*** Delete File:` 行在 `tool_call` 钩子上拦截（write/edit 不拦），与 bash 侧共用同一套 `classifyOutsidePaths` 判定与同一个白名单单例，所以一边记住另一边立刻生效；命中白名单时静默放行但补一行 notify。永不删除路径整份 patch 一起拒（不给「批准其余部分」的机会）。与 bash 侧的区别：它在执行前就能拦、且已知全部目标路径，没有「命令重跑一次」的代价 |
 
 ### plan mode（`plan-mode/`）
 
-两态：`bypass` → `plan`（只读探索、模型出方案）。**没有 execute 态** —— 与 Claude Code
-对齐：批准后写权限恢复、状态直接回 bypass，「按计划文档实施」是一次性交给模型的指令，
-进度也交还给模型（它认为该建任务清单就自己 `task_set`，扩展不再镜像步骤、不再记进度）。
+**三态权限模式（用户 2026-09-27 定）**，`shift+tab` 走固定循环：
+
+```
+dangerous ──shift+tab──▶ bypass ──shift+tab──▶ plan ──shift+tab──▶ dangerous
+```
+
+| 模式 | 图标 / 颜色 | 权限含义 |
+| --- | --- | --- |
+| `dangerous` | `☢` / `error`（红） | pi 原生的任意权限形态 —— **沙箱删除拦截整体关闭** |
+| `bypass`（默认） | `⏵` / `success`（绿） | **沙箱删除拦截开启**（启动、`/resume`、认不出的历史值都收敛到这里） |
+| `plan` | `⏸` / `warning`（橙） | 只读探索 —— 工具收拢 + bash 写拦截，比沙箱的「只拦删除」更严 |
+
+**dangerous 只能由 `shift+tab` 切到**：没有 `/dangerous` 命令，`/plan` 也永远不把你带进
+dangerous（它只切 plan，离开 plan 时回 bypass），模型路径（`enter_plan_mode`）同样只能进 plan。
+所以「关掉保护」永远是用户自己按出来的决定，不会由任何自动路径到达。
+
+**plan 有三条出口，落点不同**（这是三态化里唯一需要记住来路的地方）：
+
+| 出口 | 落到哪 | 为什么 |
+| --- | --- | --- |
+| `shift+tab` | **dangerous**（固定循环的下一态） | 按循环走，不是原路返回 —— 否则从 bypass 进的 plan 按一次看起来像没切动 |
+| `/plan` | **bypass**（安全默认） | 一条命令不该把用户悄悄送进沙箱关闭的态 |
+| 计划文档写完、进入实施阶段 | **returnPhase**（从哪来回哪去，可能是 dangerous） | 用户批准了方案，实施就该在他原本选定的权限姿态下进行 |
+
+`returnPhase` 由 `enterPlan` 记下（进 plan 之前的那一态），只有第三条出口用它。回到
+dangerous 时 notify 会明说「沙箱删除拦截已关闭」，不能让用户以为还在保护下。
+
+**沙箱开关怎么传过去。** plan-mode 与两层删除拦截（bash 的 seatbelt 包裹在
+`bash-command-collapse.ts`、`apply_patch` 的 `tool_call` 检查在 `sandbox-boundary/index.ts`）
+分属三个扩展文件，中间只有一个 `globalThis` 单例：`bash-command-collapse/sandbox-mode.ts`
+的 `getSandboxMode()` / `setSandboxMode()`（与 `allowlist.ts` 的 store 缓存同一套做法 ——
+pi 的加载器不保证给两个扩展同一个模块实例，挂 globalThis 则读到的必然是同一份状态）。
+两个沙箱消费方都在**执行期**读它，与注册期读的 env 总闸（`PI_SANDBOX` + 平台）取与：
+任何一道说关就关。plan-mode 没装、或被 `PI_PLAN_MODE=off` 关掉时单例永远是默认的
+`bypass`，拦截照旧生效（fail-safe）。
+
+**没有 execute 态** —— 与 Claude Code 对齐：批准后写权限恢复、状态直接回 returnPhase，
+「按计划文档实施」是一次性交给模型的指令，进度也交还给模型（它认为该建任务清单就自己
+`task_set`，扩展不再镜像步骤、不再记进度）。
 
 2026-09-24 之前是三态（bypass → plan → execute，批准即把步骤镜像进 simple-task 清单、
 按序号记 `[DONE:n]`、状态行报 `▶ n/N`）。那套「扩展持有进度」的机制整个删除：镜像契约
 （`simple-task/plan-mirror.ts`）、`[DONE:n]` 标记、步骤 widget、execute 态的每轮注入全部
 随之消失。起因是用户要求高度对齐 cc 的 plan mode：cc 的 `ExitPlanMode(plan)` 参数就是
-一份完整方案文本，批准后产出物是计划文档，任务清单由模型自决。
+一份完整方案文本，批准后产出物是计划文档，任务清单由模型自决。2026-09-27 重新变成三态，
+但第三个态是**权限模式**（dangerous）而不是进度态（execute）—— 两者毫无关系。
 
 计划状态存会话（`appendEntry("plan-mode")`，不进模型上下文）；计划文档写进工作区的
 `.pi/plans/`（被 `.gitignore` 排除 —— 计划是过程产物，不该进仓库）。
 
-四个入口：`shift+tab`、`/plan`、`--plan`（启动即进）、模型调 `enter_plan_mode`。
-`/plan-status` 看当前状态。`PI_PLAN_MODE=off` 整体关闭，`PI_PLAN_MODE_AUTO=off` 只关模型自动进入，
-`PI_PLAN_MODE_CONSENT=off` 只关下面这道同意弹框。
+四个入口：`shift+tab`（三态循环）、`/plan`（只切 plan）、`--plan`（启动即进）、模型调
+`enter_plan_mode`。`/plan-status` 看当前模式。`PI_PLAN_MODE=off` 整体关闭，
+`PI_PLAN_MODE_AUTO=off` 只关模型自动进入，`PI_PLAN_MODE_CONSENT=off` 只关下面这道同意弹框。
 
 **模型自动进入要过一道同意弹框（CC 同构）。** 模型调 `enter_plan_mode` 时不再直接进，而是先弹
 `select` 两选一：`进 plan mode（只读探索）`（默认选中，直接回车即接受模型的请求）/ `直接实施`。
 选后者或按 esc 都不进 plan，工具结果是「用户选择直接实施……不要再调用 `enter_plan_mode`」，模型
 当轮就照用户指令动手。三个刻意点：① esc 当作否决，与 CC 的 “must consent to entering plan mode”
 一致，也让「嫌烦想跳过」这条最常见路径只需一个键；② 弹框**只在模型路径**——`shift+tab` / `/plan` /
-`--plan` 走 `enter(ctx, "user")` 不经过它，那已经是用户自己的决定；③ 无 UI（`pi -p`）不弹框、直接进，
+`--plan` 走 `enterPlanMode(ctx, "user")` 不经过它，那已经是用户自己的决定；③ 无 UI（`pi -p`）不弹框、直接进，
 保持既有 headless 行为（那边没有人会被打扰）。这正是 CC 敢把判据写松的原因：它的 `EnterPlanMode`
 是 `shouldDefer: true`，误判的代价被弹框吸收成「用户按一次键」，而不是被迫走完「进 plan → 出方案 →
 审批 → 写文档」一整圈。
 
+**brainstorming 互斥闸（二选一，用户 2026-09-26 定）。** superpowers 的 `brainstorming` 技能自带
+「澄清 → 2-3 方案 → 批准 → 设计文档 → writing-plans 实施计划」全流程，与 plan mode 完全重叠。
+模型调 `enter_plan_mode` 时，execute 在同意弹框**之前**先扫会话分支（`getBranch()` 的原始条目里
+`type:"message"` 那层）：**本次 run**（最后一条 `role:"user"` 消息之后）内若有 assistant 的
+`toolCall` 块是 `read` 且路径含 `/brainstorming/`（片段匹配，兼容技能库搬家；判定在 `brainstorm.ts`，
+13 个纯用例），就**不进 plan、也不弹框**，直接回一段「二选一」说明（按技能流程走、别再调本工具、
+用户想进 plan 请自己 shift+tab / `/plan`）。只拦模型路径：用户手动进入不经过这道闸。判定异常一律
+fail-open（照常弹框）——误判成「没加载」只是回到旧行为，误判成「加载了」会静默剥夺 plan mode，
+代价不对称。已知边界（写进 `brainstorm.ts` 头注释）：用 bash `cat` 读 SKILL.md 不算加载（只认
+`read` 工具，与 verify-loop 的词法口径同级）；豁免仅本次 run，下一条新 prompt 不继承。
+
 **路由判据只在工具描述里（CC 同构）。** `enter_plan_mode` 的 `description` 承载全部判据：7 条正面条件
 （新功能 / 多种可行方案 / 改既有行为 / 架构取舍 / **>2-3 个文件** / 需求不清 / 用户偏好决定走向，最后
-一条明写「如果你正打算用 `ask_user_question` 问方案，就改用这个工具」）+ 4 条豁免（一两行小修 / 需求
-明确的单个函数 / **用户已给具体详细指令** / **纯调研探索审阅**）+ GOOD/BAD 示例。全局 `AGENTS.md` 的
+一条明写「如果你正打算用 `ask_user_question` 问方案，就改用这个工具」）+ 5 条豁免（一两行小修 / 需求
+明确的单个函数 / **用户已给具体详细指令** / **纯调研探索审阅** / **本次 run 已加载 brainstorming 技能**）
++ GOOD/BAD 示例。全局 `AGENTS.md` 的
 `## Uncertainty` 只留一条指针（判据与豁免在该工具的描述里），不再重复一份——CC 的系统提示词里同样
 一句 plan 规则都没有。判据放在工具描述里，模型在决定要不要调这个工具的那一刻正好读到它，也不会与
 `AGENTS.md` 漂移。
@@ -622,7 +673,7 @@ kebab-case** —— CJK 与标点一律折掉（纯中文退化成 `plan`），�
 
 | 选项 | 之后发生什么 |
 | --- | --- |
-| 写计划文档并实施 | 进写文档子态 → 模型 write 文档 → 自动收尾回 bypass，收尾指令是「按文档实施」 |
+| 写计划文档并实施 | 进写文档子态 → 模型 write 文档 → 自动收尾回 **returnPhase**（从哪来回哪去），收尾指令是「按文档实施」 |
 | 只写计划文档 | 同上，但收尾指令是「报告路径就停，不要动手」 |
 | 打回（或按 esc） | 留在 plan 态（只读），等用户反馈后重新提交 |
 
@@ -633,16 +684,17 @@ kebab-case** —— CJK 与标点一律折掉（纯中文退化成 `plan`），�
 并由 `tool_call` 钩子限死只能写计划文档那一个路径（`.pi/plans/YYYY-MM-DD-<slug>.md`，
 路径在用户选路线的那一刻算好并钉死 —— 撞名判定问的是文件系统，`/resume` 后重算可能得到
 不同的 `-2` 后缀）。每轮注入的上下文从只读探索换成写文档指令（带钉死的路径与计划全文）。
-模型用 write 把文档写成功的那一刻，`tool_result` 钩子自动收尾：状态回 bypass、工具表还原、
+模型用 write 把文档写成功的那一刻，`tool_result` 钩子自动收尾：状态回 returnPhase、工具表还原、
 收尾指令（实施 / 只报告路径）**替换**掉 write 的普通成功文本 —— 模型在同一轮里就能看到
 接下来该做什么，不需要再调任何工具。write 失败（isError）不收尾，模型自己会看到错误并重试。
 
 **模式指示的显示位：statusline 第二行的行首**（那个区也叫「扩展 status 区」）。
-两个态**都有文案**，所以「当前在哪个模式」永远有一个固定的显示位：
+三个态**都有文案**，所以「当前在哪个模式」永远有一个固定的显示位：
 
 | 态 | 显示 |
 | --- | --- |
-| bypass | `⏵ bypass`（**`toolDiffRemoved`**，即删除行前景色 —— 三套皮肤里都是红） |
+| dangerous | `☢ dangerous`（**`error`**，红 —— 沙箱已关，最醒目） |
+| bypass | `⏵ bypass`（**`success`**，绿 —— 2026-09-27 之前是红色 `toolDiffRemoved`，三态化后红色让给 dangerous） |
 | plan 等待模型出方案 | `⏸ plan`（`warning`） |
 | plan 已提交、等批准 | `⏸ plan · 待批准` |
 | plan 写文档子态 | `⏸ plan · 写文档中`（尾巴走 `accent`） |
@@ -694,6 +746,18 @@ modifyOtherKeys。而 pi **启动时会主动启用 Kitty 协议**（`pi-tui` �
 
 ### 跨扩展 / 跨文件
 
+- **plan-mode 的三态模式 → 两层删除拦截**（`bash-command-collapse/sandbox-mode.ts`，2026-09-27）：
+  plan-mode 持有 dangerous / bypass / plan 三态，而删除拦截分属另两个文件（bash 的 seatbelt
+  包裹在 `bash-command-collapse.ts`、`apply_patch` 的 `tool_call` 检查在 `sandbox-boundary/index.ts`），
+  所以中间放一个 `globalThis` 单例传递信号（与 `allowlist.ts` 的 store 缓存、`getSessionScopes()`
+  同一套做法 —— pi 的加载器不保证给两个扩展同一个模块实例，挂 globalThis 则读到的必然是
+  同一份状态）。**两个消费方都在执行期读**，与注册期读的 env 总闸（`PI_SANDBOX` + 平台）取与；
+  注册期读一次就永远切不动了。单例默认 `bypass`，认不出的写入值也收敛到 `bypass` ——
+  plan-mode 没装 / 被 `PI_PLAN_MODE=off` 关掉 / 还没切过态时，拦截一律照旧生效（fail-safe）。
+  改这个契约时记住三件事：① dangerous 是唯一会关掉拦截的态，只能由用户 shift+tab 到达；
+  ② plan 态不靠沙箱（它自己的两道闸更严），记下来只是为了状态永远与 plan-mode 一致；
+  ③ 单例的键名 `pi-sandbox-mode` 是跨文件的硬契约，改名要同时改测试里那个「换一个模块实例
+  读到同一份状态」的断言。
 - **plan-mode 与 simple-task 不再耦合**（2026-09-24 删掉了镜像契约）：两者都能单独装、
   单独 `/reload`，互不 import、互不通信。计划批准后进度归模型自己 —— 它要建清单就调
   `task_set`，那是 simple-task 的普通工具调用，没有任何特殊路径。`simple-task/gap.ts`
@@ -760,6 +824,18 @@ modifyOtherKeys。而 pi **启动时会主动启用 Kitty 协议**（`pi-tui` �
   日志里什么都没有。`read-path-collapse.ts` / `bash-command-collapse.ts` 都踩过这一条。
 - **跨扩展同名工具注册是 first registration per name wins**，所以 `bash` 的开关必须住在
   `bash-command-collapse.ts` 里，不能另开一个同样注册 `bash` 的文件（后者会被静默忽略）。
+- **重新注册内置工具必须用 `createXToolDefinition()`，不能用 `createXTool()`**：后者是
+  `wrapToolDefinition(createXToolDefinition(…))`，而 `wrapToolDefinition` 只保留 8 个字段
+  （name / label / description / parameters / constrainedSampling / prepareArguments /
+  executionMode / execute），`promptSnippet` 与 `promptGuidelines` 被静默剥掉 —— 于是 system
+  prompt 的 `<tools>` 段里该工具整行消失（`visibleTools` 按 `!!toolSnippets[name]` 过滤），
+  `<rules>` 段里它的 guidance 也全部缺席。**全程无任何报错**：工具照样能调、`description`
+  照样进 tool schema、渲染照样正常，唯一的症状是模型看不到那几行。`tool-diff.ts` 实测踩过
+  （edit / write 两行 + 5 条 guidance 全丢，70 条 system prompt 命中 0 次），修复是每处一行
+  换成 `createEditToolDefinition` / `createWriteToolDefinition`（与 read 侧 `read-path-collapse.ts`
+  同形）；回归测试在 `tool-diff/prompt-metadata.test.ts`（走 pi 真加载器，含「包装器确实剥掉
+  元数据」的反例断言）。pi 官方示例 `examples/extensions/built-in-tool-renderer.ts` 用的正是
+  `createEditTool()`，**它自己就带这个 bug**，「照着官方示例抄」不构成保护。
 - **扩展 import 的 `@earendil-works/pi-tui` 与 pi 自己渲染用的**是不是同一份，取决于启动形态，
   **不能靠推测**：`pi` 命令跑的是 `dist/bundle/cli.js`，pi-tui **内联**在 chunk 里，而加载器在
   这个形态下走的是 `virtualModules` 分支（bundle 里 `isBundledNode=!0`，见

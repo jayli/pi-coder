@@ -22,6 +22,9 @@ import test from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { THINKING_FALLBACK_KEY } from "./keybinding.ts";
+// 直接 import 沙箱模式单例：扩展是经 pi 自己的加载器装的，可能拿到**另一个**模块实例，
+// 而单例挂在 globalThis 上 —— 这正是两边能读到同一份状态的原因（测试也顺便钉住这一点）。
+import { getSandboxMode, resetSandboxModeForTesting } from "../bash-command-collapse/sandbox-mode.ts";
 
 const EXTENSION_PATH = path.join(path.dirname(fileURLToPath(import.meta.url)), "index.ts");
 const SKIP = "找不到本机 pi 的库入口（装过 pi 才有）";
@@ -445,7 +448,7 @@ test("三种 shift+tab 编码都能切（裸 CSI / Kitty CSI-u / modifyOtherKeys
 	}
 });
 
-test("再按一次 shift+tab 退出，活动工具原样还原", { skip, timeout: 30_000 }, async () => {
+test("再按一次 shift+tab 退出 plan，活动工具原样还原（固定循环落到 dangerous）", { skip, timeout: 30_000 }, async () => {
 	const workspace = makeWorkspace();
 	try {
 		const rec = recorder();
@@ -453,11 +456,106 @@ test("再按一次 shift+tab 退出，活动工具原样还原", { skip, timeout
 		const harness = await startSession(extension, rec);
 		const before = harness.getActiveTools();
 
-		harness.ctx.__feedInput("\x1b[Z");
-		harness.ctx.__feedInput("\x1b[Z");
+		harness.ctx.__feedInput("\x1b[Z"); // bypass → plan
+		harness.ctx.__feedInput("\x1b[Z"); // plan → dangerous（固定循环，不回 bypass）
 
 		assert.deepEqual(harness.getActiveTools(), before, "退出后必须逐字还原（含扩展工具）");
-		assert.match(rec.statuses.at(-1) ?? "", /⏵ bypass/, "退出后回到 bypass 模式指示");
+		assert.match(rec.statuses.at(-1) ?? "", /☢ dangerous/, "shift+tab 离开 plan 走固定循环，落到 dangerous");
+	} finally {
+		workspace.cleanup();
+	}
+});
+
+test("shift+tab 三态固定循环：bypass → plan → dangerous → bypass", { skip, timeout: 30_000 }, async () => {
+	const workspace = makeWorkspace();
+	try {
+		const rec = recorder();
+		const extension = await loadExtension(workspace.agentDir, workspace.projectDir, rec);
+		const harness = await startSession(extension, rec);
+
+		assert.match(rec.statuses.at(-1) ?? "", /⏵ bypass/, "启动默认 bypass");
+
+		harness.ctx.__feedInput("\x1b[Z");
+		assert.match(rec.statuses.at(-1) ?? "", /⏸ plan/);
+
+		harness.ctx.__feedInput("\x1b[Z");
+		assert.match(rec.statuses.at(-1) ?? "", /☢ dangerous/);
+		assert.ok(
+			harness.getActiveTools().includes("write"),
+			"dangerous 是 pi 原生任意权限：写工具全部在场",
+		);
+
+		harness.ctx.__feedInput("\x1b[Z");
+		assert.match(rec.statuses.at(-1) ?? "", /⏵ bypass/, "循环回到起点");
+	} finally {
+		workspace.cleanup();
+	}
+});
+
+test("dangerous 态不拦写命令（沙箱删除拦截已关，bash 写操作放行）", { skip, timeout: 30_000 }, async () => {
+	const workspace = makeWorkspace();
+	try {
+		const rec = recorder();
+		const extension = await loadExtension(workspace.agentDir, workspace.projectDir, rec);
+		const harness = await startSession(extension, rec);
+
+		harness.ctx.__feedInput("\x1b[Z"); // → plan
+		harness.ctx.__feedInput("\x1b[Z"); // → dangerous
+
+		const toolCall = handlerOf(extension, "tool_call");
+		const verdict = await toolCall(
+			{ toolName: "bash", input: { command: "rm -rf dist && git commit -am x" } },
+			harness.ctx,
+		);
+		assert.equal(verdict, undefined, "dangerous 态不拦任何写操作");
+	} finally {
+		workspace.cleanup();
+	}
+});
+
+test("沙箱模式单例跟着三态走：dangerous 关、bypass / plan 开", { skip, timeout: 30_000 }, async () => {
+	const workspace = makeWorkspace();
+	try {
+		const rec = recorder();
+		const extension = await loadExtension(workspace.agentDir, workspace.projectDir, rec);
+		const harness = await startSession(extension, rec);
+
+		resetSandboxModeForTesting();
+		await sessionStart(extension, { reason: "startup" }, harness.ctx);
+		assert.equal(getSandboxMode(), "bypass", "启动默认 bypass：沙箱拦截开启");
+
+		harness.ctx.__feedInput("\x1b[Z"); // → plan
+		assert.equal(getSandboxMode(), "plan");
+
+		harness.ctx.__feedInput("\x1b[Z"); // → dangerous
+		assert.equal(getSandboxMode(), "dangerous", "dangerous 态必须告知沙箱层关掉拦截");
+
+		harness.ctx.__feedInput("\x1b[Z"); // → bypass
+		assert.equal(getSandboxMode(), "bypass");
+
+		resetSandboxModeForTesting();
+	} finally {
+		workspace.cleanup();
+	}
+});
+
+test("/plan 命令永远不落到 dangerous（dangerous 只能 shift+tab 切）", { skip, timeout: 30_000 }, async () => {
+	const workspace = makeWorkspace();
+	try {
+		const rec = recorder();
+		const extension = await loadExtension(workspace.agentDir, workspace.projectDir, rec);
+		const harness = await startSession(extension, rec);
+		const commands = (extension as unknown as { commands: Map<string, { handler: Handler }> }).commands;
+		const plan = commands.get("plan");
+		assert.ok(plan, "应注册了 /plan");
+
+		await plan.handler("", harness.ctx); // bypass → plan
+		assert.match(rec.statuses.at(-1) ?? "", /⏸ plan/);
+
+		await plan.handler("", harness.ctx); // plan → bypass（不是 dangerous）
+		assert.match(rec.statuses.at(-1) ?? "", /⏵ bypass/, "/plan 离开 plan 回安全默认态");
+
+		assert.equal(commands.has("dangerous"), false, "不该有 /dangerous 命令");
 	} finally {
 		workspace.cleanup();
 	}
@@ -616,6 +714,155 @@ test("PI_PLAN_MODE_CONSENT=off：不弹框直接进（回到旧行为）", { ski
 	}
 });
 
+test("brainstorming 互斥闸：本次 run 已加载技能 → 不进 plan、不弹框", { skip, timeout: 30_000 }, async () => {
+	const workspace = makeWorkspace();
+	try {
+		const rec = recorder();
+		const extension = await loadExtension(workspace.agentDir, workspace.projectDir, rec);
+		const harness = await startSession(extension, rec, {
+			entries: [
+				{ type: "message", message: { role: "user", content: [{ type: "text", text: "用 brainstorming 设计方案" }] } },
+				{
+					type: "message",
+					message: {
+						role: "assistant",
+						content: [
+							{
+								type: "toolCall",
+								id: "c1",
+								name: "read",
+								arguments: { path: "/Users/bachi/.agents/skills/superpowers/brainstorming/SKILL.md" },
+							},
+						],
+					},
+				},
+			],
+		});
+
+		const result = await callTool(extension, "enter_plan_mode", { reason: "要改多个文件" }, harness.ctx);
+
+		assert.match(result.content[0]!.text, /已加载 brainstorming/, "要说清为什么没进");
+		assert.match(result.content[0]!.text, /二选一/);
+		assert.match(result.content[0]!.text, /不要再调用/, "要阻止模型反复重试");
+		assert.match(result.content[0]!.text, /shift\+tab/, "要给用户留逃生出口");
+		assert.equal(rec.selectTitles.length, 0, "互斥闸在同意弹框之前，不该弹框");
+		assert.ok(harness.getActiveTools().includes("write"), "没进 plan，写工具不能被动");
+		assert.deepEqual(
+			rec.entries.filter((entry) => entry.customType === "plan-mode"),
+			[],
+			"不该写下任何 plan-mode 状态条目",
+		);
+		const details = result.details as { phase?: string; brainstorming?: boolean; consented?: boolean };
+		assert.equal(details.phase, "bypass");
+		assert.equal(details.brainstorming, true);
+		assert.equal(details.consented, false);
+	} finally {
+		workspace.cleanup();
+	}
+});
+
+test("brainstorming 互斥闸：read 在上一条 user 消息之前（上一轮的）→ 照常弹框", { skip, timeout: 30_000 }, async () => {
+	const workspace = makeWorkspace();
+	try {
+		const rec = recorder();
+		const extension = await loadExtension(workspace.agentDir, workspace.projectDir, rec);
+		const harness = await startSession(extension, rec, {
+			entries: [
+				{ type: "message", message: { role: "user", content: [{ type: "text", text: "上一轮" }] } },
+				{
+					type: "message",
+					message: {
+						role: "assistant",
+						content: [
+							{
+								type: "toolCall",
+								id: "c1",
+								name: "read",
+								arguments: { path: "/skills/superpowers/brainstorming/SKILL.md" },
+							},
+						],
+					},
+				},
+				{ type: "message", message: { role: "user", content: [{ type: "text", text: "新一轮" }] } },
+			],
+		});
+
+		const result = await callTool(extension, "enter_plan_mode", { reason: "要改多个文件" }, harness.ctx);
+
+		assert.equal(rec.selectTitles.length, 1, "豁免不跨 run，应照常弹同意框");
+		assert.match(result.content[0]!.text, /已进入 plan mode/);
+	} finally {
+		workspace.cleanup();
+	}
+});
+
+test("brainstorming 互斥闸：用 bash cat 读技能不算加载（词法口径的已知边界）", { skip, timeout: 30_000 }, async () => {
+	const workspace = makeWorkspace();
+	try {
+		const rec = recorder();
+		const extension = await loadExtension(workspace.agentDir, workspace.projectDir, rec);
+		const harness = await startSession(extension, rec, {
+			entries: [
+				{ type: "message", message: { role: "user", content: [{ type: "text", text: "hi" }] } },
+				{
+					type: "message",
+					message: {
+						role: "assistant",
+						content: [
+							{
+								type: "toolCall",
+								id: "c1",
+								name: "bash",
+								arguments: { command: "cat /skills/superpowers/brainstorming/SKILL.md" },
+							},
+						],
+					},
+				},
+			],
+		});
+
+		await callTool(extension, "enter_plan_mode", { reason: "x" }, harness.ctx);
+
+		assert.equal(rec.selectTitles.length, 1, "只认 read 工具，应照常弹框");
+	} finally {
+		workspace.cleanup();
+	}
+});
+
+test("brainstorming 互斥闸：用户手动进 plan 不受影响", { skip, timeout: 30_000 }, async () => {
+	const workspace = makeWorkspace();
+	try {
+		const rec = recorder();
+		const extension = await loadExtension(workspace.agentDir, workspace.projectDir, rec);
+		const harness = await startSession(extension, rec, {
+			entries: [
+				{ type: "message", message: { role: "user", content: [{ type: "text", text: "hi" }] } },
+				{
+					type: "message",
+					message: {
+						role: "assistant",
+						content: [
+							{
+								type: "toolCall",
+								id: "c1",
+								name: "read",
+								arguments: { path: "/skills/superpowers/brainstorming/SKILL.md" },
+							},
+						],
+					},
+				},
+			],
+		});
+
+		const result = harness.ctx.__feedInput("\x1b[Z");
+		assert.deepEqual(result, { consume: true });
+		assert.ok(!harness.getActiveTools().includes("write"), "shift+tab 应直接进 plan，互斥闸不拦用户路径");
+		assert.equal(rec.selectTitles.length, 0);
+	} finally {
+		workspace.cleanup();
+	}
+});
+
 test("工具描述带完整路由判据：正面条件 + 豁免清单都在", { skip, timeout: 30_000 }, async () => {
 	const workspace = makeWorkspace();
 	try {
@@ -631,6 +878,7 @@ test("工具描述带完整路由判据：正面条件 + 豁免清单都在", { 
 		// 豁免清单（实测的两类误报来源，防将来被顺手删掉）
 		assert.match(desc, /具体、详细的指令/, "用户给了明确指令的小改要豁免");
 		assert.match(desc, /纯调研/, "纯调研 / 写报告要豁免");
+		assert.match(desc, /brainstorming/, "二选一豁免要写进工具描述（模型决定要不要调的那一刻就在眼前）");
 		// 同意机制的自述（拿不准就调的前提）
 		assert.match(desc, /需要用户同意/, "要告诉模型这个工具会被用户否决");
 	} finally {
@@ -906,8 +1154,7 @@ test("write 成功且路径匹配：自动收尾回 bypass、还原工具表，�
 	}
 });
 
-test("doc-only 路线收尾：指令是「停下来」，不是「实施」", { skip, timeout: 30_000 }, async () => {
-	const workspace = makeWorkspace();
+test("doc-only 路线收尾：指令是「停下来」，不是「实施」", { skip, timeout: 30_000 }, async () => {	const workspace = makeWorkspace();
 	try {
 		const rec = recorder();
 		const extension = await loadExtension(workspace.agentDir, workspace.projectDir, rec);
@@ -932,6 +1179,78 @@ test("doc-only 路线收尾：指令是「停下来」，不是「实施」", { 
 		assert.match(text, /不要开始改任何代码/);
 		assert.ok(!text.includes("按这份文档实施"), "两条路线的指令不能串");
 		assert.match(rec.statuses.at(-1) ?? "", /⏵ bypass/, "doc-only 也回 bypass");
+	} finally {
+		workspace.cleanup();
+	}
+});
+
+test("从 dangerous 进的 plan，写完文档后实施阶段回 dangerous（从哪来回哪去）", { skip, timeout: 30_000 }, async () => {
+	const workspace = makeWorkspace();
+	try {
+		const rec = recorder();
+		const extension = await loadExtension(workspace.agentDir, workspace.projectDir, rec);
+		const harness = await startSession(extension, rec);
+
+		harness.ctx.__feedInput("\x1b[Z"); // bypass → plan
+		harness.ctx.__feedInput("\x1b[Z"); // plan → dangerous
+		assert.match(rec.statuses.at(-1) ?? "", /☢ dangerous/);
+
+		// 固定循环是 dangerous → bypass → plan，所以 shift+tab 从 dangerous 进不了 plan；
+		// 能带着 dangerous 来路进 plan 的是模型路径（与 --plan 同一条 enterPlanMode）。
+		await callTool(extension, "enter_plan_mode", { reason: "任务偏大" }, harness.ctx);
+		assert.match(rec.statuses.at(-1) ?? "", /⏸ plan/);
+
+		const approved = await callTool(
+			extension,
+			"exit_plan_mode",
+			{ plan: PLAN, slug: "fix-two-files", summary: "改两个文件" },
+			harness.ctx,
+		);
+		const docPath = docPathFrom(approved as { content: Array<{ text: string }> });
+
+		await toolResult(
+			extension,
+			{
+				toolName: "write",
+				toolCallId: "w1",
+				input: { path: docPath, content: "# 计划" },
+				content: [{ type: "text", text: "ok" }],
+				isError: false,
+			},
+			harness.ctx,
+		);
+
+		assert.match(rec.statuses.at(-1) ?? "", /☢ dangerous/, "实施阶段回到进入前的模式");
+		assert.equal(getSandboxMode(), "dangerous", "沙箱层也要跟着关");
+		assert.ok(
+			rec.notifies.some((message) => message.includes("dangerous") && message.includes("已关闭")),
+			"回到 dangerous 必须明说沙箱已关，不能让用户以为还在保护下",
+		);
+
+		const last = rec.entries.at(-1)!.data as Record<string, unknown>;
+		assert.equal(last.phase, "dangerous");
+		assert.equal(last.returnPhase, undefined, "收尾后不再持有来路");
+
+		resetSandboxModeForTesting();
+	} finally {
+		workspace.cleanup();
+	}
+});
+
+test("固定循环下 shift+tab 从 dangerous 到不了 plan（要经 bypass）", { skip, timeout: 30_000 }, async () => {
+	const workspace = makeWorkspace();
+	try {
+		const rec = recorder();
+		const extension = await loadExtension(workspace.agentDir, workspace.projectDir, rec);
+		const harness = await startSession(extension, rec);
+
+		harness.ctx.__feedInput("\x1b[Z"); // bypass → plan
+		harness.ctx.__feedInput("\x1b[Z"); // plan → dangerous
+		harness.ctx.__feedInput("\x1b[Z"); // dangerous → bypass
+		assert.match(rec.statuses.at(-1) ?? "", /⏵ bypass/, "dangerous 的下一态是 bypass，不是 plan");
+
+		harness.ctx.__feedInput("\x1b[Z"); // bypass → plan
+		assert.match(rec.statuses.at(-1) ?? "", /⏸ plan/);
 	} finally {
 		workspace.cleanup();
 	}
@@ -1103,6 +1422,64 @@ test("会话恢复：写文档子态还原（write 在场、edit 不在），下
 		assert.equal(injected?.message?.customType, "plan-doc-write-context");
 		assert.ok((injected?.message?.content ?? "").includes(docPath), "写文档指令要带钉死的路径");
 		assert.ok((injected?.message?.content ?? "").includes(PLAN), "写文档指令要带计划全文");
+	} finally {
+		workspace.cleanup();
+	}
+});
+
+test("会话恢复：dangerous 态与 returnPhase 都能从条目还原", { skip, timeout: 30_000 }, async () => {
+	const workspace = makeWorkspace();
+	try {
+		const rec = recorder();
+		const extension = await loadExtension(workspace.agentDir, workspace.projectDir, rec);
+		const harness = makeContext(extension, rec, { entries: [planEntry({ phase: "dangerous" })] });
+
+		resetSandboxModeForTesting();
+		await sessionStart(extension, { reason: "startup" }, harness.ctx);
+
+		assert.match(rec.statuses.at(-1) ?? "", /☢ dangerous/, "dangerous 要能恢复（它是用户亲手切到的）");
+		assert.equal(getSandboxMode(), "dangerous", "恢复后沙箱层也要是关的");
+		assert.deepEqual(harness.getActiveTools(), DEFAULT_TOOLS, "dangerous 不收工具");
+
+		resetSandboxModeForTesting();
+	} finally {
+		workspace.cleanup();
+	}
+});
+
+test("会话恢复：认不出的 returnPhase 不会把实施阶段带进 dangerous", { skip, timeout: 30_000 }, async () => {
+	const workspace = makeWorkspace();
+	try {
+		const rec = recorder();
+		const extension = await loadExtension(workspace.agentDir, workspace.projectDir, rec);
+		const harness = makeContext(extension, rec, {
+			entries: [
+				planEntry({
+					phase: "plan",
+					pending: PLAN,
+					returnPhase: "execute", // 历史值 / 坏数据
+					docWriting: true,
+					docMode: "execute-with-doc",
+					pendingDocPath: "/repo/.pi/plans/2026-09-27-x.md",
+					toolsBeforePlan: DEFAULT_TOOLS,
+				}),
+			],
+		});
+
+		await sessionStart(extension, { reason: "startup" }, harness.ctx);
+		await toolResult(
+			extension,
+			{
+				toolName: "write",
+				toolCallId: "w1",
+				input: { path: "/repo/.pi/plans/2026-09-27-x.md", content: "# 计划" },
+				content: [{ type: "text", text: "ok" }],
+				isError: false,
+			},
+			harness.ctx,
+		);
+
+		assert.match(rec.statuses.at(-1) ?? "", /⏵ bypass/, "认不出的来路退回安全默认态");
 	} finally {
 		workspace.cleanup();
 	}

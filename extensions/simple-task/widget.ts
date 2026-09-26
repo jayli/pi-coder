@@ -33,7 +33,9 @@ export const GLYPHS = {
 
 /** pi-tasks 的星形 spinner 帧序列，原样沿用。 */
 // 刻意去掉了 pi-tasks 原序列末尾的 ✽ —— 它比前面几帧粗重，转起来会突兀。
-export const SPINNER = ["+", "✳", "✴", "✵", "✶", "✷", "✸", "✹", "✺", "✻", "✼"] as const;
+// export const SPINNER = ["+", "✳", "✴", "✵", "✶", "✷", "✸", "✹", "✺", "✻", "✼"] as const;
+// 换成了静态的 “▣”
+export const SPINNER = ["▣","▣"] as const;
 
 /** pi-tasks 的 DEFAULT_MAX_VISIBLE_TASKS。超出部分折叠成 "… and N more"。 */
 export const MAX_VISIBLE = 10;

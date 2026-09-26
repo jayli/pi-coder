@@ -18,7 +18,8 @@
  *     - `Update File` / `Add File` 是写入，边界外也放行；
  *   - 只读工具（read/grep）与认不出删除目标的工具一律放行；
  *   - 非交互环境：持久白名单生效（命中则放行），永不删除与危险/普通未授权都 fail-closed 直接 block；
- *   - PI_SANDBOX=off 时整个钩子不生效。
+ *   - PI_SANDBOX=off 时整个钩子不生效；
+ *   - plan-mode 的 dangerous 模式（运行期单例）同样让钩子不生效 —— 包括永不删除档。
  *
  * 注意 harness 的 projectDir 在 /tmp 下（mkdtempSync），本身就在可删边界内 ——
  * 所以"边界内"用例用 projectDir 下的路径，"边界外"用例用 $HOME 下的路径。
@@ -503,6 +504,56 @@ test("PI_SANDBOX=off 时整个钩子不生效", { skip }, async () => {
 		if (prior === undefined) delete process.env.PI_SANDBOX;
 		else process.env.PI_SANDBOX = prior;
 		h?.cleanup();
+	}
+});
+
+test("dangerous 模式（plan-mode 三态）：整个钩子不生效，连永不删除档也不拦", { skip }, async () => {
+	// dangerous 是 pi 原生的任意权限形态，只能由用户 shift+tab 切到。与 PI_SANDBOX=off
+	// 的区别：那是注册期读的 env 总闸，这个是**运行期**单例 —— 所以用同一份已加载的
+	// harness，只翻单例，就能验证「执行期判定」这条路径。
+	const { getSandboxMode, resetSandboxModeForTesting, setSandboxMode } = await import(
+		pathToFileURL(path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "bash-command-collapse", "sandbox-mode.ts")).href
+	);
+	resetSandboxModeForTesting();
+	const h = await loadHarness();
+	try {
+		// 对照组：bypass 下永不删除档 fail-closed（不弹框、直接 block）。
+		assert.equal(getSandboxMode(), "bypass");
+		const blocked = await h.call("apply_patch", { patch: `*** Delete File: ${HOME}/.zshrc\n` });
+		assert.equal(blocked.block, true, "bypass 下 ~/.zshrc 必须被拦");
+
+		// 切到 dangerous：同一条 patch 放行，且不弹框。
+		setSandboxMode("dangerous");
+		const passed = await h.call("apply_patch", { patch: `*** Delete File: ${HOME}/.zshrc\n` });
+		assert.deepEqual(passed, {}, "dangerous 下不该拦（任意权限）");
+		assert.equal(h.selects.length, 0, "dangerous 下不该弹窗");
+		assert.equal(h.confirms.length, 0);
+
+		// 普通边界外路径在 dangerous 下也不弹框（对照组：bypass 下会弹）。
+		const ordinary = await h.call("apply_patch", { patch: `*** Delete File: ${HOME}/Downloads/sbx-dangerous-probe.txt\n` });
+		assert.deepEqual(ordinary, {}, "dangerous 下普通越界删除也不问");
+		assert.equal(h.selects.length, 0);
+	} finally {
+		resetSandboxModeForTesting();
+		h.cleanup();
+	}
+});
+
+test("dangerous 模式下 /sandbox-boundary 命令说明拦截已关", { skip }, async () => {
+	const { resetSandboxModeForTesting, setSandboxMode } = await import(
+		pathToFileURL(path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "bash-command-collapse", "sandbox-mode.ts")).href
+	);
+	resetSandboxModeForTesting();
+	const h = await loadHarness();
+	try {
+		setSandboxMode("dangerous");
+		await h.runCommand();
+		const report = h.notifies[h.notifies.length - 1] ?? "";
+		assert.match(report, /dangerous/, "要说清当前是 dangerous 模式");
+		assert.match(report, /shift\+tab/, "要给出切回 bypass 的出口");
+	} finally {
+		resetSandboxModeForTesting();
+		h.cleanup();
 	}
 });
 

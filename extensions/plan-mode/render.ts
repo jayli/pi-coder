@@ -14,10 +14,14 @@
  * 可逐条打勾的步骤；进度归模型自己（它要建任务清单就自己 `task_set`，那是 simple-task
  * 的 widget 该显示的事）。
  *
- * ## 配色
+ * ## 配色（用户 2026-09-27 定：三态三色，语义槽不写死色值）
  *
- * 状态行走 `warning`（与「等你拍板」的语义一致），写文档子态走 `accent`，
- * 都取自三套主题都有的语义槽，不写死色值。
+ *   dangerous 红色（`error`）   沙箱关闭、任意权限 —— 危险，最醒目
+ *   bypass    绿色（`success`）  沙箱删除拦截开启 —— 安全默认（2026-09-27 之前是红色）
+ *   plan      橙色（`warning`）  只读、等你拍板 —— 与旧配色一致
+ *
+ * 三个槽在三套本机皮肤里都存在（error / success / warning 都是语义槽）。
+ * 写文档子态的「· 写文档中」仍走 `accent`。
  */
 
 import type { PlanPhase } from "./plan.ts";
@@ -37,11 +41,12 @@ export interface PlanStatusSource {
 }
 
 /**
- * statusline 第二行的那段文本。**两个态都有文案** —— bypass 也要显示，
- * 让「当前处于哪个模式」永远有个固定的显示位（这一格原先归 simple-task 的
- * `✔ n/N`，它与输入框上方的 widget 重复，已让给模式指示）。
+ * statusline 第二行的那段文本。**三个态都有文案** —— 让「当前处于哪个模式」
+ * 永远有个固定的显示位（这一格原先归 simple-task 的 `✔ n/N`，它与输入框上方的
+ * widget 重复，已让给模式指示）。
  *
- *   ⏵ bypass                  普通模式（全权限）
+ *   ☢ dangerous               pi 原生任意权限（沙箱删除拦截关闭）
+ *   ⏵ bypass                  沙箱删除拦截开启（安全默认）
  *   ⏸ plan                    等待模型提交计划
  *   ⏸ plan · 待批准            已提交、等用户审批
  *   ⏸ plan · 写文档中          写文档子态（模型正在把计划落成文件）
@@ -55,9 +60,13 @@ export function formatPlanStatus(theme: PlanTheme, source: PlanStatusSource): st
 		if (source.pending) return `${label} ${theme.fg("warning", "plan")} ${theme.fg("muted", "· 待批准")}`;
 		return `${label} ${theme.fg("warning", "plan")}`;
 	}
-	// bypass：用 `toolDiffRemoved`（删除行前景色）而不是 `dim` —— 那个槽在三套皮肤里
-	// 都解析成红色（ayu #D95757 / catppuccin #F38BA8 / summer-night #e27878），
-	// 让「全权限」这个态一眼可见：未开启保护，而不是「什么都没开」。
-	// 注意 **plan 的配色不变**（warning），那一态才是要读仔细的。
-	return `${theme.fg("toolDiffRemoved", "⏵")} ${theme.fg("toolDiffRemoved", "bypass")}`;
+	if (source.phase === "dangerous") {
+		// 红色（error 槽）：沙箱关闭、删除不再拦截 —— 三套皮肤里 error 都是红色系，
+		// 让「任意权限」这个态一眼可见。
+		return `${theme.fg("error", "☢")} ${theme.fg("error", "dangerous")}`;
+	}
+	// bypass：绿色（success 槽）—— 沙箱删除拦截开启，是安全默认态。
+	// 2026-09-27 之前这一态用红色（toolDiffRemoved）表示「未开启保护」；三态化之后
+	// 红色让给了 dangerous，bypass 改绿：有保护、可以放心用。
+	return `${theme.fg("success", "⏵")} ${theme.fg("success", "bypass")}`;
 }

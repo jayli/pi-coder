@@ -961,6 +961,45 @@ test("沙箱：越界删除被 OS 拒绝，文件仍在，非交互环境不升�
 	}
 });
 
+test("沙箱：被 `;` 后成功命令掩盖的越界删除，结果里要带 [沙箱] 说明", { skip: sandboxSkip }, async () => {
+	assert.ok(cached);
+	const { definition, projectDir } = cached;
+
+	// 真实事故形状：`rm <越界> ; <成功命令>` —— 整条命令退出码 0，pi 不 throw，
+	// 于是 catch 分支（弹框 + [沙箱] 提示）根本走不到，拒绝被静默吞掉。
+	const probe = path.join(os.homedir(), `.sbx-masked-probe-${process.pid}-${Date.now()}.txt`);
+	fs.writeFileSync(probe, "victim\n");
+	try {
+		const masked = await runCommand(definition, `rm ${JSON.stringify(probe)} ; true`, projectDir);
+		assert.equal(masked.ok, true, "整条命令应当成功（`; true` 掩盖了 rm 的失败）");
+		assert.match(masked.text, /Operation not permitted|EPERM/, "rm 的拒绝原文仍要在输出里");
+		assert.match(masked.text, /\[沙箱\]/, "成功命令也要把被拦的删除说出来");
+		assert.ok(masked.text.includes(probe), `说明要点名被拦路径：${masked.text}`);
+		assert.match(masked.text, /sandbox-boundary allow/, "要给出授权出口");
+		assert.equal(fs.existsSync(probe), true, "越界文件必须仍在（说明不是放行）");
+		assert.equal(fs.readFileSync(probe, "utf8"), "victim\n", "内容也不能变");
+	} finally {
+		if (fs.existsSync(probe)) fs.rmSync(probe);
+	}
+});
+
+test("沙箱：成功命令的输出里出现 Operation not permitted 字样不算被拦（grep 不误报）", { skip: sandboxSkip }, async () => {
+	assert.ok(cached);
+	const { definition, projectDir } = cached;
+
+	// 误报对照组：查日志是常用操作，输出里带这几个字不该多出 [沙箱] 噪音。
+	const logFile = path.join(projectDir, "denial-shaped.log");
+	fs.writeFileSync(logFile, "rm: /Users/someone/else/file: Operation not permitted\n");
+	try {
+		const grepped = await runCommand(definition, `grep "Operation not permitted" ${JSON.stringify(logFile)}`, projectDir);
+		assert.equal(grepped.ok, true, `grep 应当成功：${grepped.text}`);
+		assert.match(grepped.text, /Operation not permitted/, "grep 的命中行本身要在");
+		assert.ok(!/\[沙箱\]/.test(grepped.text), `不该追加沙箱说明：${grepped.text}`);
+	} finally {
+		if (fs.existsSync(logFile)) fs.rmSync(logFile);
+	}
+});
+
 test("沙箱：越界 rmdir 同样被拒，目录仍在", { skip: sandboxSkip }, async () => {
 	assert.ok(cached);
 	const { definition, projectDir } = cached;
@@ -1011,6 +1050,77 @@ test("沙箱：PI_SANDBOX=off 时命令不被包裹（越界删除会成功）",
 		assert.equal(fs.existsSync(probe), false);
 	} finally {
 		fs.rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("沙箱：dangerous 模式（plan-mode 三态）运行时关掉包裹，越界删除不再被拦", { skip }, async () => {
+	assert.ok(cached);
+	const { definition, projectDir } = cached;
+
+	// 与 PI_SANDBOX=off 的区别：这里用的是**同一份已注册的扩展**（sandboxOn 在注册时
+	// 就是 true），开关是运行期由 plan-mode 通过 sandbox-mode 单例翻的 —— 所以必须
+	// 在执行期判定，注册期读一次就切不动了。
+	//
+	// 本用例刻意用 `{ skip }` 而不是 `{ skip: sandboxSkip }`：dangerous 的语义就是
+	// **不包 seatbelt**，所以它不需要嵌套沙箱可用，在已处于沙箱中的进程里也能真跑
+	//（bypass 下「越界删除被拒」的对照组由上面那个真沙箱用例负责）。
+	const { getSandboxMode, resetSandboxModeForTesting, setSandboxMode } = await import(
+		pathToFileURL(path.join(path.dirname(fileURLToPath(import.meta.url)), "sandbox-mode.ts")).href
+	);
+	resetSandboxModeForTesting();
+	assert.equal(getSandboxMode(), "bypass", "单例默认应在 bypass（安全默认）");
+
+	// 探针放在**仓库工作区**里，而不是像其他用例那样放 $HOME 或 tmp：
+	// 扩展的边界跟着 ctx.cwd（= tmp 里的 projectDir）算，所以仓库目录对它而言是越界的；
+	// 而在 pi 会话里跑测试时，外层沙箱恰好只放行仓库目录与 temp 根 —— temp 根两边都在
+	// 边界内，区分不出东西。只有仓库目录能同时满足「扩展看来越界」+「外层沙箱可删」，
+	// 于是本用例在普通终端与 pi 沙箱里跑出的结果一致。
+	// 仓库根不能写死层数：上游快照里本文件在 `clients/pi/extensions/bash-command-collapse/`，
+	// 独立仓库里只有 `extensions/bash-command-collapse/` —— 差两级，写死 `..` 会让探针落到 $HOME。
+	// 改成往上找第一个含 `.git` 的目录，找不到就退回 process.cwd()（`npm test` 时即仓库根）。
+	let repoRoot = path.dirname(fileURLToPath(import.meta.url));
+	while (!fs.existsSync(path.join(repoRoot, ".git"))) {
+		const parent = path.dirname(repoRoot);
+		if (parent === repoRoot) {
+			repoRoot = process.cwd();
+			break;
+		}
+		repoRoot = parent;
+	}
+	const probe = path.join(repoRoot, `.sbx-dangerous-probe-${process.pid}-${Date.now()}.txt`);
+	fs.writeFileSync(probe, "victim\n");
+	try {
+		// 对照组（bypass）：**两种环境下都应当失败**，所以它不需要嵌套沙箱可用 ——
+		// 普通终端里是内核 EPERM（仓库根含 .git → 危险档 → 非交互 fail-closed），
+		// 在 pi 会话里跑则是嵌套 sandbox_apply 直接失败。没有这一段，上面那句
+		// 「dangerous 下删除成功」就可能是空断言。
+		const denied = await runCommand(definition, `rm -f ${JSON.stringify(probe)}`, projectDir);
+		assert.equal(denied.ok, false, `bypass 下越界删除必须失败：${denied.text}`);
+		assert.equal(fs.existsSync(probe), true, "bypass 下文件必须仍在");
+
+		setSandboxMode("dangerous");
+		assert.equal(getSandboxMode(), "dangerous");
+		// 同一条命令、同一个已注册扩展：不再被包裹，删除成功（pi 原生任意权限的语义）。
+		const removed = await runCommand(definition, `rm -f ${JSON.stringify(probe)}`, projectDir);
+		assert.equal(removed.ok, true, `dangerous 下越界删除应当成功：${removed.text}`);
+		assert.ok(!/Operation not permitted|EPERM/.test(removed.text), "不该有沙箱拒绝的痕迹");
+		assert.ok(!/\[沙箱\]/.test(removed.text), "dangerous 下不该有沙箱说明");
+		assert.equal(fs.existsSync(probe), false, "文件应当真被删掉（不是只返回成功）");
+
+		// 切回 bypass 后拦截立即恢复（运行期开关，不需重新加载扩展）。
+		setSandboxMode("bypass");
+		const again = path.join(repoRoot, `.sbx-dangerous-probe2-${process.pid}-${Date.now()}.txt`);
+		fs.writeFileSync(again, "victim\n");
+		try {
+			const restored = await runCommand(definition, `rm -f ${JSON.stringify(again)}`, projectDir);
+			assert.equal(restored.ok, false, `切回 bypass 后越界删除必须重新被拦：${restored.text}`);
+			assert.equal(fs.existsSync(again), true, "文件必须仍在");
+		} finally {
+			if (fs.existsSync(again)) fs.rmSync(again);
+		}
+	} finally {
+		if (fs.existsSync(probe)) fs.rmSync(probe);
+		resetSandboxModeForTesting();
 	}
 });
 

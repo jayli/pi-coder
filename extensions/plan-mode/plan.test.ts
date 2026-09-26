@@ -1,5 +1,5 @@
 /**
- * Tests for plan.ts — plan-mode 的两态状态机与 bash 写操作判定。
+ * Tests for plan.ts — plan-mode 的三态状态机（dangerous / bypass / plan）与 bash 写操作判定。
  *
  * Run with:  node --test clients/pi/extensions/plan-mode/plan.test.ts
  *
@@ -12,11 +12,15 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
 import {
+	CYCLE_ORDER,
+	cancelPlan,
 	completeDocWrite,
 	enterDocWriting,
 	enterPlan,
+	exitDangerous,
 	initialPlanState,
 	inspectBashCommand,
+	nextCyclePhase,
 	planModeToolSet,
 	rejectPlan,
 	restoredToolSet,
@@ -67,19 +71,46 @@ describe("工具集", () => {
 describe("状态迁移", () => {
 	const PLAN = "# 方案\n\n## 总结\n改两个文件。";
 
-	it("enterPlan 记下快照并清空上一次计划的痕迹", () => {
+	it("默认态是 bypass（启动即开沙箱删除拦截）", () => {
+		assert.equal(initialPlanState().phase, "bypass");
+	});
+
+	it("shift+tab 固定循环：dangerous → bypass → plan → dangerous", () => {
+		assert.deepEqual(CYCLE_ORDER, ["dangerous", "bypass", "plan"]);
+		assert.equal(nextCyclePhase("dangerous"), "bypass");
+		assert.equal(nextCyclePhase("bypass"), "plan");
+		assert.equal(nextCyclePhase("plan"), "dangerous");
+	});
+
+	it("nextCyclePhase 认不出的值退回 bypass（安全默认）", () => {
+		assert.equal(nextCyclePhase("execute" as never), "bypass");
+	});
+
+	it("exitDangerous 回 bypass；不在 dangerous 里则不动", () => {
+		assert.equal(exitDangerous({ phase: "dangerous" }).phase, "bypass");
+		assert.equal(exitDangerous(initialPlanState()).phase, "bypass");
+		assert.equal(exitDangerous(enterPlan(initialPlanState(), ALL_TOOLS)).phase, "plan");
+	});
+
+	it("enterPlan 记下快照与来路，并清空上一次计划的痕迹", () => {
 		const state = enterPlan(initialPlanState(), ALL_TOOLS);
 		assert.equal(state.phase, "plan");
+		assert.equal(state.returnPhase, "bypass");
 		assert.deepEqual(state.toolsBeforePlan, ALL_TOOLS);
 		assert.equal(state.pending, undefined);
 		assert.equal(state.docMode, undefined);
 		assert.equal(state.docWriting, undefined);
 	});
 
-	it("重复 enterPlan 不覆盖快照", () => {
-		const once = enterPlan(initialPlanState(), ["read", "edit"]);
+	it("从 dangerous 进 plan 时 returnPhase 记为 dangerous", () => {
+		assert.equal(enterPlan({ phase: "dangerous" }, ALL_TOOLS).returnPhase, "dangerous");
+	});
+
+	it("重复 enterPlan 不覆盖快照，也不覆盖来路", () => {
+		const once = enterPlan({ phase: "dangerous" }, ["read", "edit"]);
 		const twice = enterPlan(once, ["read"]);
 		assert.deepEqual(twice.toolsBeforePlan, ["read", "edit"]);
+		assert.equal(twice.returnPhase, "dangerous");
 	});
 
 	it("enterPlan 清掉上一次留下的 docWriting（否则新一轮直接注入写文档指令）", () => {
@@ -87,6 +118,22 @@ describe("状态迁移", () => {
 		const fresh = enterPlan({ ...stale, phase: "bypass" }, ALL_TOOLS);
 		assert.equal(fresh.docWriting, undefined);
 		assert.equal(fresh.pendingDocPath, undefined);
+	});
+
+	it("cancelPlan（shift+tab 离开 plan）落到 dangerous，不看 returnPhase", () => {
+		const fromBypass = cancelPlan(enterPlan(initialPlanState(), ALL_TOOLS));
+		assert.equal(fromBypass.phase, "dangerous", "固定循环的下一态，不是原路返回");
+		const fromDangerous = cancelPlan(enterPlan({ phase: "dangerous" }, ALL_TOOLS));
+		assert.equal(fromDangerous.phase, "dangerous");
+	});
+
+	it("cancelPlan 清空一切 plan 字段（含 returnPhase 与工具快照）", () => {
+		const state = cancelPlan(enterDocWriting(submitPlan(enterPlan(initialPlanState(), ALL_TOOLS), PLAN), "doc-only", "/tmp/a.md"));
+		assert.equal(state.returnPhase, undefined);
+		assert.equal(state.toolsBeforePlan, undefined);
+		assert.equal(state.pending, undefined);
+		assert.equal(state.docWriting, undefined);
+		assert.equal(state.pendingDocPath, undefined);
 	});
 
 	it("submitPlan 存下计划全文与总结，仍停在 plan 等审批", () => {
@@ -105,14 +152,15 @@ describe("状态迁移", () => {
 		assert.equal(submitPlan(initialPlanState(), PLAN).pending, undefined);
 	});
 
-	it("rejectPlan 留在 plan、丢掉 pending 与文档子态标记，但保住工具快照", () => {
-		const writing = enterDocWriting(submitPlan(enterPlan(initialPlanState(), ALL_TOOLS), PLAN), "doc-only", "/tmp/a.md");
+	it("rejectPlan 留在 plan、丢掉 pending 与文档子态标记，但保住工具快照与来路", () => {
+		const writing = enterDocWriting(submitPlan(enterPlan({ phase: "dangerous" }, ALL_TOOLS), PLAN), "doc-only", "/tmp/a.md");
 		const rejected = rejectPlan(writing);
 		assert.equal(rejected.phase, "plan", "打回不是退出，要继续改方案");
 		assert.equal(rejected.pending, undefined);
 		assert.equal(rejected.docWriting, undefined);
 		assert.equal(rejected.pendingDocPath, undefined);
 		assert.deepEqual(rejected.toolsBeforePlan, ALL_TOOLS);
+		assert.equal(rejected.returnPhase, "dangerous", "打回后重新批准仍要回原来的模式");
 	});
 });
 
@@ -144,15 +192,33 @@ describe("写文档子态", () => {
 		assert.equal(enterDocWriting(initialPlanState(), "doc-only", DOC).docWriting, undefined);
 	});
 
-	it("completeDocWrite 收尾回 bypass，并把路线与路径交给调用方", () => {
+	it("completeDocWrite 收尾回 returnPhase，并把路线与路径交给调用方", () => {
 		const outcome = completeDocWrite(inDocWriting("doc-only"));
 		assert.ok(outcome);
 		assert.equal(outcome.state.phase, "bypass");
+		assert.equal(outcome.returnPhase, "bypass");
 		assert.equal(outcome.docMode, "doc-only");
 		assert.equal(outcome.docPath, DOC);
 		assert.equal(outcome.state.docWriting, undefined);
 		assert.equal(outcome.state.pending, undefined);
 		assert.equal(outcome.state.toolsBeforePlan, undefined, "快照随状态清空（还原动作由调用方先做）");
+	});
+
+	it("从 dangerous 进的 plan，写完文档后实施阶段回 dangerous（从哪来回哪去）", () => {
+		const fromDangerous = enterDocWriting(
+			submitPlan(enterPlan({ phase: "dangerous" }, ALL_TOOLS), PLAN, "方案"),
+			"execute-with-doc",
+			DOC,
+		);
+		const outcome = completeDocWrite(fromDangerous);
+		assert.equal(outcome?.state.phase, "dangerous");
+		assert.equal(outcome?.returnPhase, "dangerous");
+		assert.equal(outcome?.state.returnPhase, undefined, "收尾后不再持有来路");
+	});
+
+	it("returnPhase 缺失时收尾退回 bypass（安全默认：宁可多一层删除拦截）", () => {
+		const outcome = completeDocWrite({ ...inDocWriting(), returnPhase: undefined });
+		assert.equal(outcome?.state.phase, "bypass");
 	});
 
 	it("不在子态里调用 completeDocWrite 返回 undefined（那不是收尾）", () => {

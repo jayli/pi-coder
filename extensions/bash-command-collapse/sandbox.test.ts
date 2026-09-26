@@ -37,6 +37,7 @@ import {
 	isSandboxEnabled,
 	looksLikeSandboxDenial,
 	makeBoundary,
+	maskedDenialPaths,
 	memoryScopeFor,
 	memoryScopesFor,
 	neverDeletePaths,
@@ -641,5 +642,63 @@ test("buildSeatbeltProfile：extraUnlinkRoots 并进同一行 allow，顺序不�
 	assert.ok(
 		lines.indexOf("(deny file-write-unlink)") < lines.indexOf(unlinkAllow!),
 		"全局 deny 仍在 allow 之前（seatbelt 后写覆盖先写）",
+	);
+});
+
+test("maskedDenialPaths：真实拒绝形状 + 文件仍在 → 返回被拦路径", () => {
+	const output = `rm: ${HOME}/projects/foo/y.txt: Operation not permitted\nok\n`;
+	const got = maskedDenialPaths(output, {
+		boundary: makeBoundary(CWD),
+		allowedRoots: [],
+		sessionRoots: [],
+		env,
+		exists: () => true,
+	});
+	assert.deepEqual(got, [`${HOME}/projects/foo/y.txt`]);
+});
+
+test("maskedDenialPaths：grep 命中同形状但目标不在磁盘 → 空（误报过滤）", () => {
+	// 日志行与真实拒绝形状完全相同（连 rm: 前缀都一样），唯一区别是目标不存在
+	const output = `rm: ${HOME}/projects/gone.txt: Operation not permitted\n`;
+	const got = maskedDenialPaths(output, {
+		boundary: makeBoundary(CWD),
+		allowedRoots: [],
+		sessionRoots: [],
+		env,
+		exists: () => false,
+	});
+	assert.deepEqual(got, []);
+});
+
+test("maskedDenialPaths：边界内 / 已授权 / 永不删除档都不报，危险档报", () => {
+	const output = [
+		`rm: ${CWD}/src/x.ts: Operation not permitted`, // 边界内 → 不报
+		`rm: ${HOME}/Downloads/a.txt: Operation not permitted`, // 已授权 → 不报
+		`rm: ${HOME}/.zshrc: Operation not permitted`, // 永不删除 → 不报（无授权出口）
+		`rm: ${HOME}/Library/Preferences/x: Operation not permitted`, // 危险 → 报
+	].join("\n");
+	const got = maskedDenialPaths(output, {
+		boundary: makeBoundary(CWD),
+		allowedRoots: [`${HOME}/Downloads`],
+		sessionRoots: [],
+		env,
+		exists: () => true,
+	});
+	assert.deepEqual(got, [`${HOME}/Library/Preferences/x`]);
+});
+
+test("maskedDenialPaths：无拒绝字样 / 抽不出路径 → 空", () => {
+	const opts = {
+		boundary: makeBoundary(CWD),
+		allowedRoots: [],
+		sessionRoots: [],
+		env,
+		exists: () => true,
+	};
+	assert.deepEqual(maskedDenialPaths("all good\n", opts), []);
+	// heredoc 形状被 extractDeniedPaths 排除（非删除），抽不出路径就不报
+	assert.deepEqual(
+		maskedDenialPaths("bash: cannot create temp file for here document: Operation not permitted\n", opts),
+		[],
 	);
 });
