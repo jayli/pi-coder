@@ -1,0 +1,403 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>pi vs Claude Code vs Codex CLI — Harness 对比报告</title>
+<style>
+  :root {
+    --bg: #0d1117;
+    --bg-card: #161b22;
+    --bg-card-2: #1c2330;
+    --border: #2d3646;
+    --text: #e6edf3;
+    --text-dim: #9aa7b8;
+    --pi: #2dd4bf;
+    --cc: #e8875b;
+    --codex: #8b9cf8;
+    --good: #3fb950;
+    --warn: #d29922;
+    --bad: #f85149;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", "Helvetica Neue", "Segoe UI", sans-serif;
+    line-height: 1.65;
+    padding: 0 16px 80px;
+  }
+  .wrap { max-width: 1080px; margin: 0 auto; }
+  header.hero {
+    text-align: center;
+    padding: 56px 0 32px;
+    border-bottom: 1px solid var(--border);
+  }
+  header.hero h1 { font-size: 30px; letter-spacing: .5px; }
+  header.hero .sub { color: var(--text-dim); margin-top: 10px; font-size: 15px; }
+  header.hero .verdict {
+    display: inline-block; margin-top: 18px; padding: 10px 22px;
+    background: var(--bg-card); border: 1px solid var(--border); border-radius: 10px;
+    font-size: 15px;
+  }
+  header.hero .verdict b { color: var(--pi); }
+  h2 {
+    font-size: 21px; margin: 52px 0 6px;
+    padding-left: 12px; border-left: 4px solid var(--pi);
+  }
+  h2 .en { color: var(--text-dim); font-size: 13px; font-weight: normal; margin-left: 8px; }
+  .note { color: var(--text-dim); font-size: 13.5px; margin: 4px 0 16px; }
+  .cards { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; margin-top: 24px; }
+  .card {
+    background: var(--bg-card); border: 1px solid var(--border);
+    border-radius: 12px; padding: 20px 22px;
+  }
+  .card h3 { font-size: 17px; display: flex; align-items: center; gap: 8px; }
+  .dot { width: 10px; height: 10px; border-radius: 50%; display: inline-block; flex: none; }
+  .score-big { font-size: 40px; font-weight: 700; margin: 8px 0 2px; }
+  .score-cap { color: var(--text-dim); font-size: 12.5px; }
+  .tagline { margin-top: 12px; font-size: 13.5px; color: var(--text); }
+  .tagline b { color: var(--text-dim); font-weight: normal; }
+  table { width: 100%; border-collapse: collapse; margin-top: 14px; font-size: 14px; }
+  th, td { border: 1px solid var(--border); padding: 8px 12px; text-align: left; vertical-align: top; }
+  th { background: var(--bg-card-2); font-weight: 600; white-space: nowrap; }
+  tbody tr:nth-child(even) { background: rgba(255,255,255,.02); }
+  td.num, th.num { text-align: center; font-variant-numeric: tabular-nums; }
+  .best { font-weight: 700; }
+  .best.pi { color: var(--pi); } .best.cc { color: var(--cc); } .best.codex { color: var(--codex); }
+  .bar-cell { min-width: 150px; }
+  .bar-row { display: flex; align-items: center; gap: 8px; margin: 3px 0; }
+  .bar-label { width: 42px; font-size: 11.5px; color: var(--text-dim); flex: none; }
+  .bar-track { flex: 1; height: 9px; background: #21262d; border-radius: 5px; overflow: hidden; }
+  .bar-fill { height: 100%; border-radius: 5px; }
+  .bar-val { width: 16px; font-size: 11.5px; color: var(--text-dim); flex: none; text-align: right; }
+  .radar-box { display: flex; justify-content: center; margin-top: 10px; }
+  .legend { display: flex; gap: 24px; justify-content: center; margin-top: 6px; font-size: 13.5px; color: var(--text-dim); }
+  .legend span { display: flex; align-items: center; gap: 7px; }
+  .philosophy { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; margin-top: 16px; }
+  .philosophy .card { border-top: 3px solid var(--border); }
+  .philosophy .card.pi { border-top-color: var(--pi); }
+  .philosophy .card.cc { border-top-color: var(--cc); }
+  .philosophy .card.codex { border-top-color: var(--codex); }
+  .philosophy .motto { font-size: 15px; font-weight: 600; margin: 10px 0 8px; }
+  .philosophy ul { margin: 8px 0 0 18px; font-size: 13px; color: var(--text-dim); }
+  .philosophy li { margin: 5px 0; }
+  .philosophy li b { color: var(--text); font-weight: 600; }
+  .pros-cons { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; margin-top: 16px; }
+  .pc { background: var(--bg-card); border: 1px solid var(--border); border-radius: 12px; padding: 18px 20px; font-size: 13.5px; }
+  .pc h4 { font-size: 13px; margin: 12px 0 6px; letter-spacing: 1px; }
+  .pc h4.pro { color: var(--good); } .pc h4.con { color: var(--bad); }
+  .pc ul { margin-left: 18px; color: var(--text-dim); }
+  .pc li { margin: 5px 0; }
+  .pc li b { color: var(--text); font-weight: 600; }
+  .pill { display: inline-block; padding: 1px 9px; border-radius: 999px; font-size: 11.5px; font-weight: 600; margin-right: 6px; }
+  .pill.p0 { background: rgba(248,81,73,.15); color: var(--bad); }
+  .pill.p1 { background: rgba(210,153,34,.15); color: var(--warn); }
+  .pill.p2 { background: rgba(139,156,248,.15); color: var(--codex); }
+  .pill.p3 { background: rgba(154,167,184,.15); color: var(--text-dim); }
+  footer { margin-top: 64px; padding-top: 20px; border-top: 1px solid var(--border); color: var(--text-dim); font-size: 12.5px; }
+  footer p { margin: 6px 0; }
+  @media (max-width: 860px) {
+    .cards, .philosophy, .pros-cons { grid-template-columns: 1fr; }
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header class="hero">
+  <h1>pi · Claude Code · Codex CLI</h1>
+  <div class="sub">三个 Coding Agent Harness 的纯代码实现层面横向对比 — 基于 <code>jayli/pi-coder</code> issue #4 水位报告</div>
+  <div class="verdict">综合水位：<b>pi 7.4</b> / 10 &nbsp;·&nbsp; CC 7.5 &nbsp;·&nbsp; Codex 7.6 —— 差距仅 0.1~0.2，形状是「几处浅坑 + 一个架构级缺口」，<b>没有任何结构性空白</b></div>
+</header>
+
+<!-- ============ 总分卡片 ============ -->
+<div class="cards">
+  <div class="card">
+    <h3><span class="dot" style="background:var(--pi)"></span>pi（本仓库 v2.1.6）</h3>
+    <div class="score-big" style="color:var(--pi)">7.4</div>
+    <div class="score-cap">加权合计 ÷ 93 · pi 内核 0.87.1</div>
+    <div class="tagline"><b>理念：</b>开放、可测试、纪律成文、刻意简化。规则从真实事故复盘里长出来，删除安全做到内核级，系统提示词分段可编程。</div>
+  </div>
+  <div class="card">
+    <h3><span class="dot" style="background:var(--cc)"></span>Claude Code 2.1.268</h3>
+    <div class="score-big" style="color:var(--cc)">7.5</div>
+    <div class="score-cap">202 MB Mach-O 闭源二进制 · strings 一手取证</div>
+    <div class="tagline"><b>理念：</b>一切可配置、面向企业。28 个 hook 事件 × 5 种 handler 的声明层、组织策略下发、最广的插件与 MCP 生态。</div>
+  </div>
+  <div class="card">
+    <h3><span class="dot" style="background:var(--codex)"></span>Codex CLI 0.154.0</h3>
+    <div class="score-big" style="color:var(--codex)">7.6</div>
+    <div class="score-cap">Rust 闭源二进制 · strings 一手取证</div>
+    <div class="tagline"><b>理念：</b>沙箱优先、状态可重建。seatbelt / landlock 双沙箱、world-state 重注入、rollout 全量记录、按模式切推理预算。</div>
+  </div>
+</div>
+
+<!-- ============ 分析基线 ============ -->
+<h2>一、分析基线 <span class="en">Baseline</span></h2>
+<p class="note">横截面比较，只基于代码、二进制与本地数据的一手证据，不做历史版本纵向对比。</p>
+<table>
+  <thead><tr><th>项</th><th>值</th></tr></thead>
+  <tbody>
+    <tr><td>评估对象</td><td><code>jayli/pi-coder</code> @ <code>d82fa69</code>（v2.1.6，2026-09-27，main，与远端一致；评分基线为 <code>bc717f9</code> v2.1.5，数字已刷新至当前 HEAD）</td></tr>
+    <tr><td>pi 配套</td><td>pi-subagents 0.72.1（子代理 + watchdog）、pi-web-access 0.32.0（web 检索）</td></tr>
+    <tr><td>扩展规模</td><td>30 个扩展（v2.1.6 起 <code>destructive-guard/</code> 已从仓库删除，完整实现在 git 历史里）</td></tr>
+    <tr><td>代码量</td><td>实现 83 文件 23,357 行；测试 63 文件 20,949 行；合计 44,306 行（<b>测试占 47%</b>）</td></tr>
+    <tr><td>测试实跑</td><td>全量 <code>node --test</code>：1238 用例，1216 通过，22 跳过（沙箱嵌套按设计跳过），0 失败</td></tr>
+    <tr><td>环境开关</td><td>全部行为以 53 个 <code>PI_*</code> 环境变量表达：未设置 = 开，<code>off</code> = 关</td></tr>
+  </tbody>
+</table>
+
+<!-- ============ 评分矩阵 ============ -->
+<h2>二、核心评分矩阵 <span class="en">Score Matrix（权重 ÷ 93）</span></h2>
+<p class="note">每格加粗者为该维最高分。「上下文文件工程化」一维（权重 7）按报告价值判断移出表外：上下文文件超出尺寸预算不构成有意义的质量差异。</p>
+<table>
+  <thead>
+    <tr><th>维度</th><th class="num">权重</th><th class="num">pi</th><th class="num">CC</th><th class="num">Codex</th><th class="bar-cell">对比</th><th>一句话依据</th></tr>
+  </thead>
+  <tbody id="matrix-body"></tbody>
+  <tfoot>
+    <tr style="background:var(--bg-card-2); font-weight:700">
+      <td>加权合计（÷93）</td><td class="num">93</td>
+      <td class="num best pi">7.4</td><td class="num best cc">7.5</td><td class="num best codex">7.6</td>
+      <td colspan="3"></td>
+    </tr>
+  </tfoot>
+</table>
+
+<!-- ============ 雷达图 ============ -->
+<h2>三、11 维雷达图 <span class="en">Radar</span></h2>
+<p class="note">同一维度上三家互有胜负：pi 在纪律、子代理治理、抗漂移、提示词可编程性四维同时领先；Codex 在执行稳定性与可观测性最强；CC 在验证闭环、约束广度、任务计划、记忆最全。</p>
+<div class="radar-box"><svg id="radar" width="660" height="560" viewBox="0 0 660 560"></svg></div>
+<div class="legend">
+  <span><span class="dot" style="background:var(--pi)"></span>pi</span>
+  <span><span class="dot" style="background:var(--cc)"></span>Claude Code</span>
+  <span><span class="dot" style="background:var(--codex)"></span>Codex CLI</span>
+</div>
+
+<!-- ============ 理念对比 ============ -->
+<h2>四、三种理念 <span class="en">Philosophies</span></h2>
+<p class="note">分数接近，但三家对「harness 应该是什么」的回答完全不同。</p>
+<div class="philosophy">
+  <div class="card pi">
+    <h3><span class="dot" style="background:var(--pi)"></span>pi：纪律成文，刻意简化</h3>
+    <div class="motto">“小文件高频在场，胜过截断机器”</div>
+    <ul>
+      <li><b>开放可验证</b>：全部实现开源，1238 个用户可跑的测试；闭源两家的分数只能靠 strings 推断。</li>
+      <li><b>事故判例化</b>：28KB 全局规则逐条来自真实删除事故的复盘（「障碍不是毁灭的理由」「沉默不是同意」）。</li>
+      <li><b>内核级安全</b>：删除约束做到 macOS seatbelt 内核层，且只收窄到删除、写入不受限，误报面最小。</li>
+      <li><b>刻意简化</b>：追齐对手能力但砍掉冗余机器——不做 28 事件 hook 配置层、不做 OAuth 2.1 全套、任务状态不建独立存储。</li>
+      <li><b>可编程提示词</b>：system prompt 分段可寻址，扩展安全增段不破坏前缀缓存——对手都是封闭整体。</li>
+      <li><b>终端即产品表面</b>：12+ 显示扩展，diff 渲染 / 命令折叠 / 主题实时切换。</li>
+    </ul>
+  </div>
+  <div class="card cc">
+    <h3><span class="dot" style="background:var(--cc)"></span>Claude Code：一切可配置</h3>
+    <div class="motto">“给用户（和企业）一个声明层”</div>
+    <ul>
+      <li><b>声明式钩子</b>：28 个 hook 事件 × 5 种 handler（command / prompt / agent / http / mcp_tool），验证与拦截都能用户配置。</li>
+      <li><b>企业治理</b>：remote / managed settings、组织策略下发——单机工具不参赛的领域。</li>
+      <li><b>记忆系统最完整</b>：<code>if_version</code> 乐观并发、密钥机械拦截、双 scope。</li>
+      <li><b>生态最广</b>：插件市场、官方 MCP 目录、内置 TodoWrite / 后台执行 / OTEL 导出。</li>
+      <li><b>代价</b>：闭源不可测；系统提示词封闭；<code>bypassPermissions</code> 可写进 settings 默认值，关闭保护存在配置侧路径。</li>
+    </ul>
+  </div>
+  <div class="card codex">
+    <h3><span class="dot" style="background:var(--codex)"></span>Codex CLI：沙箱优先，状态可重建</h3>
+    <div class="motto">“模式决定预算，rollout 重建一切”</div>
+    <ul>
+      <li><b>沙箱双路线</b>：macOS seatbelt + Linux landlock，<code>approval_policy</code> 与 <code>workspace-write</code> / <code>danger-full-access</code> 模式化。</li>
+      <li><b>world-state 重注入</b>：AGENTS.md 作为世界状态基线，与压缩契约绑定。</li>
+      <li><b>执行稳定性最强（9 分）</b>：完整异步执行 + reconcile 对账自愈。</li>
+      <li><b>可观测性最强（9 分）</b>：rollout 全量记录可完整重建会话。</li>
+      <li><b>细节领先</b>：<code>plan_mode_reasoning_effort</code> 按模式切推理预算、update_plan 明文反复读条款、原生 <code>/goal</code> 带预算硬上限。</li>
+      <li><b>代价</b>：记忆「有机制无数据」（本机实测 0 行）；无对等多代理治理面；提示词封闭。</li>
+    </ul>
+  </div>
+</div>
+
+<!-- ============ 优劣对比 ============ -->
+<h2>五、优势与短板 <span class="en">Strengths &amp; Weaknesses</span></h2>
+<div class="pros-cons">
+  <div class="pc">
+    <h3><span class="dot" style="background:var(--pi)"></span> pi</h3>
+    <h4 class="pro">优势</h4>
+    <ul>
+      <li><b>4 个计分维度同时领先两家</b>：纪律条款质量 9、子代理治理 8、抗漂移 8、提示词可编程性 8。</li>
+      <li><b>harness 自身可测试性 9 vs 2/2</b>：删除边界跑真 seatbelt E2E（真内核 EPERM），用户可复现每一个分数。</li>
+      <li><b>删除安全纵深独一份</b>：只收窄删除 + 授权可记忆 + 永不删除层内核兜底 + bash / apply_patch 双路线共享授权，连退出码 0 里被掩盖的越界删除也能检出。</li>
+      <li><b>关闭保护只能靠用户物理按键</b>：dangerous 态没有命令入口，模型侧诱导路径被设计成不存在。</li>
+      <li><b>记忆索引机械派生</b>：索引扫正文重建，结构性不可能「写了记忆忘更新索引」。</li>
+      <li><b>显示层 9 分、MCP 零依赖三传输</b>（不计分领域）。</li>
+    </ul>
+    <h4 class="con">短板</h4>
+    <ul>
+      <li><b>无后台执行原语</b>（架构级缺口）→ 执行稳定性 6。<b>2.1.6 更新</b>：扩展级已由 <code>background-tasks/</code> 补齐（<code>run_in_background</code> / <code>background_output</code> / <code>background_kill</code>），pi 内核侧缺口仍在。</li>
+      <li>验证要求只能用环境变量表达，无声明式配置层。</li>
+      <li>记忆缺乐观并发等 4 件数据安全机制。</li>
+      <li>bypass 默认态下 push / publish / <code>curl | sh</code> 无机械闸，全靠纪律文本。</li>
+    </ul>
+  </div>
+  <div class="pc">
+    <h3><span class="dot" style="background:var(--cc)"></span> Claude Code</h3>
+    <h4 class="pro">优势</h4>
+    <ul>
+      <li><b>验证闭环 8</b>：Stop hook + 原生 goal 评估，背后是 28 事件 × 5 handler 的用户可配置声明层。</li>
+      <li><b>约束强制力 9</b>：sandbox-exec + bubblewrap、分层 permissions、四种 defaultMode。</li>
+      <li><b>任务与计划 9</b>：内置 TodoWrite（15 处命中）。</li>
+      <li><b>记忆 9</b>：乐观并发 + 密钥机械拦截 + 双 scope，全部实测命中。</li>
+      <li><b>集成生态 9</b>（不计分）：插件市场、官方 MCP 目录、OTEL 全链路导出、完整后台执行套件。</li>
+    </ul>
+    <h4 class="con">短板</h4>
+    <ul>
+      <li><b>抗漂移仅 6</b>：无规则重注入机制，长会话前置规则注意力衰减只能靠压缩缓解。</li>
+      <li>提示词可编程性 3：系统提示词封闭整体，用户侧无可编程面。</li>
+      <li>harness 不可测试（2）：闭源二进制，用户无法验证其质量。</li>
+      <li>显示层 / 终端 UX 固定（5）；子代理治理靠 hook 表达（7）。</li>
+    </ul>
+  </div>
+  <div class="pc">
+    <h3><span class="dot" style="background:var(--codex)"></span> Codex CLI</h3>
+    <h4 class="pro">优势</h4>
+    <ul>
+      <li><b>执行稳定性 9</b>：完整异步执行 + reconcile 对账自愈，三家最强。</li>
+      <li><b>可观测性 9</b>：rollout 记录可完整重建会话。</li>
+      <li><b>约束强制力 9</b>：approval_policy + seatbelt / landlock + Guardian 审查。</li>
+      <li><b>计划细节领先</b>：按模式切推理预算、明文禁止复读计划、<code>/goal</code> 带 token 预算硬上限。</li>
+      <li>抗漂移 7：world-state 重注入（注入点近因性略逊 pi 的 core-rules）。</li>
+    </ul>
+    <h4 class="con">短板</h4>
+    <ul>
+      <li><b>子代理治理 6</b>：无对等的多代理治理面（无 watchdog、无预算、无编排脚本）。</li>
+      <li><b>记忆「真特性、零数据」</b>：<code>memory_consolidate</code> 存在但本机实测 0 行记录。</li>
+      <li>提示词可编程性 5：系统提示词封闭。</li>
+      <li>harness 不可测试（2）；显示层固定（6）；集成生态配套 6。</li>
+    </ul>
+  </div>
+</div>
+
+<!-- ============ 不计分维度 ============ -->
+<h2>六、不计分维度 <span class="en">CC / Codex 不在同一层面竞争</span></h2>
+<table>
+  <thead><tr><th>维度</th><th class="num">pi</th><th class="num">CC</th><th class="num">Codex</th><th>说明</th></tr></thead>
+  <tbody>
+    <tr><td>显示层 / 终端 UX</td><td class="num best pi">9</td><td class="num">5</td><td class="num">6</td><td>pi 投入最重的领域之一：整行 diff 渲染、命令树状折叠、thinking 横向窗口、主题实时切换、statusline 防闪烁。</td></tr>
+    <tr><td>集成生态（MCP / web / subagent）</td><td class="num">7</td><td class="num best cc">9</td><td class="num">6</td><td>pi 一条 npm 命令装齐无手配依赖；CC 的生态广度（插件市场 / 官方 MCP 目录）仍更大。</td></tr>
+    <tr><td>harness 自身可测试性</td><td class="num best pi">9</td><td class="num">2</td><td class="num">2</td><td>pi 的分数可用仓库代码复现；闭源两家的分数来自厂商内部质量保障，用户不可验证。</td></tr>
+  </tbody>
+</table>
+
+<!-- ============ 剩余差距 ============ -->
+<h2>七、pi 的剩余差距 <span class="en">重要、非刻意简化、需要追齐</span></h2>
+<p class="note">与「刻意简化」不同，以下是真实差距及优先级。</p>
+<table>
+  <thead><tr><th>优先级</th><th>差距</th><th>性质</th></tr></thead>
+  <tbody>
+    <tr><td><span class="pill p0">P0</span></td><td><b>后台执行原语</b>（<code>run_in_background</code> 一类）：pi 0.87.1 dist 0 命中，长任务前台阻塞</td><td>架构级；<b>2.1.6 起扩展级已由 <code>background-tasks/</code> 补齐</b>，pi 内核侧缺口仍在（评分未重打）</td></tr>
+    <tr><td><span class="pill p1">P1</span></td><td><b>验证闭环的声明层</b>：项目专属验证要求无法声明式表达</td><td>表达能力差距，非触发率问题</td></tr>
+    <tr><td><span class="pill p1">P1</span></td><td><b>记忆的版本化写入</b>（<code>if_version</code> 或等价乐观并发）：同名写入直接覆盖</td><td>数据安全差距；CC 把它当一等机制</td></tr>
+    <tr><td><span class="pill p2">P2</span></td><td><b>约束强制力的广度</b>：bypass 默认态下 push / publish / 外网下载无机械闸</td><td>plan 态已证明 tool_call 钩子可行，缺的是铺到外发动作</td></tr>
+    <tr><td><span class="pill p2">P2</span></td><td><b>任务与计划两处细节</b>：按模式切推理预算、禁止复读计划（Codex 均有）</td><td>各一行改动的成本，尚未做</td></tr>
+    <tr><td><span class="pill p3">P3</span></td><td><b>可观测性标准导出</b>：无 OTEL 一类标准面</td><td>与价值判断重叠，优先级低</td></tr>
+  </tbody>
+</table>
+
+<footer>
+  <p><b>方法论</b>：pi 侧证据全部可复现（全量测试实跑、dist 直接 grep、会话 system prompt 实测）；CC / Codex 侧为二进制 strings 扫描 + 本地数据目录 SQL 检查，均为一手取证。</p>
+  <p><b>局限</b>：strings 扫描只能证明「存在」，不能证明「做得多好」——闭源两侧分数包含机制级判断，证据强度弱于完全开放的 pi 侧。这是闭源对照评估的固有不对称。</p>
+  <p>数据来源：<code>jayli/pi-coder</code> issue #4「pi harness 水位报告」· 评分基线 <code>bc717f9</code>（v2.1.5）· 数字刷新至 <code>d82fa69</code>（v2.1.6）· 生成于 2026-09-27</p>
+</footer>
+
+</div>
+
+<script>
+(function () {
+  // ---- 数据（来自 issue #4 评分矩阵）----
+  var DIMS = [
+    { name: "验证闭环 / 评估器", w: 14, pi: 7, cc: 8, codex: 8, note: "pi 有确定性闸 + /goal 独立评估器，但无用户可配置的声明层" },
+    { name: "约束强制力", w: 12, pi: 8, cc: 9, codex: 9, note: "pi 删除约束内核级，但 bypass 态对 push / publish 无机械闸" },
+    { name: "执行稳定性", w: 10, pi: 6, cc: 7, codex: 9, note: "pi 无后台执行原语（架构级缺口；2.1.6 起扩展级已由 background-tasks/ 补齐）" },
+    { name: "纪律条款质量", w: 8, pi: 9, cc: 8, codex: 7, note: "28KB 全局规则 + 7KB 蒸馏核心，条款来自真实事故复盘" },
+    { name: "任务与计划", w: 8, pi: 7, cc: 9, codex: 8, note: "pi 有任务清单 + plan mode，缺按模式切推理预算等两处细节" },
+    { name: "子代理治理", w: 8, pi: 8, cc: 7, codex: 6, note: "watchdog 双模型审查 + 三预算 + 单脚本编排" },
+    { name: "抗漂移", w: 8, pi: 8, cc: 6, codex: 7, note: "core-rules 按 hash diff 重注入，长会话规则不衰减" },
+    { name: "记忆 / 跨会话学习", w: 7, pi: 7, cc: 9, codex: 6, note: "pi 闭环完整且索引机械派生，缺乐观并发等四件数据安全机制" },
+    { name: "压缩契约", w: 6, pi: 7, cc: 8, codex: 7, note: "pi 原生压缩 + 压缩前钩子 + 压缩后规则重注入" },
+    { name: "提示词可编程性", w: 6, pi: 8, cc: 3, codex: 5, note: "system prompt 分段可寻址，扩展安全增段不破坏前缀缓存" },
+    { name: "可观测性", w: 6, pi: 6, cc: 6, codex: 9, note: "pi 会话 JSONL + 内存诊断环；Codex rollout 全量记录" }
+  ];
+  var COLORS = { pi: "#2dd4bf", cc: "#e8875b", codex: "#8b9cf8" };
+
+  // ---- 评分矩阵表 ----
+  function bar(v, color) {
+    return '<div class="bar-row"><span class="bar-label"></span>' +
+      '<div class="bar-track"><div class="bar-fill" style="width:' + (v * 10) + '%;background:' + color + '"></div></div>' +
+      '<span class="bar-val">' + v + '</span></div>';
+  }
+  var tbody = document.getElementById("matrix-body");
+  var html = "";
+  DIMS.forEach(function (d) {
+    var max = Math.max(d.pi, d.cc, d.codex);
+    function cls(v, key) { return v === max ? 'best ' + key : ''; }
+    html += "<tr>" +
+      "<td>" + d.name + "</td>" +
+      '<td class="num">' + d.w + "</td>" +
+      '<td class="num ' + cls(d.pi, "pi") + '">' + d.pi + "</td>" +
+      '<td class="num ' + cls(d.cc, "cc") + '">' + d.cc + "</td>" +
+      '<td class="num ' + cls(d.codex, "codex") + '">' + d.codex + "</td>" +
+      '<td class="bar-cell">' + bar(d.pi, COLORS.pi) + bar(d.cc, COLORS.cc) + bar(d.codex, COLORS.codex) + "</td>" +
+      "<td>" + d.note + "</td></tr>";
+  });
+  tbody.innerHTML = html;
+
+  // ---- 雷达图 ----
+  var svg = document.getElementById("radar");
+  var NS = "http://www.w3.org/2000/svg";
+  var cx = 330, cy = 285, R = 195, N = DIMS.length;
+  function el(tag, attrs) {
+    var e = document.createElementNS(NS, tag);
+    for (var k in attrs) e.setAttribute(k, attrs[k]);
+    return e;
+  }
+  function angle(i) { return -Math.PI / 2 + i * 2 * Math.PI / N; }
+  function pt(i, r) { return [cx + r * Math.cos(angle(i)), cy + r * Math.sin(angle(i))]; }
+
+  // 网格环 + 刻度
+  [2, 4, 6, 8, 10].forEach(function (lv) {
+    var pts = [];
+    for (var i = 0; i < N; i++) pts.push(pt(i, R * lv / 10).join(","));
+    svg.appendChild(el("polygon", { points: pts.join(" "), fill: "none", stroke: lv === 10 ? "#3a4556" : "#242c3a", "stroke-width": 1 }));
+  });
+  // 轴线 + 标签
+  DIMS.forEach(function (d, i) {
+    var p = pt(i, R);
+    svg.appendChild(el("line", { x1: cx, y1: cy, x2: p[0], y2: p[1], stroke: "#242c3a", "stroke-width": 1 }));
+    var lp = pt(i, R + 26);
+    var t = document.createElementNS(NS, "text");
+    var anchor = Math.abs(lp[0] - cx) < 12 ? "middle" : (lp[0] > cx ? "start" : "end");
+    t.setAttribute("x", lp[0]); t.setAttribute("y", lp[1] + 4);
+    t.setAttribute("text-anchor", anchor);
+    t.setAttribute("fill", "#9aa7b8"); t.setAttribute("font-size", "12.5");
+    t.textContent = d.name;
+    svg.appendChild(t);
+    var t2 = document.createElementNS(NS, "text");
+    t2.setAttribute("x", lp[0]); t2.setAttribute("y", lp[1] + 19);
+    t2.setAttribute("text-anchor", anchor);
+    t2.setAttribute("fill", "#5c6773"); t2.setAttribute("font-size", "11");
+    t2.textContent = d.pi + " / " + d.cc + " / " + d.codex;
+    svg.appendChild(t2);
+  });
+  // 数据多边形
+  [["codex", COLORS.codex], ["cc", COLORS.cc], ["pi", COLORS.pi]].forEach(function (s) {
+    var key = s[0], color = s[1], pts = [];
+    for (var i = 0; i < N; i++) pts.push(pt(i, R * DIMS[i][key] / 10).join(","));
+    svg.appendChild(el("polygon", { points: pts.join(" "), fill: color, "fill-opacity": 0.10, stroke: color, "stroke-width": 2, "stroke-linejoin": "round" }));
+    for (var j = 0; j < N; j++) {
+      var p = pt(j, R * DIMS[j][key] / 10);
+      svg.appendChild(el("circle", { cx: p[0], cy: p[1], r: 2.6, fill: color }));
+    }
+  });
+})();
+</script>
+</body>
+</html>
