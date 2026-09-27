@@ -96,6 +96,9 @@ interface Harness {
 	logRoot: string;
 	extension: LoadedExtension;
 	notifies: Array<{ text: string; level?: string }>;
+	statuses: Map<string, string | undefined>;
+	/** 每一次 setStatus 调用的完整记录（dock 测试要数次数 / 看时序）。 */
+	statusSets: Array<{ key: string; text: string | undefined }>;
 	sent: SentMessage[];
 	idle: boolean;
 	tool(name: string, params: unknown): Promise<{ text: string; details: any }>;
@@ -128,8 +131,12 @@ async function loadHarness(): Promise<Harness> {
 
 	// env 隔离：日志根指到临时目录。扩展在**每次工具调用时**才读 env（不是工厂里读一次），
 	// 所以 env 必须活到 harness 用完为止 —— 在 test.after 里还原。
+	// dock 的两个旋钮（PI_BACKGROUND_TASKS_DOCK / _LINGER_MS）是工厂期读的，
+	// 用例在调 loadHarness 之前自己设，这里统一还原。
 	const savedDir = process.env.PI_BACKGROUND_TASKS_DIR;
 	const savedOff = process.env.PI_BACKGROUND_TASKS;
+	const savedDock = process.env.PI_BACKGROUND_TASKS_DOCK;
+	const savedLinger = process.env.PI_BACKGROUND_TASKS_DOCK_LINGER_MS;
 	process.env.PI_BACKGROUND_TASKS_DIR = logRoot;
 	delete process.env.PI_BACKGROUND_TASKS;
 	cleanup.push(() => {
@@ -137,6 +144,10 @@ async function loadHarness(): Promise<Harness> {
 		else process.env.PI_BACKGROUND_TASKS_DIR = savedDir;
 		if (savedOff === undefined) delete process.env.PI_BACKGROUND_TASKS;
 		else process.env.PI_BACKGROUND_TASKS = savedOff;
+		if (savedDock === undefined) delete process.env.PI_BACKGROUND_TASKS_DOCK;
+		else process.env.PI_BACKGROUND_TASKS_DOCK = savedDock;
+		if (savedLinger === undefined) delete process.env.PI_BACKGROUND_TASKS_DOCK_LINGER_MS;
+		else process.env.PI_BACKGROUND_TASKS_DOCK_LINGER_MS = savedLinger;
 	});
 
 	const loaded = await pi.discoverAndLoadExtensions([EXTENSION_PATH], projectDir, agentDir, pi.createEventBus());
@@ -150,6 +161,8 @@ async function loadHarness(): Promise<Harness> {
 		logRoot,
 		extension,
 		notifies: [],
+		statuses: new Map(),
+		statusSets: [],
 		sent: [],
 		idle: true,
 		tool: async () => ({ text: "", details: undefined }),
@@ -171,6 +184,13 @@ async function loadHarness(): Promise<Harness> {
 		signal: undefined,
 		ui: {
 			notify: (text: string, level?: string) => harness.notifies.push({ text, level }),
+			setStatus: (key: string, text: string | undefined) => {
+				harness.statusSets.push({ key, text });
+				if (text === undefined) harness.statuses.delete(key);
+				else harness.statuses.set(key, text);
+			},
+			// 与 user-message-bar 测试同口径：自造皮肤，色值可控。
+			theme: { fg: (color: string, text: string) => `${color}(${text})` },
 		},
 		sessionManager: {
 			getSessionId: () => "test-session",
@@ -577,5 +597,123 @@ test("旧 registry 的迟到终态不注入新会话（registry 身份闸）", {
 	await new Promise((resolve) => setTimeout(resolve, 400));
 	assert.equal(h.sent.length, before, "旧 registry 的迟到终态不该注入新会话");
 	await h.tool("background_kill", { id: "bg_1" });
+	await h.shutdown();
+});
+
+// =============================================================================
+// statusline 任务 dock（真 spawn + 真定时器）
+// =============================================================================
+
+const DOCK_KEY = "background-tasks";
+
+/** 触发一个生命周期钩子（ctx 用 harness 里那只，dock 要靠它拿 theme / setStatus）。 */
+async function fire(h: Harness, event: string): Promise<void> {
+	for (const handler of h.extension.handlers.get(event) ?? []) await handler({}, {});
+}
+
+test("dock：任务启动即发布一行，含 id / 状态 / 时长 / 命令", { skip }, async () => {
+	const h = await loadHarness();
+	await h.tool("run_in_background", { command: "sleep 30" });
+	const line = h.statuses.get(DOCK_KEY);
+	assert.ok(line, "启动后应当发布 dock 行");
+	assert.match(line!, /bg_1/);
+	assert.match(line!, /warning\(running\)/, "running 用 warning 槽");
+	assert.match(line!, /accent\(bg_1\)/, "id 用 accent 槽");
+	assert.match(line!, /sleep 30/);
+	assert.match(line!, /^\u2699 |dim\(\u2699\)/, "行首是 ⚙ 图标");
+	await h.shutdown();
+});
+
+test("dock：秒级 tick 推进运行时长", { skip }, async () => {
+	const h = await loadHarness();
+	await h.tool("run_in_background", { command: "sleep 30" });
+	const first = h.statuses.get(DOCK_KEY)!;
+	assert.match(first, /0s/);
+	// 真定时器：等过两个 tick，时长应当已经跳到 2s 上下
+	await waitFor(() => /muted\((1|2|3)s\)/.test(h.statuses.get(DOCK_KEY) ?? ""), 6000, "时长每秒跳动");
+	assert.ok(h.statusSets.length >= 2, "tick 应当重复发布过");
+	await h.shutdown();
+});
+
+test("dock：终态换成 exit 文案，驻留窗口过后自动清掉", { skip }, async () => {
+	// 工厂期读 env，所以必须在 loadHarness 之前设；loadHarness 负责还原。
+	process.env.PI_BACKGROUND_TASKS_DOCK_LINGER_MS = "300";
+	const h = await loadHarness();
+	await h.tool("run_in_background", { command: "echo dock-done" });
+	await waitFor(() => h.sent.length > 0, 8000, "任务结束");
+	assert.match(h.statuses.get(DOCK_KEY) ?? "", /success\(exit 0\)/, "exit 0 用 success 槽");
+	// 驻留 300ms + 一个 1s tick 之内应当清键并停表
+	await waitFor(() => h.statuses.get(DOCK_KEY) === undefined, 6000, "驻留窗口过后清掉 dock 行");
+	const after = h.statusSets.length;
+	await new Promise((resolve) => setTimeout(resolve, 1500));
+	assert.equal(h.statusSets.length, after, "清掉之后不该再有秒级重绘（表已停）");
+	await h.shutdown();
+});
+
+test("dock：弹窗期间停表，弹窗结束后恢复", { skip }, async () => {
+	const h = await loadHarness();
+	await h.tool("run_in_background", { command: "sleep 30" });
+	assert.ok(h.statuses.get(DOCK_KEY), "先确认 dock 在跑");
+
+	await fire(h, "ui_prompt_start");
+	const frozen = h.statusSets.length;
+	await new Promise((resolve) => setTimeout(resolve, 1500));
+	assert.equal(h.statusSets.length, frozen, "弹窗期间不该有任何重绘（否则会把用户的 scrollback 拽回底部）");
+
+	await fire(h, "ui_prompt_end");
+	assert.ok(h.statuses.get(DOCK_KEY), "弹窗结束后 dock 行应当立刻回来");
+	await waitFor(() => h.statusSets.length > frozen + 1, 6000, "恢复后 tick 继续跑");
+	await h.shutdown();
+});
+
+test("dock：session_shutdown 清键并停表", { skip }, async () => {
+	const h = await loadHarness();
+	await h.tool("run_in_background", { command: "sleep 30" });
+	assert.ok(h.statuses.get(DOCK_KEY));
+	await h.shutdown();
+	assert.equal(h.statuses.get(DOCK_KEY), undefined, "shutdown 应当清掉 dock 行");
+	const after = h.statusSets.length;
+	await new Promise((resolve) => setTimeout(resolve, 1300));
+	assert.equal(h.statusSets.length, after, "shutdown 后不该再发布");
+});
+
+test("dock：PI_BACKGROUND_TASKS_DOCK=off 时一行都不发布，工具照旧", { skip }, async () => {
+	process.env.PI_BACKGROUND_TASKS_DOCK = "off";
+	const h = await loadHarness();
+	const result = await h.tool("run_in_background", { command: "sleep 30" });
+	assert.match(result.text, /已在后台启动 bg_1/, "关掉 dock 不影响工具本身");
+	await new Promise((resolve) => setTimeout(resolve, 1300));
+	assert.equal(h.statuses.get(DOCK_KEY), undefined, "dock 关掉后不该发布任何状态");
+	assert.equal(h.statusSets.length, 0, "一次 setStatus 都不该调");
+	await h.shutdown();
+});
+
+test("dock：注册了 ui_prompt_start / ui_prompt_end 两个冻结钩子", { skip }, async () => {
+	const h = await loadHarness();
+	assert.ok(h.extension.handlers.get("ui_prompt_start")?.length, "必须注册 ui_prompt_start");
+	assert.ok(h.extension.handlers.get("ui_prompt_end")?.length, "必须注册 ui_prompt_end");
+	await h.shutdown();
+});
+
+test("dock：弹窗期间连事件驱动的那一下也不发布（终态通知不触发重绘）", { skip }, async () => {
+	// env 还原在全局 test.after 里，前面的用例设过的值会漏到这里 —— 自己先清干净。
+	delete process.env.PI_BACKGROUND_TASKS_DOCK;
+	process.env.PI_BACKGROUND_TASKS_DOCK_LINGER_MS = "8000";
+	const h = await loadHarness();
+	await h.tool("run_in_background", { command: "echo frozen-dock" });
+	assert.ok(h.statuses.get(DOCK_KEY), "先确认 dock 在跑");
+
+	await fire(h, "ui_prompt_start");
+	const frozen = h.statusSets.length;
+	// 任务在弹窗期间结束：终态回调会注入通知（那是给模型的，不是重绘），
+	// 但 dock 一次都不该发布 —— 一次重绘同样会把用户的 scrollback 拽回底部。
+	await waitFor(() => h.sent.length > 0, 8000, "任务在弹窗期间结束");
+	await new Promise((resolve) => setTimeout(resolve, 300));
+	assert.equal(h.statusSets.length, frozen, "弹窗期间一次 setStatus 都不该有");
+
+	await fire(h, "ui_prompt_end");
+	const line = h.statuses.get(DOCK_KEY);
+	assert.ok(line, "弹窗一关按当前真实状态重算");
+	assert.match(line!, /success\(exit 0\)/, "重算后看到的是终态，不是停在旧值");
 	await h.shutdown();
 });

@@ -40,13 +40,30 @@
  * 直接 `spawn`，**后台命令因此不经过删除能力边界** —— 语义上等同用户自己在终端里
  * `cmd &`。`/background` 的输出里也印了这句提示。要受边界约束的删除请走前台 bash。
  *
+ * ## statusline 底部的任务 dock
+ *
+ * 有任务在跑（或刚进终态）时，footer 最底部多一行说明「正在跑什么」：
+ *
+ *   ⚙ bg_1 running 12s · npm run test --silent…
+ *
+ * 文案与配色在纯模块 `status.ts` 里（可单测），本文件只负责发布与节拍：一个 1s 的
+ * `setInterval`（`unref`，不吊住事件循环）重算并 `ctx.ui.setStatus(STATUS_KEY, …)`，
+ * 没有可显示的任务时自己停表并清键；终态行驻留 `TERMINAL_LINGER_MS`（10s）后消失。
+ * 弹窗期间（`ui_prompt_start` → `ui_prompt_end`）**一次也不发布**：不只是停掉秒级 tick，
+ * 连事件驱动的那一下（任务恰好在弹窗里结束时的终态回调）也跳过 —— pi 的主屏渲染每次都把
+ * 视口钉在底部，一次重绘同样会把用户手动上翻的 scrollback 拽回去（working-indicator 冻结
+ * 重绘的同一条理由）；弹窗一关按**当前真实状态**重算，所以什么都不丢（时长也是重算的）。
+ * statusline 扩展把 `STATUS_KEY` 从拼接的第二行里摘出来单独渲染成最后一行，
+ * 所以它既不占 5 条 status 的预算，也不会与长 cwd 同行被截断。
+ *
  * ## 最简版明确不做
  *
  * 跨 pi 重启的任务恢复、超时自动杀（CC 的后台 bash 也没有超时参数）、agent 类任务、
- * footer 任务 dock、stdout/stderr 分流（两路合并，等价 `2>&1`）。
+ * stdout/stderr 分流（两路合并，等价 `2>&1`）。
  *
  * 开关：`PI_BACKGROUND_TASKS=off` 整体关闭；`PI_BACKGROUND_TASKS_DIR` 覆盖日志根目录
- * （测试隔离用）。
+ * （测试隔离用）；`PI_BACKGROUND_TASKS_DOCK=off` 只关 statusline 那一行（工具与通知照旧）；
+ * `PI_BACKGROUND_TASKS_DOCK_LINGER_MS` 改终态行的驻留时长。
  */
 
 import fs from "node:fs";
@@ -68,6 +85,11 @@ import {
 	type BackgroundTask,
 	type Registry,
 } from "./registry.ts";
+import {
+	DOCK_TICK_MS,
+	STATUS_KEY as DOCK_STATUS_KEY,
+	formatBackgroundStatus,
+} from "./status.ts";
 
 const CUSTOM_TYPE = "background-task";
 
@@ -126,12 +148,86 @@ export default function backgroundTasks(pi: ExtensionAPI): void {
 	let disposed = false;
 	let logDir = "";
 
+	// ── statusline 任务 dock ───────────────────────────────────────────────
+
+	const DOCK_DISABLED =
+		(process.env.PI_BACKGROUND_TASKS_DOCK ?? "").trim().toLowerCase() === "off";
+	const dockLingerMs = Number(process.env.PI_BACKGROUND_TASKS_DOCK_LINGER_MS) || undefined;
+	let dockTimer: ReturnType<typeof setInterval> | undefined;
+	/** 弹窗期间不发布：一次重绘同样会把用户手动上翻的 scrollback 拽回底部。 */
+	let dockFrozen = false;
+
+	/**
+	 * 重算 dock 行并发布，返回「是否还有东西在显示」。
+	 * 没有可显示的任务时清键 —— 节拍由 `bumpDock` 据此决定起表还是停表。
+	 */
+	function refreshDock(): boolean {
+		const ctx = lastCtx;
+		if (DOCK_DISABLED || !ctx || !ctx.hasUI) return false;
+		let text: string | undefined;
+		try {
+			// theme 在渲染时求值：`ctx.ui.theme` 是跨 `/theme` 换肤的活 Proxy。
+			text = formatBackgroundStatus(
+				ctx.ui.theme,
+				registry?.listTasks() ?? [],
+				Date.now(),
+				dockLingerMs,
+			);
+			ctx.ui.setStatus(DOCK_STATUS_KEY, text);
+		} catch {
+			// stale ctx（会话被换掉）：状态栏不值得为此挂掉，停表即可。
+			return false;
+		}
+		return text !== undefined;
+	}
+
+	function startDock(): void {
+		if (DOCK_DISABLED || dockTimer || dockFrozen) return;
+		const timer = setInterval(() => {
+			// 驻留窗口过了 / 任务都没了 → 自己停表，不留一个空转的秒级定时器。
+			if (!refreshDock()) stopDock();
+		}, DOCK_TICK_MS);
+		// 收尾定时器不能吊住事件循环：pi 要退出时它不该是拦路的那个。
+		timer.unref?.();
+		dockTimer = timer;
+	}
+
+	function stopDock(): void {
+		if (!dockTimer) return;
+		clearInterval(dockTimer);
+		dockTimer = undefined;
+	}
+
+	/**
+	 * 任务有变化（启动 / 终态 / kill）时立刻刷一次，并据此决定要不要秒级 tick。
+	 * 弹窗期间**一次也不发布**（连事件驱动的那一下也不）：pi 主屏渲染每次都把视口钉在
+	 * 底部，一次重绘同样会把用户手动上翻的 scrollback 拽回去。弹窗一关，`ui_prompt_end`
+	 * 按当前真实状态重算，所以什么都不丢（时长也是重算的，不会停在旧值）。
+	 */
+	function bumpDock(): void {
+		if (DOCK_DISABLED || dockFrozen) return;
+		if (refreshDock()) startDock();
+		else stopDock();
+	}
+
 	// 会话替换（/clear、/new、/resume）也会发 session_shutdown，但扩展实例不死：
 	// 新会话的 session_start 一到就把 disposed 复位，否则新会话里的后台任务
 	// 完成时永远注入不了通知。reload 是另一回事 —— 那里旧 runtime 整个被换掉，
 	// 新工厂重新跑，这里的复位不会漏。
 	pi.on("session_start", () => {
 		disposed = false;
+	});
+
+	// 弹窗期间冻结 dock 的一切发布（与 working-indicator 同一套取舍）。
+	pi.on("ui_prompt_start", () => {
+		dockFrozen = true;
+		stopDock();
+	});
+
+	pi.on("ui_prompt_end", () => {
+		dockFrozen = false;
+		// 只在确实有东西要显示时才重新起表。
+		if (registry && registry.listTasks().length > 0) bumpDock();
 	});
 
 	function ensureRegistry(ctx: ExtensionContext): Registry {
@@ -159,6 +255,8 @@ export default function backgroundTasks(pi: ExtensionAPI): void {
 					// 空闲 → 直接起一轮；流式中 → 排到本轮结束后（不打断当前推理）
 					{ triggerTurn: true, deliverAs: lastCtx?.isIdle?.() ? undefined : "followUp" },
 				);
+				// dock 立刻换成终态文案（驻留窗口过后由秒级 tick 自己清掉）。
+				bumpDock();
 			},
 		});
 		registry = reg;
@@ -199,6 +297,7 @@ export default function backgroundTasks(pi: ExtensionAPI): void {
 			if (task.spawnError) {
 				return textResult(`启动失败：${task.spawnError}`, { ok: false, task: taskDetails(task, Date.now()) });
 			}
+			bumpDock();
 			return textResult(
 				[
 					`已在后台启动 ${task.id}（pid ${task.pid ?? "?"}）。`,
@@ -277,6 +376,7 @@ export default function backgroundTasks(pi: ExtensionAPI): void {
 			const result = reg.killTask(id, signal);
 			if (!result.ok) return textResult(result.reason ?? `杀不掉 ${id}`, { ok: false });
 			const task = reg.resolveTask(id);
+			bumpDock();
 			return textResult(
 				`已向 ${id} 发送 ${signal}（整个进程组）；${formatElapsed(Date.now() - (task?.startedAt ?? Date.now()))} 后仍未退出会补 SIGKILL。`,
 				{ ok: true, task: task ? taskDetails(task, Date.now()) : undefined },
@@ -326,6 +426,7 @@ export default function backgroundTasks(pi: ExtensionAPI): void {
 					return;
 				}
 				const result = reg.killTask(id);
+				bumpDock();
 				ctx.ui.notify(result.ok ? `已向 ${id} 发送 SIGTERM` : (result.reason ?? `杀不掉 ${id}`), result.ok ? "info" : "warning");
 				return;
 			}
@@ -376,6 +477,12 @@ export default function backgroundTasks(pi: ExtensionAPI): void {
 
 	pi.on("session_shutdown", () => {
 		disposed = true;
+		stopDock();
+		try {
+			lastCtx?.ui.setStatus(DOCK_STATUS_KEY, undefined);
+		} catch {
+			// stale ctx：状态随会话一起消失。
+		}
 		registry?.killAll();
 		registry?.dispose();
 		registry = undefined;

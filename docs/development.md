@@ -18,6 +18,7 @@ These come from pi's extension discovery and they decide where a file may live:
 Two consequences worth remembering:
 
 - `recap/index.ts` imports `../simple-task/gap.ts` across directories. Both must ship together.
+- `statusline/line.ts` imports `../background-tasks/status.ts` for the dock's reserved `STATUS_KEY`. Both must ship together, or the dock line silently falls back into the concatenated second row.
 - `verify-loop/index.ts` imports `../recap/subagents.ts` across directories (the "is a subagent running" probe that defers `/goal` evaluation). Both must ship together.
 - `sandbox-boundary/index.ts` imports `../bash-command-collapse/sandbox.ts`, `../bash-command-collapse/allowlist.ts` and `../bash-command-collapse/sandbox-mode.ts`; `plan-mode/index.ts` imports `../bash-command-collapse/sandbox-mode.ts` (the runtime switch its three-state cycle flips). The seatbelt profile and the `apply_patch` gate are two halves of one delete boundary sharing one judgement and one allowlist, so a package that shipped only one of those directories would load an extension with no boundary and no memory.
 - `package.json`'s `pi.extensions: ["./extensions"]` resolves a directory with exactly these rules, so the manifest and the convention directory behave identically.
@@ -25,20 +26,20 @@ Two consequences worth remembering:
 ## Tests
 
 ```bash
-npm test        # node --test — 1238 tests, ~45 s
+npm test        # node --test — 1269 tests, ~45 s
 ```
 
 Test files run in parallel (`os.availableParallelism()` — 15 on the machine this was written on). Under that load one case is unreliable: the real spawned MCP handshake in `mcp/client.test.ts` intermittently hits its own 5 s handshake budget (seen twice in four full runs here, and never in isolation). The whole suite passes reliably with reduced parallelism at the same wall time:
 
 ```bash
-node --test --test-concurrency=4      # 1238 tests, ~45 s
+node --test --test-concurrency=4      # 1269 tests, ~45 s
 ```
 
 The 5 s budget is inside the snapshot's `client.test.ts`, which this package keeps byte-identical — it belongs upstream in `clients/pi/`, not here.
 
-**22 of the 1238 are skipped on purpose.** They are the real-sandbox cases in `bash-command-collapse/render.test.ts`: nested `sandbox-exec` cannot run inside a pi session, so they declare themselves skipped rather than faking a pass. They are the ones that prove the boundary is enforced by the **kernel** rather than by a pattern match, so run them from a plain terminal when you touch `sandbox.ts`.
+**22 of the 1269 are skipped on purpose.** They are the real-sandbox cases in `bash-command-collapse/render.test.ts`: nested `sandbox-exec` cannot run inside a pi session, so they declare themselves skipped rather than faking a pass. They are the ones that prove the boundary is enforced by the **kernel** rather than by a pattern match, so run them from a plain terminal when you touch `sandbox.ts`.
 
-The pure-logic modules are written so this works: they do not import `@earendil-works/pi-*` at all, take injected dependencies instead (a `widthOf` function, an `exec` function, a minimal theme interface), and are duck-typed against structural interfaces. That is why `thinking-collapse/window.ts`, `statusline/line.ts`, `tool-diff/title-row.ts`, `rewind/checkpoints.ts`, `prompt-editor/bash-prompt.ts`, `bash-command-collapse/sandbox.ts`, `allowlist.ts` and the rest can run under plain `node --test`. `mcp/` goes further in the same direction: `protocol.ts`, `config.ts`, `client.ts`, `tools.ts` and `headers-command.ts` are pi-free too, so the whole chain — including a **real** spawned stdio server (`fixtures/fake-mcp-server.mjs`) and real `node:http` servers for the HTTP and SSE transports — is covered with no transport mocking.
+The pure-logic modules are written so this works: they do not import `@earendil-works/pi-*` at all, take injected dependencies instead (a `widthOf` function, an `exec` function, a minimal theme interface), and are duck-typed against structural interfaces. That is why `thinking-collapse/window.ts`, `statusline/line.ts`, `tool-diff/title-row.ts`, `rewind/checkpoints.ts`, `prompt-editor/bash-prompt.ts`, `background-tasks/status.ts`, `bash-command-collapse/sandbox.ts`, `allowlist.ts` and the rest can run under plain `node --test`. `mcp/` goes further in the same direction: `protocol.ts`, `config.ts`, `client.ts`, `tools.ts` and `headers-command.ts` are pi-free too, so the whole chain — including a **real** spawned stdio server (`fixtures/fake-mcp-server.mjs`) and real `node:http` servers for the HTTP and SSE transports — is covered with no transport mocking.
 
 Two test files go the other way: [`prompt-editor/render.test.ts`](../extensions/prompt-editor/render.test.ts) loads the **real** extension through pi's own loader and asserts the `!` bash-mode render contract line by line and column by column, with only the surroundings faked (a `tui` that has just `terminal.rows` and `requestRender()`, an identity `borderColor`, keybindings that never match); [`user-message-bar/index.test.ts`](../extensions/user-message-bar/index.test.ts) does the same for the message box, comparing patched and unpatched frames of the same text at the same width — which is what proves the prototype patch landed on the class pi actually renders with, the one failure this feature can have. [`bash-command-collapse/render.test.ts`](../extensions/bash-command-collapse/render.test.ts) goes through the same loader and `ToolExecutionComponent` and asserts the rendered lines of the command block, including a failed command's status line. [`read-path-collapse/render.test.ts`](../extensions/read-path-collapse/render.test.ts) does it for the read block — the `• ` dot, its per-state color, the two-column indent, the absence of a background and of boundary blank lines, plus a control case proving other tools keep pi's default shell. All of them locate pi's library entry by reading the `# cmd-shim-target=` line out of the `pi` shim, and all **skip** — rather than failing or faking a pass — when pi cannot be resolved, because the copy under `~/.pi/agent/npm` is often an empty shell after `pi update --extensions`. Point them at a real entry with `PI_TEST_PI_ENTRY=/path/to/index.js`.
 

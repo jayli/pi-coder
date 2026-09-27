@@ -6,6 +6,11 @@
  * `ReadonlyFooterDataProvider` 结构兼容，index.ts 里原样传进来即可。
  */
 
+// 跨目录相对 import：后台任务 dock 的保留 status key 住在 background-tasks 那边。
+// 与 line.test.ts 里 plan-mode 的 `STATUS_KEY` 同一套取舍：两份字面量一旦漂移，
+// dock 行会静默退回拼接的第二行，没有任何报错 —— import 常量就永不发生。
+import { STATUS_KEY as BACKGROUND_DOCK_STATUS_KEY } from "../background-tasks/status.ts";
+
 /** pi 的 Theme.fg 子集（方法声明双变，真实 Theme 可直接赋值）。 */
 export interface StatuslineTheme {
 	fg(color: string, text: string): string;
@@ -108,9 +113,13 @@ export function formatMainLine(
 }
 
 /**
- * footer 的完整输出：一个主行（+ 可选状态行），行首恒缩进一格，超长只截断省略、绝不折行。
- * `truncate` 由 index.ts 注入 pi-tui 的 `truncateToWidth`（ANSI / 宽字符安全），
- * 这样这条关键约定也能在单测里直接断言。
+ * footer 的完整输出：一个主行（+ 可选状态行 + 可选后台任务 dock 行），行首恒缩进一格，
+ * 超长只截断省略、绝不折行。`truncate` 由 index.ts 注入 pi-tui 的 `truncateToWidth`
+ * （ANSI / 宽字符安全），这样这条关键约定也能在单测里直接断言。
+ *
+ * dock 行（background-tasks 的保留键）从拼接的第二行里**抽出来**单独渲染成最后一行：
+ * 它既不占 5 条 status 的预算，也不会与长 cwd 同行被截断 —— 用户要的就是「最底部
+ * 永远看得见的后台任务状态」。
  */
 export function composeFooterLines(
 	theme: StatuslineTheme,
@@ -122,8 +131,12 @@ export function composeFooterLines(
 ): string[] {
 	if (width <= 0) return [];
 	const lines = [`${LEADING_INDENT}${formatMainLine(theme, source, git, state)}`];
+	const dock = git.getExtensionStatuses().get(BACKGROUND_DOCK_STATUS_KEY);
 	const statuses = formatExtensionStatuses(theme, git);
 	if (statuses) lines.push(`${LEADING_INDENT}${statuses}`);
+	// dock 文案由 background-tasks 侧逐段着过色（恒带 ANSI），原样渲染；
+	// 终端宽度收口在下面的 truncate，所以 id / 状态 / 时长永不被截，只截行尾的命令。
+	if (dock && dock.trim().length > 0) lines.push(`${LEADING_INDENT}${dock.trim()}`);
 	return lines.map((line) => truncate(line, width, ELLIPSIS));
 }
 
@@ -132,10 +145,16 @@ export function composeFooterLines(
  * 自带 ANSI 的原样渲染（那些扩展已经自己配过色），没色的统一给 muted。
  *
  * 顺序：先按 `STATUS_PRIORITY`（模式指示排行首），其余按注册顺序。
+ *
+ * 后台任务 dock 的保留键在这里被**跳过**（它由 `composeFooterLines` 单独渲染成最后一行），
+ * 所以既不占下面的 5 条预算，也不会与长 cwd 同行被截断。
  */
 export function formatExtensionStatuses(theme: StatuslineTheme, git: StatuslineGitSource): string {
 	const entries = [...git.getExtensionStatuses().entries()].filter(
-		([key, value]) => key !== STATUSLINE_KEY && value.trim().length > 0,
+		([key, value]) =>
+			key !== STATUSLINE_KEY &&
+			key !== BACKGROUND_DOCK_STATUS_KEY &&
+			value.trim().length > 0,
 	);
 
 	const rank = (key: string): number => {

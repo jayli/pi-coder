@@ -28,6 +28,9 @@ import {
 // `STATUS_PRIORITY` 没写错字（两份字面量一旦漂移，排序会静默失效、没有任何报错）。
 // 与 `recap` → `simple-task/gap.ts` 同一套取舍：同仓库、同目录树、一起安装。
 import { STATUS_KEY as PLAN_MODE_STATUS_KEY } from "../plan-mode/render.ts";
+// 后台任务 dock 的保留键住在 background-tasks 那边：这里 import 它而不是重写字面量，
+// 两份字面量一旦漂移，下面的用例就会静默测不到真正的 dock 行。
+import { STATUS_KEY as BACKGROUND_DOCK_STATUS_KEY } from "../background-tasks/status.ts";
 
 const plain: StatuslineTheme = { fg: (_color, text) => text };
 const painted: StatuslineTheme = { fg: (color, text) => `${color}(${text})` };
@@ -394,5 +397,92 @@ describe("composeFooterLines", () => {
 
 	it("renders nothing for a non-positive width", () => {
 		assert.deepEqual(composeFooterLines(plain, sourceOf(), gitOf("main"), stateOf(), 0, (t) => t), []);
+	});
+});
+
+describe("composeFooterLines — background-task dock row", () => {
+	const DOCK = "⚙ bg_1 running 12s · npm run test --silent";
+
+	function lines(statuses: Map<string, string>, width = 200) {
+		return composeFooterLines(plain, sourceOf(), gitOf("main", statuses), stateOf(), width, (t) => t);
+	}
+
+	it("renders the dock as its own last row, out of the joined status line", () => {
+		const rendered = lines(
+			new Map([
+				["cwd", " 📁 /tmp/repo"],
+				[BACKGROUND_DOCK_STATUS_KEY, DOCK],
+			]),
+		);
+		assert.equal(rendered.length, 3);
+		assert.equal(rendered[1], " 📁 /tmp/repo", "第二行只剩 cwd，dock 不在里面");
+		assert.equal(rendered[2], ` ${DOCK}`, "dock 是最后一行，同样缩进一格");
+	});
+
+	it("does not consume the five-item status budget", () => {
+		const statuses = new Map<string, string>([
+			[BACKGROUND_DOCK_STATUS_KEY, DOCK],
+		]);
+		for (let i = 0; i < 6; i++) statuses.set(`k${i}`, `v${i}`);
+		const rendered = lines(statuses);
+		const joined = rendered[1]!;
+		assert.equal(joined.split(" | ").length, 5, joined);
+		assert.ok(joined.endsWith("v4") && !joined.includes("v5"), joined);
+		assert.equal(rendered[2], ` ${DOCK}`);
+	});
+
+	it("keeps pre-coloured dock text verbatim (the publisher paints its own segments)", () => {
+		const esc = String.fromCharCode(27);
+		const coloured = `${esc}[31m⚙ bg_1 exit=1${esc}[0m`;
+		const rendered = composeFooterLines(
+			painted,
+			sourceOf(),
+			gitOf("main", new Map([[BACKGROUND_DOCK_STATUS_KEY, coloured]])),
+			stateOf(),
+			200,
+			(t) => t,
+		);
+		assert.equal(rendered.length, 2, "没有其它 status 时只有主行 + dock 行");
+		assert.equal(rendered[1], ` ${coloured}`, "不能再包一层 muted");
+	});
+
+	it("skips a blank dock value and emits no row for it", () => {
+		const rendered = lines(
+			new Map([
+				["cwd", " 📁 /tmp/repo"],
+				[BACKGROUND_DOCK_STATUS_KEY, "   "],
+			]),
+		);
+		assert.equal(rendered.length, 2);
+		assert.equal(rendered[1], " 📁 /tmp/repo");
+	});
+
+	it("leaves the footer exactly as before when no background task exists", () => {
+		const rendered = lines(new Map([["cwd", " 📁 /tmp/repo"]]));
+		assert.deepEqual(rendered, [` ${DOC} | ᗌ main | (+0,-0)`, " 📁 /tmp/repo"]);
+	});
+
+	it("truncates only the dock row's tail, never its id / status / elapsed", () => {
+		// 真截断（与 index.ts 注入的 pi-tui `truncateToWidth` 同口径：按可见列数）。
+		const truncate = (text: string, max: number, ellipsis: string) =>
+			[...text].length > max ? `${[...text].slice(0, max - 1).join("")}${ellipsis}` : text;
+		const rendered = composeFooterLines(
+			plain,
+			sourceOf(),
+			gitOf("main", new Map([[BACKGROUND_DOCK_STATUS_KEY, DOCK]])),
+			stateOf(),
+			30,
+			truncate,
+		);
+		assert.equal(rendered.length, 2);
+		const dock = rendered[1]!;
+		assert.equal([...dock].length, 30, dock);
+		assert.ok(dock.endsWith(ELLIPSIS), dock);
+		assert.ok(dock.includes("bg_1 running 12s"), "头部三段永远看得见");
+	});
+
+	it("pins the reserved key to the publisher's literal", () => {
+		assert.equal(BACKGROUND_DOCK_STATUS_KEY, "background-tasks");
+		assert.notEqual(BACKGROUND_DOCK_STATUS_KEY, PLAN_MODE_STATUS_KEY);
 	});
 });
