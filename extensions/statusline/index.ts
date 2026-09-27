@@ -7,12 +7,13 @@
  *
  * 主行形态：
  *
- *   ⚡️ qwen3.8-flash/xhigh | Ctx 0.0% | ᗌ main | (+0,-0)
- *   ⚡️ qwen3.8-flash/xhigh | Ctx 0.0% | ᗌ main | (+0,-0) | thinking   ← 生成中
- *   ⚡️ qwen3.8-flash/xhigh | Ctx 0.0% | ᗌ no git | (no git)          ← 不在 git 仓库
+ *   🅼 qwen3.8-flash/xhigh | Ctx 0.0% | ᗌ main | (+0,-0)
+ *   🅼 qwen3.8-flash/xhigh | Ctx 0.0% | ᗌ main | (+0,-0) | thinking   ← 生成中
+ *   🅼 qwen3.8-flash/xhigh | Ctx 0.0% | ᗌ no git | (no git)          ← 不在 git 仓库
  *
- * 行首的 `⚡️` 是模型段图标（`line.ts` 的 `MODEL_ICON`，取代早期的 `Model:` 文字标签，
- * 省 4 列；emoji 自带颜色不上色）。模型段本体是 `ctx.model.id` + `ctx.thinkingLevel`
+ * 行首的 `🅼`（U+1F17C）是模型段图标（`line.ts` 的 `MODEL_ICON`，取代早期的 `Model:` 文字
+ * 标签，省 4 列；再早一版是 `⚡️`）。它不是 RGI emoji，pi-tui 量 1 列（Ambiguous），终端同口径。
+ * 模型段本体是 `ctx.model.id` + `ctx.thinkingLevel`
  * （live getter）拼成的 `<id>/<推理强度>`（level 读不到时只报 id）。刻意不加 `[1m]`
  * 那种上下文窗口后缀 —— 那是 Claude Code 的写法，pi 用不着。
  *

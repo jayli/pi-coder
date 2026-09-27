@@ -295,6 +295,31 @@ const BASH_SPINNER_ENABLED = (process.env.PI_BASH_SPINNER ?? "").toLowerCase() !
  */
 const SPINNER_RAINBOW_ENABLED = (process.env.PI_SPINNER_RAINBOW ?? "").toLowerCase() !== "off";
 /**
+ * watchdog 提示开关（`PI_WORKING_INDICATOR_WATCHDOG=off` 关闭）。关掉后 spinner 在
+ * watchdog 审查期间仍显示普通 Working，不做特殊提示。
+ */
+const WATCHDOG_HINT_ENABLED = (process.env.PI_WORKING_INDICATOR_WATCHDOG ?? "").toLowerCase() !== "off";
+/**
+ * watchdog 审查期间显示的文案（用户指定，英文，不带时长/省略号）。
+ */
+export const WATCHDOG_LABEL = "Subagent watchdog reviewing";
+/**
+ * `agent_end` 之后多久还没 settle 就认定「有东西在阻塞」并切到 watchdog 文案。
+ *
+ * 依据：pi-subagents 的 watchdog 在**每个改过仓库的回合**的 `agent_end` 里跑一次独立
+ * 模型审查（实测 7~17s），而 pi 要等所有 `agent_end` handler 跑完才清 spinner —— 所以
+ * 那段时间 spinner 一直转却没有解释。正常回合 `agent_end` → `agent_settled` 是毫秒级，
+ * 2s 阈值不会误报；唯一同样会阻塞这段窗口的自动压缩，由 `session_before_compact`
+ * 取消定时器兜底（见下）。`PI_WORKING_INDICATOR_WATCHDOG_DELAY_MS` 覆盖（测试用）。
+ */
+export const DEFAULT_WATCHDOG_DELAY_MS = 2_000;
+export const WATCHDOG_DELAY_MS = (() => {
+	const raw = (process.env.PI_WORKING_INDICATOR_WATCHDOG_DELAY_MS ?? "").trim();
+	if (raw === "") return DEFAULT_WATCHDOG_DELAY_MS;
+	const value = Number(raw);
+	return Number.isFinite(value) && value > 0 ? value : DEFAULT_WATCHDOG_DELAY_MS;
+})();
+/**
  * 幻彩里每种颜色持续的**帧数**（`PI_SPINNER_COLOR_HOLD`，默认 19 帧 × 80ms = 1520ms ≈ 1.5s
  * 一换色；1500ms 不是 80ms 的整数倍，取最近帧数）。解析不到 / 小于 1 时退回默认；
  * `spinner-frames.ts` 里还会再兜一次非有限值。
@@ -552,6 +577,13 @@ export default function (pi: ExtensionAPI) {
 	 */
 	let uiPromptActive = false;
 	/**
+	 * watchdog 审查提示是否正在显示。`agent_end` 后 `WATCHDOG_DELAY_MS` 还没 settle 就置
+	 * true（refresh 把文案切成 WATCHDOG_LABEL）；`agent_settled` / `agent_before_settle` /
+	 * `session_before_compact` / `agent_start` / `session_shutdown` 任一到就复位。
+	 */
+	let watchdogActive = false;
+	let watchdogTimer: ReturnType<typeof setTimeout> | null = null;
+	/**
 	 * 上一次装上去的色板指纹（`spinner-frames.ts` 的 `signature`）：`refresh()` 每秒拿当前主题
 	 * 现算一次，指纹变了才重装帧表 —— `/theme` 换肤后一秒内自愈，且相位只在真的换色时复位。
 	 */
@@ -655,6 +687,20 @@ export default function (pi: ExtensionAPI) {
 		let message: string;
 		try {
 			const now = Date.now();
+			// watchdog 审查中：只显示固定文案，不拼 token/时长，也不跑 bash spinner。
+			// 用户指定文案就是全部，加时长反而暗示「还要很久」。
+			if (watchdogActive) {
+				message = formatWorkingMessage(ctx.ui.theme, WATCHDOG_LABEL, null);
+				if (message !== lastMessage) {
+					lastMessage = message;
+					try {
+						ctx.ui.setWorkingMessage(message);
+					} catch {
+						stopActivity();
+					}
+				}
+				return;
+			}
 			driveBashSpinner(now);
 			const parts = buildParts(now);
 			let left = formatWorkingMessage(ctx.ui.theme, parts.label, parts.stats);
@@ -826,6 +872,33 @@ export default function (pi: ExtensionAPI) {
 		stopBashSpinner();
 		bashRuns.clear();
 		cancelSummaryRequest();
+		clearWatchdogHint();
+	}
+
+	/** 取消待触发的 watchdog 定时器并复位标志（幂等）。 */
+	function clearWatchdogHint(): void {
+		if (watchdogTimer !== null) {
+			clearTimeout(watchdogTimer);
+			watchdogTimer = null;
+		}
+		watchdogActive = false;
+	}
+
+	/**
+	 * `agent_end` 后起一个一次性定时器：到点还没 settle 就认定 watchdog（或其他阻塞）
+	 * 正在跑，把文案切成 WATCHDOG_LABEL。定时器 unref，不吊住进程退出。
+	 */
+	function armWatchdogHint(): void {
+		if (!WATCHDOG_HINT_ENABLED) return;
+		clearWatchdogHint();
+		watchdogTimer = setTimeout(() => {
+			watchdogTimer = null;
+			// 到点时回合必须还在（turnStartedAt 非空）才显示；settled 会先清掉它。
+			if (turnStartedAt === null) return;
+			watchdogActive = true;
+			refresh();
+		}, WATCHDOG_DELAY_MS);
+		watchdogTimer.unref?.();
 	}
 
 	/** 从 `toolcall_start` 的 partial 里取工具名。 */
@@ -966,6 +1039,7 @@ export default function (pi: ExtensionAPI) {
 		streamingTool = null;
 		thinking = false;
 		lastMessage = null;
+		clearWatchdogHint();
 		// print / json 模式没有 working loader 行，起定时器只是白跑。
 		if (ctx.hasUI) {
 			// 回合开始时装帧表：此刻 spinner 还没渲染（流式开始才出现），相位复位看不见；
@@ -1031,6 +1105,28 @@ export default function (pi: ExtensionAPI) {
 		// 问卷退出时会把 indicator 恢复成 pi 的默认帧（它不知道本扩展的彩帧），这里补装回去。
 		if (event.toolName === ASK_USER_QUESTION_TOOL) installRainbowSpinner(ctx);
 		refresh();
+	});
+
+	/**
+	 * `agent_end`：所有扩展的 agent_end handler 会被 pi 依次 await，跑完才发应用层
+	 * agent_end（TUI 在那里清 spinner）。pi-subagents 的 watchdog 就在这个 handler 里
+	 * 阻塞 7~17s 跑审查模型 —— 于是 spinner 一直转却没解释。这里起一个一次性定时器：
+	 * 到点还没 settle 就把文案切成 watchdog 提示（见 armWatchdogHint）。
+	 */
+	pi.on("agent_end", async () => {
+		armWatchdogHint();
+	});
+
+	/**
+	 * 压缩与 `/goal` 评估都发生在应用层 agent_end（spinner 已被 pi 清掉）**之后**、
+	 * agent_settled 之前。watchdog 阶段在那之前就已经结束，所以这两个事件一到就复位
+	 * 提示，避免把压缩 / verify-loop 的 `/goal` 评估误标成 watchdog。
+	 */
+	pi.on("session_before_compact", async () => {
+		clearWatchdogHint();
+	});
+	pi.on("agent_before_settle", async () => {
+		clearWatchdogHint();
 	});
 
 	/**

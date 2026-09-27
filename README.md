@@ -2,7 +2,7 @@
 
 # @bachi/pi-coder
 
-A complete [Pi](https://pi.dev) coding-agent environment packaged for npm: **31 extensions**, **3 themes**, and the global config files that make them work together.
+A complete [Pi](https://pi.dev) coding-agent environment packaged for npm: **30 extensions**, **3 themes**, and the global config files that make them work together.
 
 This is a working setup, not a collection of demos. Every extension is used daily, and each one documents the pi internals it depends on in its own file header — including the failure that motivated it and the things that look like they could be simplified but cannot be.
 
@@ -57,7 +57,7 @@ Without them two extensions degrade instead of failing: `recap` cannot tell whet
 | [`fenceless-code-block/`](extensions/fenceless-code-block/) | Markdown code blocks lose their fences (syntax colors kept, no background added). |
 | [`statusline/`](extensions/statusline/) | Replaces the footer: model/thinking level, context usage, git branch and diff stat, plus a second line for extension statuses. |
 | [`startup-logo/`](extensions/startup-logo/) | Static header logo with version and shortened cwd, and prunes `[Context]`/`[Prompts]`/`[Themes]` from the startup list. |
-| [`working-indicator/`](extensions/working-indicator/) | Semantic working message (`Tools Calling`, `Editing`, `Writing`, `Reading`, `Thinking`) with per-segment token counts and elapsed time. |
+| [`working-indicator/`](extensions/working-indicator/) | Semantic working message (`Tools Calling`, `Editing`, `Writing`, `Reading`, `Thinking`) with per-segment token counts and elapsed time, plus a `Subagent watchdog reviewing` message for the window where `pi-subagents`' watchdog blocks after `agent_end` and the spinner would otherwise turn unexplained. |
 | [`simple-task/`](extensions/simple-task/) | Task list driven by `task_set` / `task_update` / `task_get` and `/tasks`; state rides the session log, never the repo. All three tools use `renderShell: "self"`, so their blocks carry no background and no boundary blank lines, with one leading space per line — the same shell as the bash and read blocks. |
 | [`recap/`](extensions/recap/) | `/recap` (idempotent: re-running it while the summary is on screen does nothing), plus an automatic summary above the editor after 10s of idling. |
 | [`rewind/`](extensions/rewind/) | Shadow-git checkpoints and `/rewind` (or Esc Esc) to restore code and/or conversation. |
@@ -75,7 +75,6 @@ Without them two extensions degrade instead of failing: `recap` cannot tell whet
 | [`core-rules/`](extensions/core-rules/) | Re-pushes the distilled global rules (`~/.pi/agent/AGENTS.core.md`, shipped as [`config/AGENTS.core.md`](config/AGENTS.core.md)) to the **end** of the context at session start, after a compaction and whenever the content changed — the full `AGENTS.md` sits at the front of the system prompt, where its recency decays. Nothing is injected when nothing changed. |
 | [`verify-loop/`](extensions/verify-loop/) | Verification discipline as code, mirroring two Claude Code mechanisms on pi's `agent_before_settle` boundary. **The gate**: when a turn settles after file changes with no bash command run after them, it injects a visible message and forces one more turn (cap 2, counted from the projection, not memory). **`/goal`**: a completion condition evaluated after every turn by one tool-less model call (`met` / `not_met` / `impossible`, fail-open), with no-progress detection, an 8-continuation cap and resume support. `PI_VERIFY_LOOP=off\|notify\|block` switches the gate. |
 | [`sandbox-boundary/`](extensions/sandbox-boundary/) | The non-shell half of the delete boundary: `bash` runs inside a seatbelt profile, but `write` / `edit` are direct `fs` calls, so `apply_patch`'s `*** Delete File:` lines are checked on the `tool_call` hook instead. Shares one whitelist and one persistent allowlist with the bash side. |
-| [`destructive-guard/`](extensions/destructive-guard/) | **Retired from the author's live environment** (the seatbelt capability boundary replaced the lexical blacklist); shipped here as the reference implementation. A `tool_call` gate that inspects arguments **before** execution: delete targets in `bash`/`powershell` are judged against the protected-root / ancestor / fallback / derived-path rules, plus `outside-workdir`, `self-protection` and `vcs-history-loss`; dangerous delete code inside `write`/`edit` content, and scripts about to be executed, are caught too. Block rejects outright, confirm asks once in the TUI and fails closed without one. `/destructive-guard` shows the mode and this session's counts. |
 | [`init-command.ts`](extensions/init-command.ts) | Claude Code style `/init`: update `CLAUDE.md`, else `AGENTS.md`, else create `AGENTS.md`. |
 | [`clear-command.ts`](extensions/clear-command.ts) | `/clear` as an alias of `/new`. |
 | [`exit-command.ts`](extensions/exit-command.ts) | `exit`, `quit` or `bye` on an otherwise empty prompt quits pi; `/exit` too. |
@@ -88,7 +87,7 @@ All three are laid out side by side in the [palette reference](https://raw.githa
 
 ### Commands
 
-`/ask` `/background` `/bash-preview` `/bash-timeout` `/clear` `/destructive-guard` `/exit` `/goal` `/init` `/mcp` `/memory` `/plan` `/plan-status` `/recap` `/rewind` `/sandbox-boundary` `/tasks` `/theme`
+`/ask` `/background` `/bash-preview` `/bash-timeout` `/clear` `/exit` `/goal` `/init` `/mcp` `/memory` `/plan` `/plan-status` `/recap` `/rewind` `/sandbox-boundary` `/tasks` `/theme`
 
 Esc Esc opens `/rewind` (requires `doubleEscapeAction: "none"`, which the shipped config sets).
 
@@ -148,16 +147,16 @@ cp "$PKG/themes/"*.json             ~/.pi/agent/themes/            # optional: a
 | --- | --- |
 | [docs/installation.md](docs/installation.md) | Install, verify, upgrade, uninstall, and the local-checkout workflow. |
 | [docs/configuration.md](docs/configuration.md) | Every shipped config file, what was removed from the snapshot, and why. |
-| [docs/extensions.md](docs/extensions.md) | Reference for all 31 extensions: commands, switches, caveats, storage. |
+| [docs/extensions.md](docs/extensions.md) | Reference for all 30 extensions: commands, switches, caveats, storage. |
 | [docs/themes.md](docs/themes.md) | Theme files, the custom tokens, and the rules that make them load. |
 | [Palette reference](https://raw.githack.com/jayli/pi-coder/main/assets/pi-coder-palettes.html) | **Chinese.** Every variable and slot assignment for the three themes, with a terminal preview that switches between them. |
-| [docs/development.md](docs/development.md) | Running the 1340 unit tests, verifying against a real pi, publishing. |
+| [docs/development.md](docs/development.md) | Running the 1238 unit tests, verifying against a real pi, publishing. |
 | [docs/handbook.zh.md](docs/handbook.zh.md) | **Chinese.** The original handbook this package was extracted from: the author's machine, gateway setup, and the full rationale behind every design decision. |
 
 ## Development
 
 ```bash
-npm test        # node --test, 1340 tests
+npm test        # node --test, 1238 tests
 ```
 
 The pure-logic modules are deliberately free of `@earendil-works/pi-*` imports so they run under plain `node --test`; see [docs/development.md](docs/development.md) for the layout rules, the tmux verification procedure and the traps this codebase documents.

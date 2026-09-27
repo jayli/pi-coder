@@ -4,7 +4,7 @@
 
 - pi **0.85.1** or newer. The extensions hook into pi internals (extension UI containers, renderer signatures, `SettingsManager`), so a much older pi may load them and behave oddly.
 - Node **22.19+** (pi's own requirement).
-- macOS or Linux. The delete boundary (`bash-command-collapse/sandbox.ts`, `sandbox-boundary/`) needs macOS's `sandbox-exec`; elsewhere it turns itself off with `PI_SANDBOX=off` semantics, and `destructive-guard` is the only remaining delete protection.
+- macOS or Linux. The delete boundary (`bash-command-collapse/sandbox.ts`, `sandbox-boundary/`) needs macOS's `sandbox-exec`; elsewhere it turns itself off with `PI_SANDBOX=off` semantics and only the `AGENTS.md` discipline is left.
 
 ## Install the package
 
@@ -53,9 +53,8 @@ Expected visible results of a successful load:
 - The editor shows a `❯ ` prompt (`prompt-editor`).
 - A user message has a `▎ ` at the head of every line, including the blank lines above and below the text, in the theme's `accent` color (`user-message-bar`).
 - A bash run starts with a `• ` dot followed by `Run `, with **no background** behind the block (`bash-command-collapse`); pressing `shift+tab` cycles the permission mode and the statusline's second line shows `⏵ bypass` → `⏸ plan` → `☢ dangerous` (`plan-mode`).
-- `/theme`, `/tasks`, `/recap`, `/rewind`, `/init`, `/clear`, `/exit`, `/ask`, `/mcp`, `/memory`, `/plan`, `/plan-status`, `/goal`, `/sandbox-boundary`, `/destructive-guard`, `/background` and the `/bash-*` family (`/bash-preview`, `/bash-timeout`) all exist. Type `/` and scroll the command list.
+- `/theme`, `/tasks`, `/recap`, `/rewind`, `/init`, `/clear`, `/exit`, `/ask`, `/mcp`, `/memory`, `/plan`, `/plan-status`, `/goal`, `/sandbox-boundary`, `/background` and the `/bash-*` family (`/bash-preview`, `/bash-timeout`) all exist. Type `/` and scroll the command list.
 - `/sandbox-boundary` prints the delete boundary (project directory, the temp roots `/tmp` / `/var/folders` / `/var/tmp`, the regenerable caches) and a `持久白名单` line, and `~/.pi/agent/AGENTS.core.md` exists — `core-rules` does nothing, silently, without it.
-- `/destructive-guard` prints `模式：on` and a line of zeros for this session's counts. That extension is **retired upstream** and shipped here as a reference implementation; it stays quiet unless it has something to say.
 
 If something is missing, start pi and search the screen for `Failed to load extension` — a parse error in one file does not stop the others.
 

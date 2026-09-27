@@ -17,6 +17,7 @@ import {
 	type StatuslineState,
 	type StatuslineTheme,
 	BRANCH_ICON,
+	MODEL_ICON,
 	composeFooterLines,
 	ELLIPSIS,
 	STATUS_PRIORITY,
@@ -32,7 +33,7 @@ const plain: StatuslineTheme = { fg: (_color, text) => text };
 const painted: StatuslineTheme = { fg: (color, text) => `${color}(${text})` };
 
 const FLASH = { id: "qwen3.8-flash" };
-const DOC = "⚡️ qwen3.8-flash/xhigh | Ctx 0.0%";
+const DOC = "\u{1f17c} qwen3.8-flash/xhigh | Ctx 0.0%";
 
 function sourceOf(
 	percent: number | null = 0,
@@ -60,10 +61,30 @@ function stateOf(overrides: Partial<StatuslineState> = {}): StatuslineState {
 
 describe("BRANCH_ICON", () => {
 	it("pins the exact code point of the branch glyph", () => {
-		// 近形字符很容易贴错（同区块的 ᗋ / ᗌ / ᗍ / ᗎ 长得几乎一样），所以用转义把码位钉死，不依赖裸字形。
+		// 近形字符很容易贴错（同区块的 ᗋ /  / ᗍ /  长得几乎一样），所以用转义把码位钉死，不依赖裸字形。
 		assert.equal(BRANCH_ICON, "\u15cc");
 		assert.equal(BRANCH_ICON.codePointAt(0), 0x15cc);
 		assert.equal([...BRANCH_ICON].length, 1);
+	});
+});
+
+describe("MODEL_ICON", () => {
+	it("pins the exact code point of the model glyph", () => {
+		// 同上：Ⓜ(U+24C2) / 🅜(U+1F15C) 与 🅼(U+1F17C) 近形，用转义钉死码位。
+		assert.equal(MODEL_ICON, "\u{1f17c}");
+		assert.equal(MODEL_ICON.codePointAt(0), 0x1f17c);
+		assert.equal([...MODEL_ICON].length, 1);
+	});
+
+	it("is not an RGI emoji, which is what keeps it 1 column wide", () => {
+		// pi-tui 的 graphemeWidth 先跑这条正则：命中 → 2 列；不命中 → 落到 eastAsianWidth，
+		// U+1F17C 是 Ambiguous → 1 列。Ghostty 默认 unicode 宽度法同样按 1 列摆字，
+		// 两边口径一致，`truncateToWidth` 的截断数学才成立。回归：换回 ⚡️ 这类 RGI emoji
+		// 会让整行宽 1 列，而这条断言会先失败。
+		const rgiEmojiRegex = /^\p{RGI_Emoji}$/v;
+		assert.equal(rgiEmojiRegex.test(MODEL_ICON), false);
+		// VS16 不改变结论（也不该加：Apple Color Emoji 里没有这个码位，加了只白占一个不可见码位）。
+		assert.equal(rgiEmojiRegex.test(`${MODEL_ICON}\uFE0F`), false);
 	});
 });
 
@@ -128,14 +149,14 @@ describe("formatMainLine", () => {
 	it("questions the context when usage is unknown", () => {
 		assert.equal(
 			formatMainLine(plain, sourceOf(null, { id: "mystery" }), gitOf("main"), stateOf()),
-			"⚡️ mystery/xhigh | Ctx ? | \u15cc main | (+0,-0)",
+			"\u{1f17c} mystery/xhigh | Ctx ? | \u15cc main | (+0,-0)",
 		);
 	});
 
 	it("survives a missing model", () => {
 		assert.equal(
 			formatMainLine(plain, sourceOf(null, null), gitOf(null), stateOf()),
-			"⚡️ no-model/xhigh | Ctx ? | \u15cc no git | (no git)",
+			"\u{1f17c} no-model/xhigh | Ctx ? | \u15cc no git | (no git)",
 		);
 	});
 
@@ -143,7 +164,7 @@ describe("formatMainLine", () => {
 		for (const level of ["off", "low", "high", "max"]) {
 			assert.ok(
 				formatMainLine(plain, sourceOf(0, FLASH, level), gitOf("main"), stateOf()).startsWith(
-					`⚡️ qwen3.8-flash/${level} | `,
+					`\u{1f17c} qwen3.8-flash/${level} | `,
 				),
 				level,
 			);
@@ -153,7 +174,7 @@ describe("formatMainLine", () => {
 	it("drops the level suffix when it is empty or the getter throws", () => {
 		assert.ok(
 			formatMainLine(plain, sourceOf(0, FLASH, ""), gitOf("main"), stateOf()).startsWith(
-				"⚡️ qwen3.8-flash | ",
+				"\u{1f17c} qwen3.8-flash | ",
 			),
 		);
 		const throwing: StatuslineSource = {
@@ -164,7 +185,7 @@ describe("formatMainLine", () => {
 			getContextUsage: () => ({ percent: 0 }),
 		};
 		assert.ok(
-			formatMainLine(plain, throwing, gitOf("main"), stateOf()).startsWith("⚡️ qwen3.8-flash | "),
+			formatMainLine(plain, throwing, gitOf("main"), stateOf()).startsWith("\u{1f17c} qwen3.8-flash | "),
 		);
 	});
 
@@ -180,13 +201,13 @@ describe("formatMainLine", () => {
 				throw new Error("stale context");
 			},
 		};
-		assert.equal(formatMainLine(plain, stale, gitOf("main"), stateOf()), "⚡️ no-model | Ctx ? | \u15cc main | (+0,-0)");
+		assert.equal(formatMainLine(plain, stale, gitOf("main"), stateOf()), "\u{1f17c} no-model | Ctx ? | \u15cc main | (+0,-0)");
 	});
 
 	it("paints labels and separators dim, model / branch / percent by role", () => {
 		assert.equal(
 			formatMainLine(painted, sourceOf(0), gitOf("main"), stateOf({ diffStat: { added: 1, deleted: 2 } })),
-			"⚡️ accent(qwen3.8-flash)dim(/)syntaxFunction(xhigh)dim( | )dim(Ctx) success(0.0%)dim( | )" +
+			"dim(\u{1f17c}) accent(qwen3.8-flash)dim(/)syntaxFunction(xhigh)dim( | )dim(Ctx) success(0.0%)dim( | )" +
 				"dim(\u15cc) accent(main)dim( | )dim(()success(+1)dim(,)error(-2)dim())",
 		);
 	});

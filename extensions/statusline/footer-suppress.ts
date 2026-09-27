@@ -7,7 +7,7 @@
  * 而 Runner 的 `emit()` 是**串行 await** 每个扩展的 handler，排在 `statusline` 前面的扩展
  * （本机是 `mcp`，握手要连 MCP server）还会再往后推一点。实测本机冷启动：内置 footer 在
  * ~480ms 出第一帧，我们的 statusline 到 ~1.2s 才装上 —— 中间那 ~0.7s 底部是 pi 默认状态行
- * （`~/path` + `0.0%/1.0M (auto) ... deepseek-flash • max`），然后整块换成 `⚡️ ...`。
+ * （`~/path` + `0.0%/1.0M (auto) ... deepseek-flash • max`），然后整块换成 `🅼 ...`。
  * 用户看到的就是「先默认、后扩展」闪一下。
  *
  * 为什么只能在原型上解决：扩展能拿到 TUI 的最早时刻就是 `session_start`；但扩展的**模块求值 /

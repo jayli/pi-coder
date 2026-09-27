@@ -19,7 +19,7 @@
  *     the title out of view.
  *   - `PICKER_TAIL_RESERVE_ROWS`: what pi renders **below** the editor
  *     container, which is where the custom component lives — the footer
- *     (`⚡️ model | Ctx …`), the extra statusline rows, and any
+ *     (`🅼 model | Ctx …`), the extra statusline rows, and any
  *     `placement: belowEditor` widget such as pi-subagents' fleet line. Those
  *     rows are painted after the dialog and would otherwise cover its bottom.
  */

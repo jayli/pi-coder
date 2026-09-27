@@ -37,6 +37,13 @@ const RETRY_DELAY_MS = 300;
 // 只会读一次）；下面所有用例共用这个值。
 process.env.PI_WORKING_SUMMARY_RETRY_MS = String(RETRY_DELAY_MS);
 
+/**
+ * watchdog 提示的触发延时（同样是模块级常量，必须在加载前设）。200ms 比默认 2s
+ * 快一个数量级，用例里等它触发不用真等两秒。
+ */
+const WATCHDOG_DELAY_MS = 200;
+process.env.PI_WORKING_INDICATOR_WATCHDOG_DELAY_MS = String(WATCHDOG_DELAY_MS);
+
 const EXTENSION_PATH = path.join(path.dirname(fileURLToPath(import.meta.url)), "index.ts");
 const SKIP = "找不到本机 pi 的库入口（装过 pi 才有）";
 
@@ -225,18 +232,27 @@ async function loadExtension(workspace: { agentDir: string; projectDir: string }
 function handlersOf(extension: LoadedExtension): {
 	input: Handler;
 	agentStart: Handler;
+	agentEnd: Handler;
 	agentSettled: Handler;
+	agentBeforeSettle: Handler;
+	beforeCompact: Handler;
 	shutdown: Handler;
 } {
 	const input = extension.handlers.get("input")?.[0];
 	const agentStart = extension.handlers.get("agent_start")?.[0];
+	const agentEnd = extension.handlers.get("agent_end")?.[0];
 	const agentSettled = extension.handlers.get("agent_settled")?.[0];
+	const agentBeforeSettle = extension.handlers.get("agent_before_settle")?.[0];
+	const beforeCompact = extension.handlers.get("session_before_compact")?.[0];
 	const shutdown = extension.handlers.get("session_shutdown")?.[0];
 	assert.ok(input, "应该注册了 input");
 	assert.ok(agentStart, "应该注册了 agent_start");
+	assert.ok(agentEnd, "应该注册了 agent_end");
 	assert.ok(agentSettled, "应该注册了 agent_settled");
+	assert.ok(agentBeforeSettle, "应该注册了 agent_before_settle");
+	assert.ok(beforeCompact, "应该注册了 session_before_compact");
 	assert.ok(shutdown, "应该注册了 session_shutdown");
-	return { input, agentStart, agentSettled, shutdown };
+	return { input, agentStart, agentEnd, agentSettled, agentBeforeSettle, beforeCompact, shutdown };
 }
 
 /** 等谓词成立；超时把「在等什么」一并报出来。 */
@@ -816,6 +832,155 @@ test("回合外的弹窗（无 agent_start）：冻结不崩、结束不起定�
 		await delay(1_200);
 		assert.equal(recorder.workingMessages.length, 0, "回合外不该有读秒文案");
 
+		await shutdown({}, ctx);
+	} finally {
+		workspace.cleanup();
+	}
+});
+
+// ---------------------------------------------------------------------------
+// watchdog 审查提示（agent_end 后阻塞窗口 → WATCHDOG_LABEL）
+// ---------------------------------------------------------------------------
+
+test("agent_end 后迟迟不 settle：文案切成 Subagent watchdog reviewing", { skip, timeout: 30_000 }, async () => {
+	const workspace = makeWorkspace();
+	try {
+		const extension = await loadExtension(workspace);
+		const { input, agentStart, agentEnd, agentSettled, shutdown } = handlersOf(extension);
+		const recorder: Recorder = { completes: [], workingMessages: [], resets: 0 };
+		const ctx = createContext(recorder);
+
+		await input({ text: "short prompt", source: "interactive" }, ctx);
+		await agentStart({}, ctx);
+		await agentEnd({}, ctx); // watchdog 开始阻塞（模拟）
+
+		await waitFor(
+			() => recorder.workingMessages.some((m) => m.includes("Subagent watchdog reviewing")),
+			"watchdog 文案出现",
+		);
+		// 文案就是用户指定的那一句，不带时长 / token 段
+		const last = recorder.workingMessages.at(-1) as string;
+		assert.equal(last.includes("tokens"), false, "watchdog 文案不该带 token 段");
+		assert.equal(/\d+s\)/.test(last), false, "watchdog 文案不该带时长");
+
+		// 回合结束：恢复默认（无参 setWorkingMessage）
+		await agentSettled({}, ctx);
+		assert.ok(recorder.resets >= 1, "settle 后应恢复默认文案");
+		await shutdown({}, ctx);
+	} finally {
+		workspace.cleanup();
+	}
+});
+
+test("agent_end 后立刻 settle：不显示 watchdog 文案（正常回合不误报）", { skip, timeout: 30_000 }, async () => {
+	const workspace = makeWorkspace();
+	try {
+		const extension = await loadExtension(workspace);
+		const { input, agentStart, agentEnd, agentSettled, shutdown } = handlersOf(extension);
+		const recorder: Recorder = { completes: [], workingMessages: [], resets: 0 };
+		const ctx = createContext(recorder);
+
+		await input({ text: "short prompt", source: "interactive" }, ctx);
+		await agentStart({}, ctx);
+		await agentEnd({}, ctx);
+		await agentSettled({}, ctx); // 毫秒级 settle：定时器还没到点就被清掉
+
+		await delay(WATCHDOG_DELAY_MS * 3);
+		assert.equal(
+			recorder.workingMessages.some((m) => m.includes("Subagent watchdog reviewing")),
+			false,
+			"正常回合不该出现 watchdog 文案",
+		);
+		await shutdown({}, ctx);
+	} finally {
+		workspace.cleanup();
+	}
+});
+
+test("agent_before_settle 到达：复位提示（不误标 verify-loop 的 /goal 评估）", { skip, timeout: 30_000 }, async () => {
+	const workspace = makeWorkspace();
+	try {
+		const extension = await loadExtension(workspace);
+		const { input, agentStart, agentEnd, agentBeforeSettle, agentSettled, shutdown } = handlersOf(extension);
+		const recorder: Recorder = { completes: [], workingMessages: [], resets: 0 };
+		const ctx = createContext(recorder);
+
+		await input({ text: "short prompt", source: "interactive" }, ctx);
+		await agentStart({}, ctx);
+		await agentEnd({}, ctx);
+		await waitFor(
+			() => recorder.workingMessages.some((m) => m.includes("Subagent watchdog reviewing")),
+			"watchdog 文案出现",
+		);
+
+		// verify-loop 的 /goal 评估发生在 agent_before_settle（watchdog 已结束）
+		await agentBeforeSettle({}, ctx);
+		const countAfterReset = recorder.workingMessages.length;
+		await delay(WATCHDOG_DELAY_MS * 3);
+		assert.equal(
+			recorder.workingMessages.length,
+			countAfterReset,
+			"agent_before_settle 之后不该再刷 watchdog 文案",
+		);
+		await agentSettled({}, ctx);
+		await shutdown({}, ctx);
+	} finally {
+		workspace.cleanup();
+	}
+});
+
+test("session_before_compact 到达：复位提示（不误标自动压缩）", { skip, timeout: 30_000 }, async () => {
+	const workspace = makeWorkspace();
+	try {
+		const extension = await loadExtension(workspace);
+		const { input, agentStart, agentEnd, beforeCompact, agentSettled, shutdown } = handlersOf(extension);
+		const recorder: Recorder = { completes: [], workingMessages: [], resets: 0 };
+		const ctx = createContext(recorder);
+
+		await input({ text: "short prompt", source: "interactive" }, ctx);
+		await agentStart({}, ctx);
+		await agentEnd({}, ctx);
+		await waitFor(
+			() => recorder.workingMessages.some((m) => m.includes("Subagent watchdog reviewing")),
+			"watchdog 文案出现",
+		);
+
+		await beforeCompact({}, ctx);
+		const countAfterReset = recorder.workingMessages.length;
+		await delay(WATCHDOG_DELAY_MS * 3);
+		assert.equal(recorder.workingMessages.length, countAfterReset, "压缩开始后不该再刷 watchdog 文案");
+		await agentSettled({}, ctx);
+		await shutdown({}, ctx);
+	} finally {
+		workspace.cleanup();
+	}
+});
+
+test("watchdog 提示显示中新回合开始：立刻复位，不残留到下一回合", { skip, timeout: 30_000 }, async () => {
+	const workspace = makeWorkspace();
+	try {
+		const extension = await loadExtension(workspace);
+		const { input, agentStart, agentEnd, shutdown } = handlersOf(extension);
+		const recorder: Recorder = { completes: [], workingMessages: [], resets: 0 };
+		const ctx = createContext(recorder);
+
+		await input({ text: "short prompt", source: "interactive" }, ctx);
+		await agentStart({}, ctx);
+		await agentEnd({}, ctx);
+		await waitFor(
+			() => recorder.workingMessages.some((m) => m.includes("Subagent watchdog reviewing")),
+			"watchdog 文案出现",
+		);
+
+		// 新回合开始（agent_start 复位）：之后不该再出现 watchdog 文案
+		await agentStart({}, ctx);
+		const countAfterReset = recorder.workingMessages.length;
+		await delay(WATCHDOG_DELAY_MS * 3);
+		assert.equal(
+			recorder.workingMessages.slice(countAfterReset).some((m) => m.includes("Subagent watchdog reviewing")),
+			false,
+			"新回合开始后不该再有 watchdog 文案",
+		);
 		await shutdown({}, ctx);
 	} finally {
 		workspace.cleanup();

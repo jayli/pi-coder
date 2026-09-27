@@ -40,14 +40,27 @@ export interface StatuslineState {
 export const SEPARATOR = " | ";
 export const ELLIPSIS = "…";
 /**
- * 模型段前缀图标（取代早期的 `Model:` 文字标签，省 4 列）。
- * 刻意**不上色**：emoji 是自带颜色的字形，`theme.fg` 包一层只多出一对没有视觉效果的
- * ANSI 码。宽度按 pi-tui `visibleWidth` 是 2 列（RGI emoji），与终端实际渲染一致，
- * 所以 `truncateToWidth` 的截断数学不受影响。
- * 带 VS16（U+FE0F）强制 emoji 呈现：裸 `\u26a1` 在 pi-tui 里同样量 2 列，但 VS16
- * 能保证个别终端/字体不把它渲染成单色窄字形（那会和宽度口径错位 1 列）。
+ * 模型段前缀图标（取代早期的 `Model:` 文字标签，省 4 列；再早一版是 `⚡️`）。
+ * `🅼` = U+1F17C NEGATIVE SQUARED LATIN CAPITAL LETTER M。源码里写转义、测试按码位钉死，
+ * 防止以后被换成近形字符（`Ⓜ`(U+24C2) / `🅜`(U+1F15C) 长得几乎一样）。
+ *
+ * 与 `⚡️` 的两点差别，都是量出来的：
+ * - **宽度 1 列，不是 2**：它不是 RGI emoji（`/^\p{RGI_Emoji}$/v` 不匹配，带不带 VS16 都一样），
+ *   pi-tui `graphemeWidth` 于是走 `eastAsianWidth` → Ambiguous → 1；Ghostty 默认的
+ *   `grapheme-width-method = unicode` 也按 1 列摆字，两边口径一致，`truncateToWidth` 的截断
+ *   数学不受影响（整行比 `⚡️` 时代少 1 列）。也因此**不需要 VS16**：Apple Color Emoji 里
+ *   查无 U+1F17C，加不加都是文本呈现，加了只会白占一个不可见码位。
+ * **上色**：走 `dim`，与 `SEPARATOR`（` | `）同一个色槽 —— 图标是结构装饰，不该和模型 id
+ * （`accent`）抢视觉重量。这一点与 `⚡️` 时代相反：那时包 `theme.fg` 只多出一对没有视觉效果的
+ * ANSI 码（emoji 自带颜色，字形不吃前景色），所以刻意不包；U+1F17C 没有彩色字形（Apple Color
+ * Emoji 里查无此码位），终端按普通文本渲染，`theme.fg` 对它**是**生效的。`BRANCH_ICON` 同此处理。
+ *
+ * 字形可得性（2026-09-28 用 fontTools 扫过 166 个 JetBrains / Maple 字体文件）：U+1F17C 在
+ * Ghostty 字体栈的两个字体里**都没有**（`JetBrainsMonoNL Nerd Font Mono` / `Maple Mono SC NF`），
+ * 靠系统回退渲染 —— macOS 侧有 `Lyth Mono Term`（advance = 0.604em，与 `M` 同宽，等宽对齐）、
+ * `LXGW WenKai`、`YuGothic` 覆盖它，所以不会掉成缺字方块。与 `BRANCH_ICON` 同一套取舍。
  */
-export const MODEL_ICON = "⚡️";
+export const MODEL_ICON = "\u{1f17c}";
 /**
  * 分支段前缀图标：`ᗌ`（U+15CC，CANADIAN SYLLABICS CARRIER RE —— 字形恰好是一个分叉的样子）。
  * 它取代了私有区的 Powerline / Nerd Font 字形 U+E0A0 —— 那个码位在字体缺字形时只是一个看不见的
@@ -76,7 +89,7 @@ export const STATUSLINE_KEY = "statusline";
 export const STATUS_PRIORITY = ["plan-mode"] as const;
 const MAX_STATUS_ITEMS = 5;
 
-/** 主行：`⚡️ x/xhigh | Ctx 0.0% | \u15cc branch | (+a,-b)[ | 状态]`，各段已着色。 */
+/** 主行：`🅼 x/xhigh | Ctx 0.0% | \u15cc branch | (+a,-b)[ | 状态]`，各段已着色。 */
 export function formatMainLine(
 	theme: StatuslineTheme,
 	source: StatuslineSource,
@@ -141,12 +154,12 @@ export function formatExtensionStatuses(theme: StatuslineTheme, git: StatuslineG
 	return visible.join(dim(theme, SEPARATOR));
 }
 
-/** 模型图标 + id + 推理强度：`⚡️ qwen3.8-flash/xhigh`（id 用 accent，斜杠 dim，level 用 syntaxFunction）；level 读不到（stale ctx）时只报 id。 */
+/** 模型图标 + id + 推理强度：`🅼 qwen3.8-flash/xhigh`（图标 dim，id 用 accent，斜杠 dim，level 用 syntaxFunction）；level 读不到（stale ctx）时只报 id。 */
 function formatModelSegment(theme: StatuslineTheme, source: StatuslineSource): string {
 	const id = readModel(source)?.id ?? "no-model";
 	const level = readThinkingLevel(source);
 	const suffix = level ? `${dim(theme, "/")}${theme.fg("syntaxFunction", level)}` : "";
-	return `${MODEL_ICON} ${theme.fg("accent", id)}${suffix}`;
+	return `${dim(theme, MODEL_ICON)} ${theme.fg("accent", id)}${suffix}`;
 }
 
 function formatContextSegment(theme: StatuslineTheme, source: StatuslineSource): string {
