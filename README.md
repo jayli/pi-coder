@@ -1,4 +1,5 @@
-**[Themes Live Demo](https://jayli.github.io/1d/pi-coder-palettes.html)**
+- **[Themes Live Demo](https://jayli.github.io/1d/pi-coder-palettes.html)**
+- **[Architecture](https://jayli.github.io/1d/extensions-architecture.html)**
 
 # @bachi/pi-coder
 
