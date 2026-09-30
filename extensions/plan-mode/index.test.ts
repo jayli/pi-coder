@@ -307,7 +307,16 @@ interface RegisteredTool {
 			onUpdate: unknown,
 			ctx: unknown,
 		) => Promise<unknown>;
+		renderShell?: string;
+		renderCall?: (args: unknown, theme: unknown, context: unknown) => Rendered;
+		renderResult?: (result: unknown, options: unknown, theme: unknown, context: unknown) => Rendered;
 	};
+}
+
+/** 渲染器返回的鸭子组件（pi 只调这两个方法，不做 instanceof 检查）。 */
+interface Rendered {
+	render(width: number): string[];
+	invalidate(): void;
 }
 
 /** 取注册的工具定义（pi 存的是 `{ definition, sourceInfo }`）。 */
@@ -1646,6 +1655,222 @@ test("上次改绑过（已绑到 fallback）时启动也静默", { skip, timeou
 		assert.ok(!rec.notifies.some((message) => message.includes("改绑")), "已经绑过就不该再提醒");
 	} finally {
 		delete process.env.PI_CODING_AGENT_DIR;
+		workspace.cleanup();
+	}
+});
+
+// =============================================================================
+// 工具调用块的渲染形态（用户 2026-09-29 定：self 壳 + 树形，无底色、无下空行）
+// =============================================================================
+
+/** 假主题：丢掉颜色以便断言可见文本；bold 也原样返回。 */
+const plainTheme = {
+	fg: (_color: string, text: string) => text,
+	bold: (text: string) => text,
+};
+
+/** 剥掉所有 ANSI / OSC 转义，只留可见文本。 */
+const plain = (line: string): string =>
+	line.replace(/\u001b\][^\u0007]*\u0007/g, "").replace(/\u001b\[[0-9;:?]*[a-zA-Z]/g, "");
+
+/** 造一个渲染 context：state 是跨 renderCall/renderResult 共享的同一个对象（与 pi 一致）。 */
+function renderContext(overrides: { isPartial?: boolean; isError?: boolean } = {}) {
+	return {
+		state: {} as { outcome?: string },
+		isPartial: overrides.isPartial ?? false,
+		isError: overrides.isError ?? false,
+	};
+}
+
+/** 结果文本（enter 成功那条的真实形状，两行）。 */
+const ENTER_RESULT = {
+	content: [
+		{
+			type: "text",
+			text: "已进入 plan mode（只读）。原因：跨 gateway/config.yaml 与 pi、opencode、codex 三端配置的行为改动。\nedit / write 已停用，bash 里的写操作会被拦下。",
+		},
+	],
+	details: { phase: "plan", consented: true },
+};
+
+test("两个工具都用 self 壳（去底色 + 去下空行的唯一途径）", { skip, timeout: 30_000 }, async () => {
+	const workspace = makeWorkspace();
+	try {
+		const extension = await loadExtension(workspace.agentDir, workspace.projectDir, recorder());
+		for (const name of ["enter_plan_mode", "exit_plan_mode"]) {
+			const definition = toolOf(extension, name).definition;
+			assert.equal(definition.renderShell, "self", `${name} 应设 renderShell: "self"`);
+			assert.equal(typeof definition.renderCall, "function", `${name} 应有 renderCall`);
+			assert.equal(typeof definition.renderResult, "function", `${name} 应有 renderResult`);
+		}
+	} finally {
+		workspace.cleanup();
+	}
+});
+
+test("标题行：成功是 • 工具名 ✔，被打回是 • 工具名 ✘（state 传递）", { skip, timeout: 30_000 }, async () => {
+	const workspace = makeWorkspace();
+	try {
+		const extension = await loadExtension(workspace.agentDir, workspace.projectDir, recorder());
+		const definition = toolOf(extension, "enter_plan_mode").definition;
+
+		// 成功：先跑 renderResult 写 state.outcome，再 renderCall 读它（pi 的真实顺序是
+		// callRenderer 先于 resultRenderer，但屏幕绘制在两者之后，所以懒组件读到的是写好的值）。
+		const okCtx = renderContext();
+		definition.renderResult!(ENTER_RESULT, { expanded: false, isPartial: false }, plainTheme, okCtx);
+		const okTitle = plain(definition.renderCall!({}, plainTheme, okCtx).render(80)[0]!);
+		assert.equal(okTitle, "• enter_plan_mode ✔", `成功标题（顶格）：${JSON.stringify(okTitle)}`);
+
+		// 被打回（declined）：details 里 accepted/consented 不是 true
+		const noCtx = renderContext();
+		definition.renderResult!(
+			{ content: [{ type: "text", text: "用户没有批准这个计划。" }], details: { accepted: false, phase: "plan" } },
+			{ expanded: false, isPartial: false },
+			plainTheme,
+			noCtx,
+		);
+		const noTitle = plain(definition.renderCall!({}, plainTheme, noCtx).render(80)[0]!);
+		assert.equal(noTitle, "• enter_plan_mode ✘", `被打回标题（顶格）：${JSON.stringify(noTitle)}`);
+		assert.ok(!noTitle.includes("✔"), "被打回不该出现 ✔");
+	} finally {
+		workspace.cleanup();
+	}
+});
+
+test("标题行：执行中（结果未到）是灰 • 工具名、无标记", { skip, timeout: 30_000 }, async () => {
+	const workspace = makeWorkspace();
+	try {
+		const extension = await loadExtension(workspace.agentDir, workspace.projectDir, recorder());
+		const definition = toolOf(extension, "enter_plan_mode").definition;
+		const ctx = renderContext({ isPartial: true });
+		const title = plain(definition.renderCall!({}, plainTheme, ctx).render(80)[0]!);
+		assert.equal(title, "• enter_plan_mode", `执行中标题（顶格）：${JSON.stringify(title)}`);
+	} finally {
+		workspace.cleanup();
+	}
+});
+
+test("正文：结果全文折行挂树，除末行外 │、末行 └，正文对齐第 3 列", { skip, timeout: 30_000 }, async () => {
+	const workspace = makeWorkspace();
+	try {
+		const extension = await loadExtension(workspace.agentDir, workspace.projectDir, recorder());
+		const definition = toolOf(extension, "enter_plan_mode").definition;
+		const ctx = renderContext();
+		// 用短文本（宽 80 下不折行）钉「两行正文 → 一行 │ + 一行 └」这个结构
+		const lines = definition
+			.renderResult!(
+				{
+					content: [{ type: "text", text: "已进入 plan mode（只读）。\nedit / write 已停用。" }],
+					details: { phase: "plan", consented: true },
+				},
+				{ expanded: false, isPartial: false },
+				plainTheme,
+				ctx,
+			)
+			.render(80)
+			.map(plain);
+		assert.equal(lines.length, 2, `两行正文：${JSON.stringify(lines)}`);
+		assert.ok(lines[0]!.startsWith("  │ "), `首行挂 │（2 列缩进）：${JSON.stringify(lines[0])}`);
+		assert.ok(lines[1]!.startsWith("  └ "), `末行挂 └（2 列缩进）：${JSON.stringify(lines[1])}`);
+		// 树符在列 2（`enter_plan_mode` 首字母 e 正下方），正文从列 4 起
+		assert.equal(lines[0]!.indexOf("│"), 2, `│ 在列 2：${JSON.stringify(lines[0])}`);
+		assert.equal(lines[0]!.indexOf("已进入"), 4, `正文列：${JSON.stringify(lines[0])}`);
+		assert.equal(lines[1]!.indexOf("edit"), 4, `正文列：${JSON.stringify(lines[1])}`);
+
+		// 真实长度的结果文本（ENTER_RESULT）：全文都在、不截断，只是首行会折行
+		const full = definition
+			.renderResult!(ENTER_RESULT, { expanded: false, isPartial: false }, plainTheme, renderContext())
+			.render(80)
+			.map(plain);
+		assert.ok(full.length > 2, `长文本应折行：${JSON.stringify(full)}`);
+		assert.equal(
+			full.filter((line) => line.includes("└")).length,
+			1,
+			`└ 只能出现一次：${JSON.stringify(full)}`,
+		);
+		assert.ok(full[full.length - 1]!.includes("└"), `└ 在最后一行：${JSON.stringify(full)}`);
+		assert.ok(full.join("\n").includes("bash 里的写操作会被拦下"), "全文不截断");
+	} finally {
+		workspace.cleanup();
+	}
+});
+
+test("正文：长行折行后 └ 仍只在最后一个视觉行（碎片也算独立行）", { skip, timeout: 30_000 }, async () => {
+	const workspace = makeWorkspace();
+	try {
+		const extension = await loadExtension(workspace.agentDir, workspace.projectDir, recorder());
+		const definition = toolOf(extension, "exit_plan_mode").definition;
+		const ctx = renderContext();
+		const long = "这是一段很长很长很长很长很长很长很长很长很长很长很长很长很长很长很长很长很长很长的计划正文";
+		const lines = definition
+			.renderResult!(
+				{ content: [{ type: "text", text: long }], details: { accepted: true, docMode: "execute-with-doc", docPath: "/x.md" } },
+				{ expanded: false, isPartial: false },
+				plainTheme,
+				ctx,
+			)
+			.render(30)
+			.map(plain);
+		assert.ok(lines.length > 1, `窄宽度下应折成多行：${JSON.stringify(lines)}`);
+		const corners = lines.filter((line) => line.includes("└"));
+		assert.equal(corners.length, 1, `└ 只能出现一次：${JSON.stringify(lines)}`);
+		assert.ok(lines[lines.length - 1]!.includes("└"), `└ 必须在最后一行：${JSON.stringify(lines)}`);
+		assert.ok(lines.slice(0, -1).every((line) => line.includes("│")), `其余行都挂 │：${JSON.stringify(lines)}`);
+	} finally {
+		workspace.cleanup();
+	}
+});
+
+test("整块无底色：self 壳经 pi 真实组件渲染后不含背景 SGR（\\x1b[48）", { skip, timeout: 30_000 }, async () => {
+	const workspace = makeWorkspace();
+	const pi = (await import(pathToFileURL(piEntry as string).href)) as {
+		initTheme: (name?: string) => void;
+		ToolExecutionComponent: new (
+			toolName: string,
+			toolCallId: string,
+			args: unknown,
+			options: unknown,
+			toolDefinition: unknown,
+			ui: { requestRender(): void },
+			cwd: string,
+		) => {
+			markExecutionStarted: () => void;
+			updateResult: (result: unknown, isPartial?: boolean) => void;
+			render: (width: number) => string[];
+		};
+	};
+	try {
+		const extension = await loadExtension(workspace.agentDir, workspace.projectDir, recorder());
+		const definition = toolOf(extension, "enter_plan_mode").definition;
+		pi.initTheme("dark");
+		const component = new pi.ToolExecutionComponent(
+			"enter_plan_mode",
+			"call-1",
+			{ reason: "x" },
+			{},
+			definition,
+			{ requestRender() {} },
+			workspace.projectDir,
+		);
+		component.markExecutionStarted();
+		component.updateResult(ENTER_RESULT, false);
+		const raw = component.render(80);
+		assert.equal(raw[0], "", "第 0 行是 pi self 模式固定的留白");
+		assert.notEqual(raw[raw.length - 1]!.trim(), "", "最后一行不是空行（无下边界空行）");
+		for (const line of raw) {
+			assert.ok(!line.includes("\x1b[48"), `不该有背景 SGR：${JSON.stringify(line)}`);
+		}
+		const visible = raw.map(plain).filter((line) => line.trim() !== "");
+		assert.ok(visible[0]!.startsWith("• enter_plan_mode ✔"), `标题行顶格（圆点前无空格）：${JSON.stringify(visible[0])}`);
+		assert.ok(visible.some((line) => line.includes("└")), "树里有 └");
+		// 树符与标题对齐：`│` / `└` 在列 2，正好是 `enter_plan_mode` 首字母 e 的正下方
+		//（标题是 `• enter_plan_mode`：圆点列 0、空格列 1、e 列 2）
+		assert.equal(visible[0]!.indexOf("e"), 2, `标题里 e 在列 2：${JSON.stringify(visible[0])}`);
+		for (const line of visible.slice(1)) {
+			const treeCol = line.search(/[│└]/);
+			assert.equal(treeCol, 2, `树符应在列 2（与 e 对齐）：${JSON.stringify(line)}`);
+		}
+	} finally {
 		workspace.cleanup();
 	}
 });

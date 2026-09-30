@@ -60,7 +60,7 @@
     "customMessageBg": "userBg",
     "customMessageText": "fg",
     "customMessageLabel": "namespacePink",
-    "toolPendingBg": "",
+    "toolPendingBg": "successCard",
     "toolSuccessBg": "successCard",
     "toolErrorBg": "errorCard",
     "toolTitle": "funcBlue",

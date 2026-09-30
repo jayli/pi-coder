@@ -1,5 +1,5 @@
 /**
- * startup-logo — 启动时顶部显示一个静态的 pi logo，并剪掉启动清单里没用的三段
+ * startup-logo — 启动时顶部显示一个静态的 pi logo，并剪掉启动清单里的全部五段
  *
  * pi 的内置 header（`interactive-mode.js`）只有 `pi vX.Y.Z` 一行加几条快捷键提示，没有图形。
  * 本扩展用 `ctx.ui.setHeader()` 换掉它：顶部一只静态的 pi.dev 印记（形 `npm:pi-claude-code-tui`
@@ -16,9 +16,9 @@
  * header 只在**启动时**出现在聊天区上方，随滚动离开视野；它不是常驻控件，也不占编辑器区域。
  *
  * header 下面那份「已加载资源」清单同样是 pi 在会话绑定之后才填的，其中
- * `[Context]` / `[Prompts]` / `[Themes]` 三段没有信息量，本扩展顺手剪掉（`loaded-sections.ts`）：
- * 剪枝看的是**已挂载的 header 组件**所在容器，所以只在 logo 装上的时候生效，`[Skills]` /
- * `[Extensions]` 与各类诊断段一律保留。
+ * `[Context]` / `[Skills]` / `[Prompts]` / `[Extensions]` / `[Themes]` 五段没有信息量，本扩展顺手剪掉
+ * （`loaded-sections.ts`）：剪枝看的是**已挂载的 header 组件**所在容器，所以只在 logo 装上的时候生效，
+ * 只留 `[Skill conflicts]` / `[Extension issues]` 这类诊断段。
  *
  * 其余三点约束：
  *   1. 只在 TUI 模式装（`ctx.mode === "tui"`）—— print / RPC / JSON 模式没有 header。
@@ -161,7 +161,7 @@ export default function startupLogo(pi: ExtensionAPI) {
 		if (!headerContainer) return;
 		releaseHeaderGuard(headerContainer);
 		// 已加载资源清单就在 header 容器后面那个兄弟容器里，pi 还没来得及填（本回调跑在
-		// `showLoadedResources` 之前），所以这里接管它的 addChild 就能把那三段整段丢掉。
+		// `showLoadedResources` 之前），所以这里接管它的 addChild 就能把那五段整段丢掉。
 		hideLoadedSections({ root: tuiHandle, headerContainer });
 	};
 

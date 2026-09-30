@@ -56,6 +56,21 @@
  * statusline 扩展把 `STATUS_KEY` 从拼接的第二行里摘出来单独渲染成最后一行，
  * 所以它既不占 5 条 status 的预算，也不会与长 cwd 同行被截断。
  *
+ * ## 结轮提示：本轮结束了，任务还在跑
+ *
+ * 本轮结束（`agent_settled`）后仍在跑、且已跑满 5s 的任务，dock 行下面多一句：
+ *
+ *   ⚙ bg_2 running 5m10s · <cmd>
+ *     └ 本轮已结束，该任务仍在运行
+ *
+ * 这是**事实陈述**（回合状态由事件判定），不是「任务没用了」的推断 —— 扩展分不出
+ * 「孤儿残留」与「本来就该长跑」（一个 8 分钟的 `npm test` 在主任务收工后继续跑完全
+ * 正常），所以只说能确认的那半句，并且只在 `agent_start` 清除回合状态之前说。
+ * 阈值 `PI_BACKGROUND_TASKS_TURN_NOTE_MS`（默认 5s）挡掉刚起几秒的正常长任务。
+ *
+ * `agent_settled` 在自动压缩 / verify-loop 的 `/goal` 评估之后才发（两者都跑在 app 级
+ * `agent_end` 之后、`agent_settled` 之前），所以「本轮结束」的时点取的是真正的收尾。
+ *
  * ## 最简版明确不做
  *
  * 跨 pi 重启的任务恢复、超时自动杀（CC 的后台 bash 也没有超时参数）、agent 类任务、
@@ -63,7 +78,8 @@
  *
  * 开关：`PI_BACKGROUND_TASKS=off` 整体关闭；`PI_BACKGROUND_TASKS_DIR` 覆盖日志根目录
  * （测试隔离用）；`PI_BACKGROUND_TASKS_DOCK=off` 只关 statusline 那一行（工具与通知照旧）；
- * `PI_BACKGROUND_TASKS_DOCK_LINGER_MS` 改终态行的驻留时长。
+ * `PI_BACKGROUND_TASKS_DOCK_LINGER_MS` 改终态行的驻留时长；
+ * `PI_BACKGROUND_TASKS_TURN_NOTE_MS` 改结轮提示的运行时长阈值（默认 5s）。
  */
 
 import fs from "node:fs";
@@ -71,9 +87,9 @@ import os from "node:os";
 import path from "node:path";
 
 import { Type } from "typebox";
-import { Box, Text } from "@earendil-works/pi-tui";
+import { wrapTextWithAnsi } from "@earendil-works/pi-tui";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
-import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
 
 import {
 	MAX_READ_CHARS,
@@ -90,8 +106,31 @@ import {
 	STATUS_KEY as DOCK_STATUS_KEY,
 	formatBackgroundStatus,
 } from "./status.ts";
+import {
+	cleanupWorktree,
+	prepareWorktree,
+	type CreatedWorktree,
+} from "./worktree.ts";
+import {
+	BODY_INDENT,
+	GUTTER_WIDTH,
+	PREVIEW_MAX_LINES,
+	TREE_PIPE,
+	bgNotificationTitleParts,
+	bgResultTreePrefixes,
+	bgToolTitleParts,
+	classifyBgNotificationOutcome,
+	classifyBgToolOutcome,
+	previewMoreLinesHint,
+	type BgToolOutcome,
+} from "./render.ts";
 
 const CUSTOM_TYPE = "background-task";
+
+/** 默认给每个后台任务一份隔离工作区（`PI_BACKGROUND_TASKS_WORKTREE=off` 关掉）。 */
+function worktreeEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
+	return (env.PI_BACKGROUND_TASKS_WORKTREE ?? "").trim().toLowerCase() !== "off";
+}
 
 /** 日志根目录：`PI_BACKGROUND_TASKS_DIR` 覆盖，否则 `<agentDir>/bg-tasks`。 */
 function resolveLogRoot(env: NodeJS.ProcessEnv = process.env): string {
@@ -111,6 +150,7 @@ function taskDetails(task: BackgroundTask, now: number) {
 		pid: task.pid,
 		command: task.command,
 		cwd: task.cwd,
+		worktree: task.worktree,
 		logPath: task.logPath,
 		startedAt: task.startedAt,
 		endedAt: task.endedAt,
@@ -120,8 +160,8 @@ function taskDetails(task: BackgroundTask, now: number) {
 	};
 }
 
-/** 终态通知正文（模型看到的就是这段）。 */
-function buildNotification(task: BackgroundTask, now: number): string {
+/** 终态通知正文（模型看到的就是这段）。`extraLines` 放 worktree 的处置结果。 */
+function buildNotification(task: BackgroundTask, now: number, extraLines: readonly string[] = []): string {
 	const outcome =
 		task.status === "killed"
 			? `被终止（${task.signal ?? "SIGTERM"}）`
@@ -132,10 +172,167 @@ function buildNotification(task: BackgroundTask, now: number): string {
 		"<background-task-notification>",
 		`后台任务 ${task.id} 已${outcome}，运行 ${formatElapsed((task.endedAt ?? now) - task.startedAt)}。`,
 		`命令：${truncateCommand(task.command, 120)}`,
+		...extraLines,
 		`这是终态事实，不需要再调 background_output 确认状态；只有需要看输出内容时才调它（id: ${task.id}）。`,
 		`完整日志：${task.logPath}`,
 		"</background-task-notification>",
 	].join("\n");
+}
+
+// =============================================================================
+// 工具调用块的渲染（run_in_background / background_output / background_kill 共用）
+// =============================================================================
+
+/**
+ * 行级渲染状态（pi 的 `rendererState`，每个工具行一份、renderCall 与 renderResult 共享）。
+ *
+ * 它存在的唯一理由：标题行的圆点颜色取决于 `result.details`，而
+ *   ① `getRenderContext()` **不暴露 result 本体**（只有 isPartial / isError / state 等），
+ *   ② 同一次 `updateDisplay()` 里 callRenderer **先于** resultRenderer 执行。
+ * 所以 renderResult 把分类写进 state，renderCall 返回一个**在 `render(width)` 时才读
+ * state 的懒组件** —— 屏幕真正绘制发生在 updateDisplay() 之后，那时已经写好了。
+ * 懒组件（只需 `render` / `invalidate`）是 bash-command-collapse 的既有做法。
+ */
+interface BgToolRenderState {
+	outcome?: BgToolOutcome;
+}
+
+/** renderCall / renderResult 拿到的 context 里、本扩展真正会读的那几个字段。 */
+interface BgToolRenderContext {
+	state: BgToolRenderState;
+	isPartial: boolean;
+	isError: boolean;
+}
+
+/** 结果块里的文本正文（其余块类型这三个工具不会产生）。 */
+interface BgToolResultLike {
+	content?: ReadonlyArray<{ type?: string; text?: string }>;
+	details?: unknown;
+}
+
+/** 把结果里的所有 text 块拼成全文（按块顺序，块之间换行）。 */
+function bgResultText(result: BgToolResultLike): string {
+	const blocks = Array.isArray(result.content) ? result.content : [];
+	return blocks
+		.filter((block) => block?.type === "text" && typeof block.text === "string")
+		.map((block) => block.text as string)
+		.join("\n");
+}
+
+/**
+ * 三个工具共用的渲染器：`renderShell: "self"` + 树形标题/正文（参照 plan 工具调用块）。
+ *
+ * ## 为什么必须 self 壳
+ *
+ * 默认壳是 `contentBox = new Box(1, 1, bgFn)`（tool-execution.js）：整块套
+ * `toolPendingBg` / `toolSuccessBg` / `toolErrorBg` 底色，`paddingY = 1` 给上下各一行
+ * 空行，构造时那个 `Spacer(1)` 再给上方一行。self 模式下 `render()` 绕过
+ * `super.render()`（Spacer 不画）、容器是纯 `Container`（`instanceof Box` 为 false，
+ * bgFn 套不上去），于是**没有底色、下方没有空行**；上方只剩 pi 在 self 分支里写死的
+ * 那一行 `lines.push("")` —— 去不掉，bash / simple-task / plan 块同样如此。
+ *
+ * ## 形态（用户 2026-09-30 定：参照 plan 块）
+ *
+ * ```
+ * • run_in_background
+ *   │ 已在后台启动 bg_1（pid 12345）。
+ *   └ 日志：/…/bg_1.log
+ * ```
+ *
+ * 标题行 = 状态圆点 + 加粗工具原名，**从圆点起顶格、且不打任何标记**（用户 2026-09-30
+ * 分两轮定）：点的颜色就是结局灯（绿=成功、灰=执行中/没办成、红=真错误，见
+ * `bgToolTitleParts`）。`✔` 只属于终态通知（`run_in_background` 成功意味着任务才刚开始，
+ * 打对号会被读成「已经结束」），`✘` 对工具块也是多余的（圆点已经表达结局，且「没办成」
+ * 是模型自己下一步就能纠正的普通分支，正文里已写了原因）。正文是**结果全文**，前面挂
+ * `BODY_INDENT` 那 2 列再折行挂树（于是
+ * `│` 落在工具名首字母正下方）—— 除末行外 `│ `，**末行 `└ `**。结构符走 `muted` 槽且
+ * **自成一段 SGR**，不让正文色透上来。正文走 `text` 槽（与 `exit_plan_mode` 下方正文
+ * 同色，用户 2026-09-30 定）。
+ *
+ * ## 预览截断（保留 pi 默认壳原有的行为）
+ *
+ * pi 默认壳把正文裁到 10 行并给 `... (N more lines, ctrl+o to expand)` 提示；换 self 壳
+ * 后这条裁剪会消失，所以这里自己补回来（`PREVIEW_MAX_LINES` + `previewMoreLinesHint`），
+ * 否则 `background_output` 一次 30000 字符的返回会平铺满屏。展开态（ctrl+o，`expanded`）
+ * 不裁，与 bash / tool-diff 块一致。截断按**折行之后**的视觉行数算（与树前缀同口径）。
+ */
+function bgToolRenderers(toolName: string) {
+	return {
+		renderShell: "self" as const,
+		renderCall(_args: unknown, theme: Theme, context: BgToolRenderContext) {
+			// state 是跨帧同一个对象，所以 render(width) 时读到的是 renderResult 刚写的分类；
+			// 兜底（state 里还没有 outcome）只发生在「结果没到过」的行：执行中按 isPartial
+			// 判 pending，其余按 isError 判 error / declined。
+			const state = context.state;
+			return {
+				render(width: number): string[] {
+					const outcome: BgToolOutcome =
+						state?.outcome ?? (context.isPartial ? "pending" : context.isError ? "error" : "declined");
+					// 工具块只有圆点、不打任何标记（用户 2026-09-30 定）：点的颜色就是结局灯
+					//（绿=成功、灰=执行中/没办成、红=真错误），标记只属于终态通知。
+					const parts = bgToolTitleParts(outcome);
+					const title = `${theme.fg(parts.dotSlot, "\u2022")} ${theme.fg("toolTitle", theme.bold(toolName))}`;
+					// 标题行顶格（不挂 BODY_INDENT），所以折行预算就是整个宽度
+					return wrapTextWithAnsi(title, Math.max(1, width || 80));
+				},
+				invalidate() {},
+			};
+		},
+		renderResult(result: BgToolResultLike, options: { expanded: boolean }, theme: Theme, context: BgToolRenderContext) {
+			// isError 必须从 **context** 读：pi 传给 resultRenderer 的对象是
+			// `{ content, details }`，**没有 isError 字段**（它只在 getRenderContext() 里）。
+			if (context.state) {
+				context.state.outcome = classifyBgToolOutcome(context.isError === true, result?.details);
+			}
+			const sourceLines = bgResultText(result ?? {}).split("\n");
+			const expanded = options?.expanded === true;
+			// 结果是静态的，按 width 缓存排版（同 plan 块 / tool-diff 的 DiffCard）
+			const cache = new Map<number, string[]>();
+			return {
+				render(width: number): string[] {
+					const hit = cache.get(width);
+					if (hit !== undefined) return hit;
+					const bodyWidth = Math.max(1, (width || 80) - BODY_INDENT.length - GUTTER_WIDTH);
+					const rows: string[] = [];
+					for (const line of sourceLines) {
+						// 空行也占一行（wrapTextWithAnsi("") → [""]）：段落间距是可读性的一部分
+						rows.push(...wrapTextWithAnsi(line, bodyWidth));
+					}
+					if (rows.every((row) => row.trim() === "")) {
+						cache.set(width, []);
+						return [];
+					}
+					// 预览截断：非展开态裁到 PREVIEW_MAX_LINES 行，提示行挂在被裁正文的末尾。
+					// 展开态（ctrl+o）不裁。截断按折行后的视觉行数算（与树前缀同口径）。
+					let visible = rows;
+					let hidden = 0;
+					if (!expanded && rows.length > PREVIEW_MAX_LINES) {
+						visible = rows.slice(0, PREVIEW_MAX_LINES);
+						hidden = rows.length - visible.length;
+					}
+					// 前缀按**折行 + 截断之后**的视觉行数算：折行碎片与截断提示行各算独立行，
+					// 否则一个折成三行的长句会在第一片就画上 `└`，看着像树提前结束了。
+					const lineCount = visible.length + (hidden > 0 ? 1 : 0);
+					const prefixes = bgResultTreePrefixes(lineCount);
+					const lines = visible.map(
+						(row, index) => BODY_INDENT + theme.fg("muted", prefixes[index] ?? TREE_PIPE) + theme.fg("text", row),
+					);
+					if (hidden > 0) {
+						lines.push(
+							BODY_INDENT +
+								theme.fg("muted", prefixes[visible.length] ?? TREE_PIPE) +
+								theme.fg("muted", previewMoreLinesHint(hidden)),
+						);
+					}
+					cache.set(width, lines);
+					return lines;
+				},
+				invalidate() {
+					cache.clear();
+				},
+			};
+		},
+	};
 }
 
 export default function backgroundTasks(pi: ExtensionAPI): void {
@@ -153,9 +350,16 @@ export default function backgroundTasks(pi: ExtensionAPI): void {
 	const DOCK_DISABLED =
 		(process.env.PI_BACKGROUND_TASKS_DOCK ?? "").trim().toLowerCase() === "off";
 	const dockLingerMs = Number(process.env.PI_BACKGROUND_TASKS_DOCK_LINGER_MS) || undefined;
+	//	结轮提示的阈值：工厂期读一次（与另两个旋钮同口径）。
+	const turnNoteMs = Number(process.env.PI_BACKGROUND_TASKS_TURN_NOTE_MS) || undefined;
 	let dockTimer: ReturnType<typeof setInterval> | undefined;
 	/** 弹窗期间不发布：一次重绘同样会把用户手动上翻的 scrollback 拽回底部。 */
 	let dockFrozen = false;
+	/**
+	 * 本轮结束的时刻；`undefined` = 本轮进行中（或还没跑过轮次）。
+	 * 只看它就能决定要不要补「本轮已结束」那一行，所以不需要额外的布尔量。
+	 */
+	let turnSettledAt: number | undefined;
 
 	/**
 	 * 重算 dock 行并发布，返回「是否还有东西在显示」。
@@ -172,6 +376,7 @@ export default function backgroundTasks(pi: ExtensionAPI): void {
 				registry?.listTasks() ?? [],
 				Date.now(),
 				dockLingerMs,
+				{ settledAt: turnSettledAt, noteMs: turnNoteMs },
 			);
 			ctx.ui.setStatus(DOCK_STATUS_KEY, text);
 		} catch {
@@ -216,6 +421,23 @@ export default function backgroundTasks(pi: ExtensionAPI): void {
 	// 新工厂重新跑，这里的复位不会漏。
 	pi.on("session_start", () => {
 		disposed = false;
+		// 新会话还没有「本轮」：不让上一轮的回合状态漏进来（否则第一轮刚起的长任务
+		// 会立刻被标成「本轮已结束」）。
+		turnSettledAt = undefined;
+	});
+
+	// 本轮开始：回合状态复位，结轮提示随之消失（新一轮进行中时那句话就是假的）。
+	pi.on("agent_start", () => {
+		turnSettledAt = undefined;
+		bumpDock();
+	});
+
+	// 本轮结束：开表；下一帧（含秒级 tick）就会给还在跑的任务补上那句提示。
+	// 代价明确：任务必须真的跑满阈值（默认 5s），且 dock 得有一帧重绘。
+	pi.on("agent_settled", () => {
+		if (turnSettledAt !== undefined) return;
+		turnSettledAt = Date.now();
+		bumpDock();
 	});
 
 	// 弹窗期间冻结 dock 的一切发布（与 working-indicator 同一套取舍）。
@@ -233,6 +455,48 @@ export default function backgroundTasks(pi: ExtensionAPI): void {
 	function ensureRegistry(ctx: ExtensionContext): Registry {
 		lastCtx = ctx;
 		if (registry) return registry;
+
+		/**
+		 * 任务进终态后的两件事，顺序固定：**先清 worktree，再发通知**。
+		 *
+		 * 为什么不能反过来：通知是 `triggerTurn` 的 —— 它会立刻起一轮模型跟进，模型可能在
+		 * 消息落地前就调 `background_output` / `ls`。先发通知就会把「worktree 还在不在」
+		 * 变成一个竞态；先清完再发，通知里的处置结论就是既成事实。代价是通知晚几十毫秒。
+		 *
+		 * 为什么清理不能包在 `disposed` 判断里：`session_shutdown` 会 `killAll()`，
+		 * 那是 worktree 泄漏最多的一条路，必须照清。
+		 */
+		async function finishTask(task: BackgroundTask): Promise<void> {
+			const wt = task.worktree;
+			let notice: string | undefined;
+			if (wt) {
+				const outcome = await cleanupWorktree(wt, `pi/bg_${task.id}`);
+				// 三个分支都给一句话：删了要解释「怎么什么都没了」，留了要给路径。
+				// 只有「保留了」的路径与分支是模型下一步可能真去用的，所以带上细节。
+				notice =
+					outcome.kind === "removed"
+						? "隔离工作区：无改动，已自动清理。"
+						: outcome.kind === "kept"
+							? `隔离工作区：${outcome.reason}，已保留在 ${wt.path}${outcome.branch ? `（分支 ${outcome.branch}）` : ""}`
+							: `隔离工作区：删除失败（${outcome.reason}），已保留在 ${wt.path}`;
+			}
+
+			// 只认当前 registry 的任务：会话替换后新建了 registry，
+			// 旧会话被 killAll 的任务的迟到 exit 不该注入新会话。
+			if (disposed || reg !== registry) return;
+			pi.sendMessage(
+				{
+					customType: CUSTOM_TYPE,
+					content: buildNotification(task, Date.now(), notice ? [notice] : []),
+					display: true,
+					details: { kind: "terminal", task: taskDetails(task, Date.now()), worktreeNotice: notice },
+				},
+				// 空闲 → 直接起一轮；流式中 → 排到本轮结束后（不打断当前推理）
+				{ triggerTurn: true, deliverAs: lastCtx?.isIdle?.() ? undefined : "followUp" },
+			);
+			// dock 立刻换成终态文案（驻留窗口过后由秒级 tick 自己清掉）。
+			bumpDock();
+		}
 		let sessionId = "no-session";
 		try {
 			sessionId = ctx.sessionManager?.getSessionId?.() ?? "no-session";
@@ -242,21 +506,9 @@ export default function backgroundTasks(pi: ExtensionAPI): void {
 		logDir = path.join(resolveLogRoot(), sessionId);
 		const reg = createRegistry({
 			onTerminal: (task) => {
-				// 只认当前 registry 的任务：会话替换后新建了 registry，
-				// 旧会话被 killAll 的任务的迟到 exit 不该注入新会话。
-				if (disposed || reg !== registry) return;
-				pi.sendMessage(
-					{
-						customType: CUSTOM_TYPE,
-						content: buildNotification(task, Date.now()),
-						display: true,
-						details: { kind: "terminal", task: taskDetails(task, Date.now()) },
-					},
-					// 空闲 → 直接起一轮；流式中 → 排到本轮结束后（不打断当前推理）
-					{ triggerTurn: true, deliverAs: lastCtx?.isIdle?.() ? undefined : "followUp" },
-				);
-				// dock 立刻换成终态文案（驻留窗口过后由秒级 tick 自己清掉）。
-				bumpDock();
+				// 清理要无条件启动：`disposed` / registry 换了之后不再注入通知，
+				// 但该删的 worktree 仍然得删（shutdown 里 killAll 的任务也走这条路）。
+				void finishTask(task);
 			},
 		});
 		registry = reg;
@@ -268,9 +520,12 @@ export default function backgroundTasks(pi: ExtensionAPI): void {
 	pi.registerTool({
 		name: "run_in_background",
 		label: "Run In Background",
+		...bgToolRenderers("run_in_background"),
 		description: [
 			"Start a shell command in the background and return immediately with a task id and log path.",
 			"Use it instead of bash for anything expected to outlive one tool call: test suites, builds, dev servers, watchers, long downloads.",
+			"By default the task runs in a fresh git worktree of the current repository (detached at HEAD), so concurrent background tasks never share a working tree. Uncommitted changes are NOT carried over — pass worktree:false to run in the current directory (and see your working-tree edits).",
+			"The worktree is deleted automatically when the task finishes without touching any file; if it changed or committed anything the worktree is kept and its path is reported in the terminal notification.",
 			"The command keeps running while you do other work. When it reaches a terminal state you are woken automatically by a <background-task-notification> message — do NOT sleep, poll, or call background_output merely to wait for it.",
 			"After starting a task, continue with independent work that does not depend on its result, or end the turn; the notification will bring you back.",
 			"Background commands do NOT run inside the seatbelt delete boundary that the foreground bash tool uses — treat them as the user having run `cmd &` themselves, and keep destructive work in the foreground.",
@@ -278,13 +533,22 @@ export default function backgroundTasks(pi: ExtensionAPI): void {
 		promptSnippet: "Start a long-running shell command in the background; a terminal notification wakes you, so never poll to wait.",
 		promptGuidelines: [
 			"Use run_in_background instead of bash for commands expected to run longer than a tool timeout (test suites, builds, dev servers, watchers).",
+			"Background tasks are isolated in a git worktree at HEAD by default. Anything the running background task itself wrote is NOT in this working tree — only committed content at the time you launched it. To test or verify your own uncommitted edits, pass worktree:false (or run it in the foreground).",
+			"Isolation applies per task, so several background tasks can safely run in parallel; but exclusive physical resources (a fixed port, a fixed output directory, a GPU/window) are still shared — serialize those yourself.",
 			"It returns immediately. A terminal state is delivered automatically as <background-task-notification> and starts a follow-up turn — never sleep or poll background_output just to wait.",
 			"Treat that notification as terminal truth: do not re-check status after it; call background_output only when you actually need the output.",
+			"When the notification says the worktree was kept, that task left changes behind — read them from the reported path before launching anything else against the same tree.",
 			"Background commands bypass the seatbelt delete boundary; keep destructive commands in the foreground bash tool.",
 		],
 		parameters: Type.Object({
 			command: Type.String({ description: "The shell command to run in the background (executed with /bin/bash -c)" }),
 			cwd: Type.Optional(Type.String({ description: "Working directory; relative paths resolve against the session cwd. Defaults to the session cwd" })),
+			worktree: Type.Optional(
+				Type.Boolean({
+					description:
+						"Default true: run inside a fresh git worktree of the current repo (detached at HEAD, uncommitted changes not included), deleted afterwards if no file was touched. Set false to run directly in the working directory — required when the command must see your uncommitted edits, and the only option for directories that are not git repositories.",
+				}),
+			),
 		}),
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
 			const command = String(params?.command ?? "").trim();
@@ -293,8 +557,28 @@ export default function backgroundTasks(pi: ExtensionAPI): void {
 			const cwd = params?.cwd ? path.resolve(ctx.cwd, String(params.cwd)) : ctx.cwd;
 			if (!fs.existsSync(cwd)) return textResult(`工作目录不存在：${cwd}`, { ok: false });
 
-			const task = reg.startTask({ command, cwd, logDir });
+			// 隔离是增强而非前提：不在 git 仓库 / 建失败都**静默降级**在原 cwd 跑，
+			// 只把事实告诉模型（另一个选择是拒绝任务，但那会把 /tmp 里跑脚本也一并挡掉）。
+			const wantWorktree = params?.worktree !== false && worktreeEnabled();
+			let created: CreatedWorktree | undefined;
+			let isolationNote: string | undefined;
+			if (wantWorktree) {
+				const prepared = await prepareWorktree({ cwd, runDir: cwd });
+				if (prepared.ok) created = prepared.worktree;
+				else isolationNote = `未隔离（${prepared.reason}），命令在 ${cwd} 里跑。`;
+			}
+
+			const task = reg.startTask({
+				command,
+				cwd: created?.runCwd ?? cwd,
+				worktree: created
+					? { path: created.path, repoRoot: created.repoRoot, baseCommit: created.baseCommit }
+					: undefined,
+				logDir,
+			});
 			if (task.spawnError) {
+				// 任务没跑起来，它建的那份 worktree 也就没人清 —— 当场清掉
+				if (created) void cleanupWorktree(task.worktree!, `pi/bg_${task.id}`);
 				return textResult(`启动失败：${task.spawnError}`, { ok: false, task: taskDetails(task, Date.now()) });
 			}
 			bumpDock();
@@ -302,6 +586,8 @@ export default function backgroundTasks(pi: ExtensionAPI): void {
 				[
 					`已在后台启动 ${task.id}（pid ${task.pid ?? "?"}）。`,
 					`命令：${truncateCommand(task.command, 120)}`,
+					...(created ? [`隔离工作区：${created.path}（从 HEAD 新建的 git worktree，未提交的改动不在里面）`] : []),
+					...(isolationNote ? [isolationNote] : []),
 					`日志：${task.logPath}`,
 					"它会自己跑；终态时你会收到 <background-task-notification> 并被叫醒。现在去做别的不依赖它的工作，或者结束本轮 —— 不要 sleep 或轮询等它。",
 					`需要中途看输出用 background_output（id: ${task.id}），要停掉用 background_kill。`,
@@ -316,6 +602,7 @@ export default function backgroundTasks(pi: ExtensionAPI): void {
 	pi.registerTool({
 		name: "background_output",
 		label: "Background Output",
+		...bgToolRenderers("background_output"),
 		description: [
 			"Read the output of a background task started with run_in_background.",
 			"Incremental by default: each call returns only what was produced since the previous read. Pass offset to re-read from an absolute character position.",
@@ -359,6 +646,7 @@ export default function backgroundTasks(pi: ExtensionAPI): void {
 	pi.registerTool({
 		name: "background_kill",
 		label: "Background Kill",
+		...bgToolRenderers("background_kill"),
 		description: [
 			"Stop a background task started with run_in_background.",
 			"Sends SIGTERM to the task's whole process group, then SIGKILL after a grace period if it is still alive. Pass signal to override.",
@@ -458,19 +746,66 @@ export default function backgroundTasks(pi: ExtensionAPI): void {
 		},
 	});
 
-	// ── 终态通知的渲染 ─────────────────────────────────────────────────────
+	// ── 终态通知的渲染（与工具块同一棵树：圆点顶格、对号在行末）────────────
 
-	pi.registerMessageRenderer<{ kind: string; task: Record<string, unknown> }>(CUSTOM_TYPE, (message, { outputPad }, theme) => {
+	/**
+	 * 终态通知不再套 `customMessageBg` 底色与 `Box(_, 1)` 的上下空行（用户 2026-09-30 定），
+	 * 改成与三个工具块、plan 块同一张表的树形：
+	 *
+	 * ```
+	 * • 后台任务 bg_1 结束 ✔
+	 *   │ 后台任务 bg_1 已成功结束（exit 0），运行 5s。
+	 *   └ 完整日志：/…/bg_1.log
+	 * ```
+	 *
+	 * 标题文字走 `toolTitle` 槽（与工具名同一个 Title 色）；**只要任务结束就打 `✔`**（用户
+	 * 2026-09-30 定），且 `✔` 与圆点**同色**：exit 0 时两者都走 `success`（绿），失败 / 被 kill
+	 * 时两者都走 `error`（红）—— 结局分类在 `classifyBgNotificationOutcome`。所以「跑成了」与
+	 * 「没跑成」靠**圆点颜色 + 正文措辞**（`已成功结束` / `已失败结束（exit=1）`）区分，而不是
+	 * 靠把对号换成叉号。正文走 `text` 槽（与 `exit_plan_mode` 下方正文同色），结构符 `│` / `└`
+	 * 走 `muted`。
+	 *
+	 * 不套 Box 也意味着不再用 `outputPad` 做水平内边距：圆点**顶格**（列 0），与 self 壳的
+	 * 工具块对齐 —— 两种块相邻时树才对得上。上方仍有一行空行，那是 `CustomMessageComponent`
+	 * 构造时写死的 `Spacer(1)`（去不掉，pi 的 self 壳工具块同样留一行）。
+	 */
+	pi.registerMessageRenderer<{ kind: string; task: Record<string, unknown> }>(CUSTOM_TYPE, (message, _options, theme) => {
 		const body = typeof message.content === "string" ? message.content : message.content.map((part) => part.text ?? "").join("\n");
 		const task = message.details?.task;
-		const exit = task?.exitCode;
-		const failed = task?.status === "killed" || (typeof exit === "number" && exit !== 0);
-		const label = failed ? theme.fg("warning", `⚠ 后台任务 ${String(task?.id ?? "")} 结束:`) : theme.fg("success", `✓ 后台任务 ${String(task?.id ?? "")} 结束:`);
-		const box = new Box(outputPad, 1, (text) => theme.bg("customMessageBg", text));
+		const outcome = classifyBgNotificationOutcome(task);
+		const parts = bgNotificationTitleParts(outcome);
+		const title = `后台任务 ${String(task?.id ?? "")} 结束`;
 		// 正文里的 <background-task-notification> 包裹标签是写给模型的，界面上不重复显示
-		const visible = body.replace(/<\/?background-task-notification>/g, "").trim();
-		box.addChild(new Text(`${label}\n${visible}`, 0, 0));
-		return box;
+		const sourceLines = body.replace(/<\/?background-task-notification>/g, "").trim().split("\n");
+		// 通知是静态的，按 width 缓存排版（与工具块同一套做法）
+		const cache = new Map<number, string[]>();
+		return {
+			render(width: number): string[] {
+				const hit = cache.get(width);
+				if (hit !== undefined) return hit;
+				const total = Math.max(1, width || 80);
+				// 标题行顶格（不挂 BODY_INDENT），所以折行预算就是整个宽度。
+				// 行末 `✔` 恒在（只要结束就是 ✔），与圆点同色。
+				const titleText =
+					`${theme.fg(parts.dotSlot, "\u2022")} ${theme.fg("toolTitle", theme.bold(title))} ${theme.fg(parts.markSlot, parts.mark)}`;
+				const lines = wrapTextWithAnsi(titleText, total);
+				const bodyWidth = Math.max(1, total - BODY_INDENT.length - GUTTER_WIDTH);
+				const rows: string[] = [];
+				for (const line of sourceLines) {
+					rows.push(...wrapTextWithAnsi(line, bodyWidth));
+				}
+				// 通知正文恒为四行量级，不做预览截断（它是要用户读的事实陈述）
+				const prefixes = bgResultTreePrefixes(rows.length);
+				for (let index = 0; index < rows.length; index += 1) {
+					lines.push(BODY_INDENT + theme.fg("muted", prefixes[index] ?? TREE_PIPE) + theme.fg("text", rows[index]!));
+				}
+				cache.set(width, lines);
+				return lines;
+			},
+			invalidate() {
+				cache.clear();
+			},
+		};
 	});
 
 	// ── 生命周期：任务随会话生死 ───────────────────────────────────────────

@@ -53,7 +53,7 @@ class FakeContainer {
 }
 
 /** 照 `showLoadedResources` 的顺序把一整份清单填进容器。 */
-function fillLoadedResources(container: FakeContainer, names: readonly string[] = ["Context", "Skills", "Prompts", "Extensions", "Themes"]): void {
+function fillLoadedResources(container: FakeContainer, names: readonly string[] = ["Context", "Skills", "Prompts", "Extensions"]): void {
 	container.addChild(new FakeSpacer()); // [Context] 前面那个额外空行
 	for (const name of names) {
 		container.addChild(new FakeSection(name));
@@ -81,8 +81,11 @@ test("isHiddenSection / isBlankLineComponent：只看第一行，渲染抛错只
 	assert.equal(isHiddenSection(new FakeSection("Context")), true);
 	assert.equal(isHiddenSection(new FakeSection("Prompts")), true);
 	assert.equal(isHiddenSection(new FakeSection("Themes")), true);
-	assert.equal(isHiddenSection(new FakeSection("Skills")), false);
-	assert.equal(isHiddenSection(new FakeSection("Extensions")), false);
+	assert.equal(isHiddenSection(new FakeSection("Extensions")), true);
+	assert.equal(isHiddenSection(new FakeSection("Skills")), true);
+	// 诊断段不在名单里：它们才是这份清单剪完之后唯一还可能出现的东西
+	assert.equal(isHiddenSection(new FakeSection("Skill conflicts")), false);
+	assert.equal(isHiddenSection(new FakeSection("Extension issues")), false);
 	assert.equal(isHiddenSection(new FakeSpacer()), false);
 	assert.equal(isHiddenSection({ render: () => [{}, "x"] }), false);
 	assert.equal(
@@ -100,15 +103,37 @@ test("isHiddenSection / isBlankLineComponent：只看第一行，渲染抛错只
 	assert.equal(isBlankLineComponent({ render: () => [""] }), true);
 });
 
-test("addChild 接管：被隐藏的三段连同各自的分隔空行都进不去", () => {
+test("addChild 接管：整份清单一段都进不去，连 `[Context]` 前面那个额外空行也收掉", () => {
 	const container = new FakeContainer();
 	assert.equal(installHiddenSectionPruner({ container }) !== undefined, true);
 	fillLoadedResources(container);
 
-	assert.deepEqual(titlesIn(container), ["Skills", "Extensions"]);
-	// 前面那个空行 + [Skills]、[Extensions] 各自的分隔空行
-	assert.equal(container.children.length, 5);
-	assert.deepEqual(container.children.map((child) => child instanceof FakeSpacer), [true, false, true, false, true]);
+	assert.deepEqual(titlesIn(container), []);
+	assert.equal(container.children.length, 0, "清单全剪完之后容器应该是空的，不留一行多余留白");
+});
+
+test("addChild 接管：诊断段照常放行，它前面的空行也不动", () => {
+	const container = new FakeContainer();
+	installHiddenSectionPruner({ container });
+	container.addChild(new FakeSection("Context"));
+	container.addChild(new FakeSpacer());
+	container.addChild(new FakeSection("Skill conflicts"));
+	container.addChild(new FakeSpacer());
+	assert.deepEqual(titlesIn(container), ["Skill conflicts"]);
+	assert.equal(container.children.length, 2);
+});
+
+test("addChild 接管：只在「容器里恰好剩这一个空行」时才收掉前置空行", () => {
+	const container = new FakeContainer();
+	installHiddenSectionPruner({ container });
+	// 保留段 + 它自己的分隔空行先落地，随后一个被剪的段进来
+	container.addChild(new FakeSection("Skill conflicts"));
+	container.addChild(new FakeSpacer());
+	container.addChild(new FakeSection("Context"));
+	// 那个空行是保留段的分隔空行，不是「清单开头那一个」，不能被顺手删掉
+	assert.deepEqual(titlesIn(container), ["Skill conflicts"]);
+	assert.equal(container.children.length, 2);
+	assert.equal(container.children[1] instanceof FakeSpacer, true);
 });
 
 test("addChild 接管：非 `[x]` 形状、渲染抛错、非对象的 child 一律放行", () => {
@@ -130,27 +155,27 @@ test("addChild 接管：非 `[x]` 形状、渲染抛错、非对象的 child 一
 test("addChild 接管：只有被剪掉的段才吃后面的空行，普通段后面照常", () => {
 	const container = new FakeContainer();
 	installHiddenSectionPruner({ container });
-	container.addChild(new FakeSection("Skills"));
+	container.addChild(new FakeSection("Skill conflicts"));
 	container.addChild(new FakeSpacer());
 	container.addChild(new FakeSection("Prompts"));
 	container.addChild(new FakeSpacer());
 	container.addChild(new FakeSection("Extensions"));
-	assert.deepEqual(titlesIn(container), ["Skills", "Extensions"]);
-	assert.equal(container.children.length, 3);
+	assert.deepEqual(titlesIn(container), ["Skill conflicts"]);
+	assert.equal(container.children.length, 2);
 });
 
 test("pruneHiddenSections：装晚了（清单已填好）也能剪干净", () => {
 	const container = new FakeContainer();
 	fillLoadedResources(container);
-	assert.equal(container.children.length, 11); // 1 + 5×2
-	assert.equal(pruneHiddenSections(container), 3);
-	assert.deepEqual(titlesIn(container), ["Skills", "Extensions"]);
-	assert.equal(container.children.length, 5);
+	assert.equal(container.children.length, 9); // 1 + 4×2
+	assert.equal(pruneHiddenSections(container), 4);
+	assert.deepEqual(titlesIn(container), []);
+	assert.equal(container.children.length, 0, "开头那个额外空行也一起收掉");
 });
 
 test("pruneHiddenSections：没有任何隐藏段时原样返回 0", () => {
 	const container = new FakeContainer();
-	fillLoadedResources(container, ["Skills", "Extensions"]);
+	fillLoadedResources(container, ["Skill conflicts"]);
 	const before = [...container.children];
 	assert.equal(pruneHiddenSections(container), 0);
 	assert.deepEqual(container.children, before);
@@ -162,14 +187,16 @@ test("installHiddenSectionPruner：装晚了先剪一遍已有内容，之后新
 	const container = new FakeContainer();
 	fillLoadedResources(container);
 	installHiddenSectionPruner({ container });
-	assert.deepEqual(titlesIn(container), ["Skills", "Extensions"]);
+	assert.deepEqual(titlesIn(container), []);
 	// /reload：clear() 之后重新填一份清单
 	container.children = [];
 	container.addChild(new FakeSpacer());
 	container.addChild(new FakeSection("Context"));
 	container.addChild(new FakeSpacer());
 	container.addChild(new FakeSection("Skills"));
-	assert.deepEqual(titlesIn(container), ["Skills"]);
+	container.addChild(new FakeSpacer());
+	container.addChild(new FakeSection("Extension issues"));
+	assert.deepEqual(titlesIn(container), ["Extension issues"]);
 });
 
 test("接管幂等：重复安装不叠 wrapper，旧 release 不拆新 wrapper，release 后恢复原状", () => {
@@ -236,7 +263,7 @@ test("hideLoadedSections：整条链路（找容器 → 接管 → 填清单）"
 
 	assert.equal(hideLoadedSections({ root, headerContainer }), true);
 	fillLoadedResources(loadedResources);
-	assert.deepEqual(titlesIn(loadedResources), ["Skills", "Extensions"]);
+	assert.deepEqual(titlesIn(loadedResources), []);
 
 	// 找不到容器时返回 false，什么都不改
 	assert.equal(hideLoadedSections({ root, headerContainer: new FakeContainer() }), false);
@@ -246,12 +273,12 @@ test("hideLoadedSections：整条链路（找容器 → 接管 → 填清单）"
 	const otherDocument = new FakeContainer();
 	otherDocument.addChild(otherHeader);
 	otherDocument.addChild(other);
-	assert.equal(hideLoadedSections({ root: { children: [otherDocument] }, headerContainer: otherHeader, names: ["Skills"] }), true);
+	assert.equal(hideLoadedSections({ root: { children: [otherDocument] }, headerContainer: otherHeader, names: ["Context"] }), true);
 	fillLoadedResources(other);
-	assert.deepEqual(titlesIn(other), ["Context", "Prompts", "Extensions", "Themes"]);
+	assert.deepEqual(titlesIn(other), ["Skills", "Prompts", "Extensions"]);
 });
 
-test("默认隐藏名单就是 Context / Prompts / Themes，判定宽度是个常规值", () => {
-	assert.deepEqual(HIDDEN_SECTION_NAMES, ["Context", "Prompts", "Themes"]);
+test("默认隐藏名单就是清单那几段（含 Skills），判定宽度是个常规值", () => {
+	assert.deepEqual(HIDDEN_SECTION_NAMES, ["Context", "Skills", "Prompts", "Extensions", "Themes"]);
 	assert.ok(DETECT_WIDTH >= 80, "标题行 `[Context]` 只有 9 列，判定宽度够宽就行");
 });

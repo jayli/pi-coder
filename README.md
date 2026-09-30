@@ -3,7 +3,7 @@
 
 # @bachi/pi-coder
 
-A complete [Pi](https://pi.dev) coding-agent environment packaged for npm: **30 extensions**, **3 themes**, and the global config files that make them work together.
+A complete [Pi](https://pi.dev) coding-agent environment packaged for npm: **29 extensions**, **3 themes**, and the global config files that make them work together.
 
 This is a working setup, not a collection of demos. Every extension is used daily, and each one documents the pi internals it depends on in its own file header — including the failure that motivated it and the things that look like they could be simplified but cannot be.
 
@@ -16,7 +16,7 @@ This is a working setup, not a collection of demos. Every extension is used dail
 
 A startup header, a one-line statusline, a `❯` prompt, and a diff renderer that paints whole lines.
 
-The startup list loses its `[Context]`, `[Prompts]` and `[Themes]` sections, which carry no information. The statusline's second line is written by other extensions (`plan-mode` first, then `cwd-statusline` and `rewind`) through `ctx.ui.setStatus()`, so it grows with whatever you have installed.
+The startup list is pruned **entirely** — `[Context]`, `[Skills]`, `[Prompts]`, `[Extensions]` and `[Themes]` are all dropped, leaving nothing above the transcript. The statusline's second line is written by other extensions (`plan-mode` first, then `cwd-statusline` and `rewind`) through `ctx.ui.setStatus()`, so it grows with whatever you have installed.
 
 Colors come from the active theme rather than from hardcoded values, so `/theme` repaints everything on the next frame.
 
@@ -34,14 +34,19 @@ Extensions and themes are loaded straight from the package (see the `pi` manifes
 
 ### Companion packages
 
-This environment is built around two packages that are deliberately **not** bundled — they are heavy, they have their own release cycles, and `pi-subagents` needs `settings.json` entries that only make sense once it is installed:
+This environment is built around three packages that are deliberately **not** bundled — they are heavy, they have their own release cycles, and `pi-subagents` needs `settings.json` entries that only make sense once it is installed:
 
 ```bash
-pi install npm:pi-web-access   # pi_web_search / fetch_content / source_check / get_search_content
-pi install npm:pi-subagents    # subagent / bg_wait / scripted workflows
+pi install npm:pi-web-access              # pi_web_search / fetch_content / source_check / get_search_content
+pi install npm:pi-subagents               # subagent / bg_wait / scripted workflows
+pi install git:github.com/jayli/superpowers   # the skills the global AGENTS.md and plan mode refer to
 ```
 
-Without them two extensions degrade instead of failing: `recap` cannot tell whether a background subagent is still running (it treats the failed probe as "none"), and `below-editor-after-statusline` usually has nothing to move.
+All three are already listed in the shipped `config/settings.json`'s `packages` array, which is what pi reads to install them.
+
+**`superpowers` is a pi package, not a skills directory.** It carries both an extension (a one-time persistent injection of the `using-superpowers` bootstrap) and 15 skills (`brainstorming`, `systematic-debugging`, `test-driven-development`, `writing-plans`, …), and pi pulls it to `~/.pi/agent/git/github.com/jayli/superpowers/`. That **replaced** the older manual arrangement — skills copied into `~/.agents/skills/` and found by pi's native scan — so there is nothing to copy by hand any more. Two extensions behave differently without it: `plan-mode`'s brainstorming mutual-exclusion gate can never fire (it detects a `read` of a `brainstorming/SKILL.md` path), and `verify-loop`'s completion discipline has no `verification-before-completion` skill to point at.
+
+Without `pi-web-access` and `pi-subagents` two more degrade instead of failing: `recap` cannot tell whether a background subagent is still running (it treats the failed probe as "none"), and `below-editor-after-statusline` usually has nothing to move.
 
 ## What you get
 
@@ -57,13 +62,12 @@ Without them two extensions degrade instead of failing: `recap` cannot tell whet
 | [`prompt-editor.ts`](extensions/prompt-editor.ts) | A `❯ ` gutter in the editor, Claude Code style `!` bash mode, plus a blank line between the autocomplete list and the statusline. |
 | [`fenceless-code-block/`](extensions/fenceless-code-block/) | Markdown code blocks lose their fences (syntax colors kept, no background added). |
 | [`statusline/`](extensions/statusline/) | Replaces the footer: model/thinking level, context usage, git branch and diff stat, plus a second line for extension statuses and a reserved last line for the background-task dock. |
-| [`startup-logo/`](extensions/startup-logo/) | Static header logo with version and shortened cwd, and prunes `[Context]`/`[Prompts]`/`[Themes]` from the startup list. |
+| [`startup-logo/`](extensions/startup-logo/) | Static header logo with version and shortened cwd; prunes the **entire** startup resource list (`[Context]`/`[Skills]`/`[Prompts]`/`[Extensions]`/`[Themes]`). |
 | [`working-indicator/`](extensions/working-indicator/) | Semantic working message (`Tools Calling`, `Editing`, `Writing`, `Reading`, `Thinking`) with per-segment token counts and elapsed time, plus a `Subagent watchdog reviewing` message for the window where `pi-subagents`' watchdog blocks after `agent_end` and the spinner would otherwise turn unexplained. |
 | [`simple-task/`](extensions/simple-task/) | Task list driven by `task_set` / `task_update` / `task_get` and `/tasks`; state rides the session log, never the repo. All three tools use `renderShell: "self"`, so their blocks carry no background and no boundary blank lines, with one leading space per line — the same shell as the bash and read blocks. |
 | [`recap/`](extensions/recap/) | `/recap` (idempotent: re-running it while the summary is on screen does nothing), plus an automatic summary above the editor after 10s of idling. |
 | [`rewind/`](extensions/rewind/) | Shadow-git checkpoints and `/rewind` (or Esc Esc) to restore code and/or conversation. |
-| [`ask-user-question/`](extensions/ask-user-question/) | An `ask_user_question` tool: up to 4 questions with 2–4 described options plus a free-text row, answered in the terminal. |
-| [`mcp/`](extensions/mcp/) | MCP servers become pi tools (`mcp__<server>__<tool>`) over stdio, streamable HTTP or legacy SSE, with `/mcp` status commands. |
+| [`ask-user-question/`](extensions/ask-user-question/) | An `ask_user_question` tool: up to 4 questions with 2–4 described options plus a free-text row, answered in the terminal. Its block uses `renderShell: "self"`, so it carries no background and no boundary blank lines. |
 | [`auto-default-model/`](extensions/auto-default-model/) | Writes every model switch to `settings.json` — the Ctrl+S step, automated. |
 | [`subagent-log-guard/`](extensions/subagent-log-guard/) | Stops `[pi-subagents]` stderr diagnostics from corrupting the TUI. |
 | [`cwd-statusline.ts`](extensions/cwd-statusline.ts) | Prints the full working directory as a second statusline line. |
@@ -88,7 +92,9 @@ All three are laid out side by side in the [palette reference](https://raw.githa
 
 ### Commands
 
-`/ask` `/background` `/bash-preview` `/bash-timeout` `/clear` `/exit` `/goal` `/init` `/mcp` `/memory` `/plan` `/plan-status` `/recap` `/rewind` `/sandbox-boundary` `/tasks` `/theme`
+`/ask` `/background` `/bash-preview` `/bash-timeout` `/clear` `/exit` `/goal` `/init` `/memory` `/plan` `/plan-status` `/recap` `/rewind` `/sandbox-boundary` `/tasks` `/theme`
+
+`/mcp` is **not** one of them: MCP is pi's own built-in extension (`builtin:mcp`) since pi 0.99.1, and this package no longer ships an MCP extension of its own — the retired implementation conflicted with the built-in over the `/mcp` registration. See [docs/extensions.md](docs/extensions.md#mcp-servers--pis-built-in-extension-not-this-packages).
 
 Esc Esc opens `/rewind` (requires `doubleEscapeAction: "none"`, which the shipped config sets).
 
@@ -99,7 +105,7 @@ Every switch is an environment variable, so it can be scoped per project or set 
 | Variable | Default | Effect |
 | --- | --- | --- |
 | `PI_AUTO_DEFAULT_MODEL=off` | on | Do not persist model switches to `settings.json`. |
-| `PI_BACKGROUND_TASKS=off` | on | Disable the background-task tools and `/background`; `PI_BACKGROUND_TASKS_DIR` moves the log root (used for test isolation), `PI_BACKGROUND_TASKS_DOCK=off` removes only the statusline dock line. |
+| `PI_BACKGROUND_TASKS=off` | on | Disable the background-task tools and `/background`; `PI_BACKGROUND_TASKS_DIR` moves the log root (used for test isolation), `PI_BACKGROUND_TASKS_DOCK=off` removes only the statusline dock line, `PI_BACKGROUND_TASKS_WORKTREE=off` runs every task in the working directory instead of an isolated git worktree. |
 | `PI_BASH_STREAM=on` | off | Use pi's native streaming for bash instead of the collapse path. |
 | `PI_CORE_RULES=off` | on | Do not re-inject the distilled global rules into the context. |
 | `PI_DESTRUCTIVE_GUARD` | `on` | `block` rejects the confirm tier too, `notify` only reports what it would have caught, `off` disables the gate. |
@@ -134,13 +140,14 @@ cp "$PKG/themes/"*.json             ~/.pi/agent/themes/            # optional: a
 - `npmCommand` pins `pnpm --config.node-linker=hoisted`. Remove it if you do not have pnpm, or `pi install` will fail.
 - `doubleEscapeAction: "none"` hands Esc-Esc to the `rewind` extension instead of pi's built-in tree navigator.
 
-`config/models.json` and `config/mcp.json` are **not** shipped: provider registrations point at a local gateway and the MCP file holds absolute paths of local server executables, so both belong to the machine that runs them. MCP servers are configured in `~/.pi/agent/mcp.json` or a project `.mcp.json` — the `mcp/` extension reads both. See [docs/configuration.md](docs/configuration.md).
+`config/models.json` and `config/mcp.json` are **not** shipped: provider registrations point at a local gateway and the MCP file holds absolute paths of local server executables, so both belong to the machine that runs them. MCP servers are configured in `~/.pi/agent/mcp.json` or a project `.pi/mcp.json`, which pi's built-in `builtin:mcp` reads. See [docs/configuration.md](docs/configuration.md).
 
 ## Requirements
 
-- pi **0.85.1** or newer (the extensions are written against this version's internals), Node **22.19+**.
+- pi **0.85.1** or newer (the extensions are written against this version's internals), Node **22.19+**. All 29 entries were verified to load with `errors: []` through pi's own loader on 0.85.1, 0.87.1 and 0.99.1.
+- MCP needs pi **0.99.1**, which is where `builtin:mcp` arrived. This package no longer ships an MCP extension, so on an older pi there are simply no MCP tools.
 - macOS or Linux. Nothing is Windows-specific, but it is untested there.
-- Optional but assumed by a few extensions: `pi-web-access` (the web tools) and `pi-subagents` (subagent events, fleet status line).
+- Optional but assumed by a few extensions: `pi-web-access` (the web tools), `pi-subagents` (subagent events, fleet status line) and `superpowers` (the skills `plan-mode`'s `brainstorming` gate and `verify-loop`'s completion discipline refer to). All three are listed in the shipped `config/settings.json`'s `packages` array.
 
 ## Documentation
 
@@ -148,16 +155,16 @@ cp "$PKG/themes/"*.json             ~/.pi/agent/themes/            # optional: a
 | --- | --- |
 | [docs/installation.md](docs/installation.md) | Install, verify, upgrade, uninstall, and the local-checkout workflow. |
 | [docs/configuration.md](docs/configuration.md) | Every shipped config file, what was removed from the snapshot, and why. |
-| [docs/extensions.md](docs/extensions.md) | Reference for all 30 extensions: commands, switches, caveats, storage. |
+| [docs/extensions.md](docs/extensions.md) | Reference for all 29 extensions: commands, switches, caveats, storage. |
 | [docs/themes.md](docs/themes.md) | Theme files, the custom tokens, and the rules that make them load. |
 | [Palette reference](https://raw.githack.com/jayli/pi-coder/main/assets/pi-coder-palettes.html) | **Chinese.** Every variable and slot assignment for the three themes, with a terminal preview that switches between them. |
-| [docs/development.md](docs/development.md) | Running the 1269 unit tests, verifying against a real pi, publishing. |
+| [docs/development.md](docs/development.md) | Running the 1256 unit tests, verifying against a real pi, publishing. |
 | [docs/handbook.zh.md](docs/handbook.zh.md) | **Chinese.** The original handbook this package was extracted from: the author's machine, gateway setup, and the full rationale behind every design decision. |
 
 ## Development
 
 ```bash
-npm test        # node --test, 1269 tests
+npm test        # node --test, 1256 tests
 ```
 
 The pure-logic modules are deliberately free of `@earendil-works/pi-*` imports so they run under plain `node --test`; see [docs/development.md](docs/development.md) for the layout rules, the tmux verification procedure and the traps this codebase documents.

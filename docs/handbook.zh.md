@@ -1,7 +1,8 @@
 # Pi Coding Agent 全局配置模板
 
 pi（`@earendil-works/pi-coding-agent`）的全局配置与扩展脚本快照，作为本机 pi 环境的模板标准。
-本机装的是 pi **0.87.1** + `pi-web-access` **0.31.0** + `pi-subagents` **0.71.0**。
+本机装的是 pi **0.99.1** + `pi-web-access` **0.33.0** + `pi-subagents` **0.73.1**
++ `superpowers` **6.4.2**（git 包，见下文）。
 
 pi 是接入本网关的第四个客户端：它走 `/v1/messages`（Anthropic Messages API），因此和 Claude Code
 一样绑定 **claude 路由**的模型。快照里只有一个自定义 provider `litellm-any`，指向本机 996 端口的
@@ -18,7 +19,7 @@ adapter（局域网别的机器用则换成网关主机 LAN IP）。
 | `AGENTS.core.md` | `~/.pi/agent/AGENTS.core.md`（`AGENTS.md` 的蒸馏版核心铁律，约 6KB；`extensions/core-rules/` 读它并中途重注入。**缺失则扩展静默跳过**） |
 | `config/settings.json` | `~/.pi/agent/settings.json` |
 | `config/models.json` | `~/.pi/agent/models.json` |
-| `config/mcp.json` | `~/.pi/agent/mcp.json`（MCP 服务器；不装就没有 MCP 工具，`/mcp` 会给出提示） |
+| `config/mcp.json` | `~/.pi/agent/mcp.json`（MCP 服务器，**pi 内置** `builtin:mcp` 读它；不装就没有 MCP 工具） |
 | `config/web-search.json` | `~/.pi/agent/web-search.json`（`pi-web-access` 自己的配置） |
 | `config/pi-statusline.json` | `~/.pi/agent/pi-statusline.json`（**已失效的遗留配置**：旧 npm statusline 包专用，留着只为随时换回那个包） |
 | `extensions/*.ts` | `~/.pi/agent/extensions/` |
@@ -44,25 +45,24 @@ cp -R clients/pi/extensions/recap              ~/.pi/agent/extensions/   # 依�
 cp -R clients/pi/extensions/rewind             ~/.pi/agent/extensions/
 cp -R clients/pi/extensions/statusline         ~/.pi/agent/extensions/
 cp -R clients/pi/extensions/auto-default-model ~/.pi/agent/extensions/
-cp -R clients/pi/extensions/startup-logo       ~/.pi/agent/extensions/
+cp -R clients/pi/extensions/startup-logo       ~/.pi/agent/extensions/   # 顶部静态 pi 印记 logo + 剪掉启动清单全部五段（只留诊断段）
 cp -R clients/pi/extensions/ask-user-question  ~/.pi/agent/extensions/
 cp -R clients/pi/extensions/subagent-log-guard ~/.pi/agent/extensions/
 cp -R clients/pi/extensions/fenceless-code-block ~/.pi/agent/extensions/   # 子目录形式：纯逻辑在 render.ts（不 import pi，可单测）
 cp -R clients/pi/extensions/user-message-bar   ~/.pi/agent/extensions/   # 同上：纯逻辑在 bar.ts
 cp -R clients/pi/extensions/bash-command-collapse ~/.pi/agent/extensions/  # bash-command-collapse.ts 的伴生模块（sandbox.ts / allowlist.ts 是 live 代码，不是测试）与端到端渲染测试（无 index.ts，不会被当成扩展）
 cp -R clients/pi/extensions/working-indicator  ~/.pi/agent/extensions/
-cp -R clients/pi/extensions/mcp                ~/.pi/agent/extensions/   # MCP（纯逻辑模块 + fixtures 一起拷）
 cp -R clients/pi/extensions/plan-mode          ~/.pi/agent/extensions/   # Claude Code 式 plan mode（改绑 shift+tab，见下文）
 cp -R clients/pi/extensions/sandbox-boundary   ~/.pi/agent/extensions/   # 删除边界闸（apply_patch 不走 shell，补 bash 沙箱管不到的那部分；write/edit 不拦；与 bash 沙箱共用三档授权与持久白名单）
 cp -R clients/pi/extensions/core-rules         ~/.pi/agent/extensions/   # 全局 AGENTS.md 蒸馏版的中途重注入（纯判定在 decision.ts）
 cp -R clients/pi/extensions/verify-loop        ~/.pi/agent/extensions/   # 验证闭环 + /goal 评估器（CC Stop hook / goal 同构；import ../recap/subagents.ts，依赖上一行已装 recap/）
 cp -R clients/pi/extensions/memory             ~/.pi/agent/extensions/   # 类 CC auto-memory（索引+正文，索引机械派生；见下文）
-# superpowers 无扩展：技能发现是 pi 原生扫 ~/.agents/skills，触发规则已并入全局 AGENTS.md 的 ## Skills 一节（Codex 形态：原生发现 + 提示词强化，2026-09-26 删除 skill-router 后的形态）
 # destructive-guard 已于 2026-09-24 从 live 退役（被 seatbelt 能力边界取代）、2026-09-27 从仓库删除（完整实现在 git 历史里）
 mkdir -p ~/.pi/agent/themes && cp clients/pi/themes/*.json ~/.pi/agent/themes/
 
 pi install npm:pi-web-access                # 外部包；装完必须配 web-search.json（见下文）
 pi install npm:pi-subagents                 # 同上；默认零配置可用（watchdog 是 opt-in，模板 settings.json 已带配置，见下文 watchdog 一节）
+pi install git:github.com/jayli/superpowers # 带扩展的技能包（见下文）；装完由 settings.json 的 packages 字段声明，pi 自己拉到 ~/.pi/agent/git/
 ```
 
 四个容易踩的点：
@@ -99,10 +99,21 @@ LAN IP）；`settings.json` 的 `defaultModel`（会被 `auto-default-model/` �
 - **模型名是路由键**：`model.id` 原样透传给 LiteLLM，必须和 `adapter/adapter.config.json` /
   `gateway/config.yaml` 里注册的名字一致，没有别名或改写。
 - **`thinkingLevelMap` 里置 `null` 的档位不会出现在 `/thinking` 选择器里**，值就是发给后端的档位
-  字符串。这些档位是**客户端侧声明**：qoder agent 协议忽略 `reasoning_effort`（模板只有
-  `is_reasoning: true`），idealab 那条路由则被 `gateway/config.yaml` 的 `extra_body` 覆盖 ——
-  所以别照 `~/.zshrc` 里那句 `CLAUDE_CODE_EFFORT_LEVEL=max` 抄成 `max`。目录里没有的档位
-  （如 `qwen3.8-flash` 的 `high`）保留只为形状一致，后端忽略、不报错。
+  字符串。pi 走 adaptive thinking（`output_config.effort`），litellm 的 `/v1/messages` 转换会把它
+  映射成 `reasoning_effort`。
+  **只有 pi 专属路由 `Qwen3.8-Max-DogFooding` 上的档位真的生效**：config.yaml 给它声明了
+  `allowed_openai_params: [reasoning_effort]`（否则 `drop_params: true` 会把客户端档位当不支持
+  参数丢掉）加 `model_info.supports_xhigh_reasoning_effort`（否则 litellm 把 xhigh 归一化成 high）。
+  `deepseek-flash` 走 pass-through 的 anthropic 原生 provider，pi 的 `output_config.effort` 本来
+  就能直接透传（实测：config 的 `extra_body` 在这条路上是惰性的，不进请求体）。
+  剩下四个 `qwen3.8-max` / `qwen3.8-flash` / `qwen3.8-df-qd-claude` / `deepseek-flash-qd`
+  与 Claude Code 共用 claude 路由（自定义 provider），那些路由的 `extra_body` 仍写死强度
+  且最后合并、优先级最高，所以 pi 在这四个上的档位**依旧被网关值覆盖** ——
+  好在写死值恰好都是各自最高档，体感无变化。网关侧的透传能力本身已经打通
+  （qoder agent 路径会把档位写进请求模板的 `parameters.reasoning_effort`），只是被这几条
+  路由的写死值掩住了；要让 pi 完全接管，得先解除 claude 路由的写死。
+  别照 `~/.zshrc` 里那句 `CLAUDE_CODE_EFFORT_LEVEL=max` 抄成 `max`：那是 Claude Code 的档位
+  体系，qwen 系没有 `max` 档。
 - **只有 `qwen3.8-max` / `qwen3.8-flash` / `deepseek-flash-qd` 声明 `input: ["text","image"]`**：
   qoder 目录里 `qmodel_38max` / `qfmodel` / `dfmodel` 三条是 `is_vl: true`，三条都实测过发纯色 PNG
   能被正确识别。注意 `dfmodel` 的识图**依赖网关侧 2026-09-22 的修复**：在那之前 `read` 这类工具返回的图
@@ -111,6 +122,22 @@ LAN IP）；`settings.json` 的 `defaultModel`（会被 `auto-default-model/` �
   「tool 结果里的图片」一条）。其余条目别顺手补 image —— idealab 后端吃不下，同一张图发过去是 HTTP 400。
 - `settings.json` 的 `modelThinkingLevels` 把 `deepseek-flash` 与 `deepseek-flash-qd` 钉在 `max`
   （这两个的 map 里 `max` 有真值），其余跟随全局 `xhigh`。
+- **`subagents.defaultModel: "inherit"`**（2026-09-28 加）：让所有 subagent 显式跟随主会话模型。
+  builtin agent 本来就没有 frontmatter model、默认就继承父会话模型（pi-subagents issue #266），
+  所以这行对它们是 no-op；写下来的价值是覆盖以后新增的自定义 agent 的 model 声明，
+  把「跟随主模型」的意图钉在配置里。它**管不到 watchdog** —— 那是 `subagents.watchdog.main.model`
+  独立配置（见下文 watchdog 一节，本机钉在 `deepseek-flash-qd` 取它快）。
+- **`subagents.modelScope`（2026-09-29 加；`allow` 于 2026-09-30 扩项）**：把 subagent 能用的模型收成
+  白名单。`enforce` 与 `strict` **两个都要**——只写 `enforce` 时越界模型只警告不拦（官方原话：
+  "By default, models from agent frontmatter, `subagents.defaultModel`, or the inherited parent session
+  model only warn and remain available"），加 `strict: true` 才真拒绝，且**连继承来的模型也一并检查**。
+  `allow` 里 `inherit` 是字面量（= 当前父会话模型），其余项对解析后的 `provider/id` 做通配
+  （只有 `*` 特殊、大小写不敏感）。本机现在是 `["inherit", "litellm-any/deepseek-flash-qd"]` ——
+  第二项是 2026-09-30 加的，给显式指定 `deepseek-flash-qd` 的子代理开一条口子（不写它的话
+  `inherit` 仍能跑，但一旦某次调子代理时显式点名 `deepseek-flash-qd`，strict 下会被拦成硬错）。
+  **它只管子代理**：检查点在 `src/runs/shared/model-resolution.js`（`enforceModelScopes`），而
+  watchdog 走自己的 `src/watchdog/model-selection.js`，不经过这条路径 —— 所以 `watchdog.main.model`
+  不用也不该为它加白名单项。
 - `doubleEscapeAction: "none"` 是**把内置的双击 Esc 动作关掉**，交给 `rewind/` 接管。
   该扩展会**吃掉第二次 Esc**，所以即使写回 `tree` 也不会弹 pi 的 tree；写成 `none` 只是把意图写明。
   要恢复内置行为：删掉 `rewind/` 再改回 `"tree"`。
@@ -228,8 +255,10 @@ pass-through），`Qwen3.8-Max-DogFooding` 则对应 `gateway/config.yaml` 里�
   `syntaxType` 也跟它（在 1337 里类名与函数名本来就同色）；`#6699cc` 没浪费，转手给了 `mdLink`。
   （`support.class` / `support.type` 在 1337 里是另一个米色 `#fbe3bf`，与字符串同值，没有采用 ——
   让 `syntaxType` 跟类名走才合 1337 自己的分工。）② `mdHeading` **没有用** 1337 的 `markup.heading` `#75715e` ——
-  那个值在 `#191919` 上只有 3.58:1，而且 pi 的 `mdHeading` 不只画 markdown 标题，还画启动页那批
-  `[Skills]` / `[Extensions]` 分组标签（`interactive-mode.js` 的 `addLoadedSection` 默认色），太暗读不清；
+  那个值在 `#191919` 上只有 3.58:1，而且 pi 的 `mdHeading` 不只画 markdown 标题，还画启动页那份
+  「已加载资源」清单的分组标签（`interactive-mode.js` 的 `addLoadedSection` 默认色；整份清单已被
+  `startup-logo/` 剪掉，见该扩展文件头 —— 所以这个槽位在启动页上其实已经不出现了，但 markdown 标题仍在用），
+  太暗读不清；
   改用 `constant.language` 的橙 `#ff8942`（7.46:1）。
 
   整体对账（把 `colors` 的值展开 `vars` 后逐一对回 1337 的调色板）：**59 个槽位里 46 个取自 1337、
@@ -328,6 +357,33 @@ ThemeBg 名单里的颜色一律收进 `fgColors` 表；而 `getFgAnsi()` 是按
 - **它不在官方 schema 里，所以不会出现在 `theme-command.ts` 的色卡预览上**：那只预览画的是
   pi 的标准 token 列表。
 
+## 技能包（`superpowers`）
+
+`git:github.com/jayli/superpowers`（**6.4.2**）是一个**pi 包**，通过 `settings.json` 的 `packages`
+数组声明，pi 启动时自己拉到 `~/.pi/agent/git/github.com/jayli/superpowers/`（不是 `~/.pi/agent/npm/`，
+后者只放 npm 包）。它与 pi 的约定写在包自己的 `package.json` 里：
+
+```json
+"pi": { "extensions": ["./.pi/extensions/superpowers.ts"], "skills": ["./skills"] }
+```
+
+所以 **pi 包可以同时带扩展和技能**，扩展走 `resources_discover` 把 `skills/` 目录注册进去（15 个技能：
+`brainstorming` / `systematic-debugging` / `test-driven-development` / `writing-plans` 等），
+不需要往 `~/.agents/skills/` 里拷贝。
+
+> 这**取代了** 2026-09-26 那套手动方式（技能装到 `~/.agents/skills/`、靠 pi 原生扫描发现）。
+> 手动那份现在只剩个坏掉的符号链接（`~/.claude/skills/superpowers -> ~/.agents/skills/superpowers`，
+> 目标已不存在）—— 那是给 Claude Code 的，与 pi 无关，没去动它。
+
+扩展本身只做一件事：把 `using-superpowers` 的引导文本（含 `<EXTREMELY_IMPORTANT>` 标记）在会话里
+**持久注入**一次。走的是 `before_agent_start` 返回 `custom_message`（不是请求时的 `context` 变换）——
+后者请求结束就恢复、不进会话文件，下一轮的 history 里找不到，去重门坎就失效了。防重复靠扫
+`ctx.sessionManager.buildContextEntries()` 投影；另有一个 `context` 钩子作压缩后的安全网。
+
+**与 plan mode 的关系**：`brainstorming` 技能自带完整的设计流程，与 plan mode 二选一（见下文
+plan-mode 一节的「brainstorming 互斥闸」）—— 互斥闸靠扫会话投影里 `read` 过的
+`/brainstorming/` 路径来判定，包搬家了也能命中（片段匹配）。
+
 ## 联网检索（`pi-web-access`）
 
 给 pi 加 `pi_web_search` / `fetch_content` / `source_check` / `get_search_content` 四个工具。
@@ -364,7 +420,7 @@ agent，加 `workflowScript` 脚本化编排。工具名（`subagent` / `subagen
 > for sub-agents, delegation, or parallel agent work. Requests for depth, thoroughness, research,
 > investigation, or detailed codebase analysis do not count as permission to spawn.
 
-三方同档：Codex 内置 prompt、pi-subagents 0.71.0 的 `SUBAGENT_SAFETY_GUIDANCE`
+三方同档：Codex 内置 prompt、pi-subagents 0.73.1 的 `SUBAGENT_SAFETY_GUIDANCE`
 （`src/extension/tool-description.js:9`）、本仓库 `AGENTS.md`。issue #12 说的「可检视子线程」指的是
 **检视面**（`/agent`、agents 面板、`SubAgentActivity`、`SubagentStart`/`SubagentStop` hooks），
 不是主动委派策略。
@@ -414,7 +470,7 @@ proactive 档仍不采用。差别只在**授权成立之后**：以前模型拿
 也不准——那 3 次 `{agent, task}` 直调是真派活，只是全部停在直调层、从未上升到编排层。两节结论一致：
 **编排层零调用**。
 
-能力其实全在 pi-subagents 0.71.0 里：`runs.run` / `runs.all` / `runs.lanes` / `runs.steer` /
+能力其实全在 pi-subagents 0.73.1 里：`runs.run` / `runs.all` / `runs.lanes` / `runs.steer` /
 `outputSchema` / typed gate / worktree 隔离 / 三种预算，`subagent` 工具描述本身也写了 `workflowScript`
 （`src/extension/tool-description.js:19`）。缺的是**触发**：`AGENTS.md` 对 workflowScript 零提及，模型拿到
 授权也不知道有这层，只会发 N 个临时直调。
@@ -487,67 +543,62 @@ watchdog 是 pi-subagents 的 opt-in 第二模型审查员：每个回合结束�
 一并给出去，破坏只读契约；`evidence-auditor` 的白名单是同一个坏形状，但给它 `inherit` 等于白送写权限，
 所以留原样。交互类工具不用手动排除：`ask_user_question` 自己按 `ctx.hasUI` 判断，子会话里自动摘掉。
 
-## MCP 服务器（`mcp/`）
+## MCP 服务器（pi 内置，仓库不再自带）
 
-让 pi 用上 Claude Code 那套 MCP 服务器：**每个 MCP 工具直接注册成一个 pi 工具**，名字
-`mcp__<server>__<tool>`（Claude Code 同款，skill 与权限规则里的写法可以直接搬过来）。
+MCP 由 **pi 0.99.1 的内置扩展 `builtin:mcp`** 提供：**每个 MCP 工具注册成一个 pi 工具**，名字
+`mcp__<server>__<tool>`（Claude Code 同款，skill 与权限规则里的写法可以直接搬过来）。本仓库曾自带一份
+自研实现（`clients/pi/extensions/mcp/`，2026-09-18 写），2026-09-30 已退役——原因与恢复路径见本节的
+最后一段。
 
-配置按 Claude Code 的 `.mcp.json` 形状：全局 `~/.pi/agent/mcp.json`，再加上从 cwd 往上找到的
-**第一个**项目根 `.mcp.json`（同名 server 项目覆盖全局）。所以 `~/jayli/homework/.mcp.json` 里已有的
-`wechat-local` 在 pi 里开箱即用，全局那份则是「在哪个目录都能用」。字段：`command` / `args` / `env` /
-`cwd` / `timeout`（毫秒，工具调用用；握手另有 20s 上限）走 stdio；`url` / `headers`（`type: "sse"` 走旧版
-HTTP+SSE，否则 streamable HTTP）走远程；字符串值支持 `${VAR}` 与 `${VAR:-默认值}`；`enabled: false` 保留条目但不连。
+配置按 Claude Code 的 `mcpServers` 形状，读两处：全局 `~/.pi/agent/mcp.json` + 项目根的 `.pi/mcp.json`
+（同名 server 项目覆盖全局）。字段：`command` / `args` / `env` / `cwd` 走 stdio，`url` / `headers` 走
+streamable HTTP；字符串值支持 `${VAR}` 与 `!command`；`enabled: false` 保留条目但不连。
 
-**动态请求头（`headersCommand`）**是 OAuth 的“便宜档”：很多 SaaS MCP 既支持 OAuth、也支持静态 token（GitHub PAT、
-`CONTEXT7_API_KEY`、Sentry/Figma 的 token），所以与其为一个 header 实现整套 OAuth 2.1，不如让命令自己去取：
-```json
-{ "mcpServers": { "remote": {
-  "url": "https://mcp.example.com/mcp",
-  "headersCommand": "security find-generic-password -s example-mcp -w"
-} } }
+```bash
+pi mcp add filesystem -- npx -y @modelcontextprotocol/server-filesystem .
+pi mcp add docs --url https://example.com/mcp --bearer-token-env-var DOCS_TOKEN
+pi mcp add -l tools --env API_KEY='${TOOLS_KEY}' -- uvx tools-mcp
+pi mcp list          # 连每个启用的 server，打印状态 / 工具 / 错误；有错时 exit 1
 ```
-命令输出三种形状都认：扁 JSON 对象、`{"headers":{...}}` 包装、或 `Name: Value` 行（值里的冒号不会被切开）。
-别名 `headersHelper`（Claude Code）与 `http_headers_helper`（Codex）同样可用，从那边拷配置不用改字段名；
-`headersCommandTimeout` 默认 10s。语义上有四条要记住：
 
-- **每次连接只跑一次**，结果与静态 `headers` 合并（**动态的赢**，它是更新鲜的凭据）；HTTP 协议头（`content-type`/
-  `accept`/`mcp-protocol-version`/`mcp-session-id`）优先级最高，配置改不动它们。
-- **401/403 会重跑一次，但只有头真的变了才重试请求**（命令每次都返回同一个 token 就不会白重试一遍）。旧版 SSE
-  只重建 POST，不重建 GET 长连接。
-- **失败不致命**：命令超时/非零退出/输出不可解析时退回静态 headers 继续连，原因记进诊断；真被拒时错误信息里
-  会带上这条原因（否则你只看到 401，以为是 token 过期）。
-- **绝不记录头的值**：诊断只输出头的**名字**（`头命令取到 1 个头（Authorization）`），解析失败也不回显命令输出
-  —— 输出可能整段都是密钥。`/mcp <server>` 里显示的是命令本身（你自己的配置），不是取回来的值。
+**三条容易踩的差异**（与退役的自研版相比）：
 
-没有浏览器弹窗、不写任何凭据存储：token 的生命周期完全归那条命令管（钥匙串、vault、`opencode auth` 都行）。
-只支持 OAuth（不接受静态 token）的 server 目前用不了，要支持得上第二档（OAuth 2.1 + PRM + DCR + 回调服务器），
-那基本就是 pi-mcp-adapter 的领域。
+- **`timeout` 单位是秒**（默认 60；`validateMcpServerConfig` 只接受正数秒）——自研版是毫秒，
+  从旧配置抄过来的话 `120000` 会被判非法。
+- **项目配置只读 `.pi/mcp.json`**，不再从 cwd 往上找 Claude Code 的 `.mcp.json`。要复用已有的
+  `.mcp.json`，在项目里 `ln -s .mcp.json .pi/mcp.json` 即可。
+- **不支持旧版 SSE**（`type: "sse"` 会被拒），只做 stdio 与 streamable HTTP；文档建议改用同服务的
+  `/mcp` 端点。也没有自研版那个 `headersCommand`（命令式动态头），替代物是 OAuth 或静态 `headers`
+  里的 `${VAR}` / `!command`。
 
-三个命令入口：`/mcp` 看状态（server / 工具数 / 版本 / 配置来源），`/mcp reload` 改完配置不用重启 pi，
-`/mcp <server>` 看单个 server 的详情与最近诊断。不开 pi 想验证配置就 `npm run mcp:probe -- <server> [tool]`
-（用的是扩展里同一份客户端，通了 pi 里就通；**本机 Node 22 专用** —— 它直接 import `.ts`，靠 Node 的类型擦除，
-与 `npm run usage` 一样不在 Node 20 的路由器上跑）。
+**Exposure** 决定工具怎么到达模型（每个 server 一个设置，`toolExposure` 按工具覆盖）：`codemode`（默认，
+工具只在 `codemode` 脚本里可调、不进模型工具表）、`codemode-deferred`、`deferred`（模型靠 `tool_search` 加载）、
+`direct`（像内建工具一样直接声明）、`hidden`。工具多时默认那档很省 token；`autoEnableCodemode` 设 false
+可以阻止 MCP 自动激活 `codemode` 工具。
 
-改之前的约束：
+**管理**：`/mcp` 打开 server 管理界面（状态 / 工具 / 完整错误 / 重连 / 登入登出 / 改 exposure /
+启用禁用，改动写回定义它的那份 `mcp.json`）；非交互下 `/mcp` 打印状态，`/mcp login|logout|reconnect <server>`
+直接执行。**OAuth** 只要 `url` 不带 `Authorization` 头就走：`/mcp login <server>`（或 `pi mcp login <server>`）
+开浏览器授权，token 存 `~/.pi/agent/mcp-auth.json` 并自动刷新，`/mcp logout` 删凭据。
 
-- **传输是自己实现的**（`protocol.ts` + `client.ts`），**不依赖 `@modelcontextprotocol/sdk`** —— 扩展目录
-  里没有 node_modules，引 SDK 就得给 `~/.pi/agent/extensions/mcp/` 铺依赖。协议面只做
-  initialize / notifications/initialized / tools/list / tools/call，其余（OAuth、sampling、elicitation、
-  progress、`tools/list_changed` 热更新）**刻意不做**；服务端反向请求一律回 `-32601`，不留傻等的对端。
-- **诊断输出只进内存环形缓冲**（每个 server 20 行，`/mcp <server>` 看），**不写 stdout/stderr** ——
-  interactive pi 里往 stderr 写会直接糊在输入框上（`subagent-log-guard/` 就是为这个存在的）。
-- **会话开始时连接、结束时断开**。工具表必须先 `tools/list` 才能注册，所以不能等首次调用才连；
-  多个 server 并行握手，单个失败只影响它自己（启动时给一条 warning，不阻塞会话）。
-- **工具输出必须截断**：沿用 pi 内建工具的 50KB / 2000 行上限（`tools.ts` 的头截断），图片块不计入、
-  也不被截掉。MCP 的 `resource` / `resource_link` / `audio` 会降级成一行文本说明 —— pi 的 tool content
-  只认 `text` 与 `image`，原样塞进去会被静默丢掉。
-- **工具名有 64 字符硬上限**（Anthropic / OpenAI 的 tool 名限制）：超长时截断工具名并接 FNV-1a 哈希后缀，
-  保证截断后仍可区分。改命名规则时 `tools.test.ts` 的哈希稳定性用例会拦住手滑。
-- **头命令的设计约束（`headers-command.ts`）**：① 子进程**刻意不 unref** —— 它是我们正在等的结果，unref
-  会让 `pi -p` / probe 这类短命进程先退出、promise 永远不 resolve（单测当场拦到过）；② 诊断只能用
-  `describeHeaderNames` 输出**头名**，头的值与解析失败的原文一律不打印（命令输出可能整段是 token）；
-  ③ 命令失败不当致命错误，退回静态 headers 并把原因带进最终错误信息，否则用户只看到 401 而不知道是命令挂了；
-  ④ 401/403 重跑命令后**只在头真的变化时**重试（headless 与交互两种模式行为要一致）。
+**行为**：会话启动时连接，首个 prompt 最多等 10s（没连上的 server 的工具随后才可用）；HTTP 网络错误与
+408/429/5xx 重试两次；断线的 server 下次调用时重连；server 报 `tools/list_changed` 时会增删工具。文本结果超过
+20KB 会被截中段（**留头留尾**，完整内容存临时文件并把路径告诉模型），`image` 原样转发，`resource` /
+`resource_link` / `audio` 降级成一行说明。server 的日志通知追加到 `~/.pi/agent/mcp.log`（>5MB 轮转）。
+MCP 调用走 pi 的 tool pipeline，所以 `tool_call` / `tool_result` 钩子（含权限闸）对它们一视同仁。
+
+**关掉内置 MCP 的两种方式**：`pi config` 的 Built-in 一节，或 settings.json 里
+`"extensions": ["-builtin:mcp"]`（`pi mcp` 系列 shell 命令不受影响，仍可用）。
+
+**为什么当年自建、为什么现在退役（2026-09-30）**：pi 0.87 时代没有内置 MCP，为了把 Claude Code 那套
+server 接进 pi 工具表，写了 12 个文件的零依赖实现（三种传输、自研 JSON-RPC、`headersCommand`、
+`/mcp` 命令、`npm run mcp:probe` 探针，132 个 `node --test` 用例）。pi 0.99.1 把 MCP 做成了内置扩展
+并同样注册 `/mcp`，两者按「先注册者赢」冲突，每次启动都报
+`Extension …/extensions/mcp/index.ts registers command /mcp, so built-in extension mcp was not loaded`。
+改用内置后白得 OAuth、`/mcp` 管理界面、`pi mcp` CLI 与 exposure/codemode 集成，代价就是上面那三条差异。
+自研版已移到 `~/.pi/agent/retired-extensions/mcp/`（说明见那里的 `README.md`），仓库里的副本随 2026-09-30
+那次提交从工作树删除，**完整实现与测试保留在 git 历史**（提交 `bf3ab71`，需要时 `git show bf3ab71`
+或 `git checkout bf3ab71 -- clients/pi/extensions/mcp`）。
 
 ## 自写扩展：改之前要知道的
 
@@ -567,15 +618,15 @@ HTTP+SSE，否则 streamable HTTP）走远程；字符串值支持 `${VAR}` 与 
 | `clear-command.ts` | `/clear` 别名 → `ctx.newSession()`（先 `waitForIdle`，与内置 `/new` 同一条流程） |
 | `exit-command.ts` | 整行 `exit` / `quit` 优雅退出（只在 TUI 模式；`--print` 里仍是普通 prompt） |
 | `init-command.ts` | Claude Code 式 `/init`：`CLAUDE.md` → 否则 `AGENTS.md` → 否则新建 `AGENTS.md` |
-| `ask-user-question/` | Claude Code `AskUserQuestion` 式的结构化提问工具（子会话里按 `ctx.hasUI` 自动摘掉） |
-| `mcp/` | MCP 服务器 → pi 工具（`mcp__<server>__<tool>`）；自带 stdio / streamable HTTP / 旧版 SSE 三种传输与 `/mcp` 命令。配置、约束与验证方式见上一节 |
+| `ask-user-question/` | Claude Code `AskUserQuestion` 式的结构化提问工具（子会话里按 `ctx.hasUI` 自动摘掉）。工具块带 `renderShell: "self"`（用户 2026-09-26 定，与 simple-task / bash / read 同一套壳）：**无底色**、**无上下边界空行**，`renderCall` / `renderResult` 用 `new Text(…, 1, 0)` 从前一列起画；形状断言在 `render.test.ts`（4 个用例） |
+| ~~`mcp/`~~ | **已退役（2026-09-30）**：MCP 自 pi 0.99.1 起是内置扩展 `builtin:mcp`（同样注册 `/mcp`，两者互斥），本仓库不再自带该扩展；用法与退役理由见上一节 |
 | `simple-task/` | 轻量任务清单（`task_set` / `task_update` / `task_get`）。计划批准后模型认为该建清单就自己 `task_set`，扩展不再代它建（2026-09-24 起与 plan-mode 无耦合）。三个工具都带 `renderShell: "self"`（用户 2026-09-26 定，与 bash / read 块同一套壳）：整块**没有底色**（pending / 成功 / 失败三色底都不画）、**没有上下边界空行**（默认壳 `Box(1, 1)` 的上下两条）；标题与结果都从**列 1** 起 —— 每行前置一个空格、不顶格（补回默认壳原本的那一列左边距，由 Text 的 `paddingX = 1` 画）；块上方只剩 pi self 模式固定的那一行留白。形状断言见 `render.test.ts`（3 个端到端用例，含「其他工具底色照旧」的对照） |
-| `plan-mode/` | Claude Code 式 plan mode + **三态权限模式**（`dangerous` / `bypass` / `plan`）。`shift+tab` 走固定循环 `dangerous → bypass → plan → dangerous`；`/plan` 只切 plan（永远不落到 dangerous）、`--plan` 启动即进；模型可自行调 `enter_plan_mode` 进入、用 `exit_plan_mode` 提交**一份完整方案文本**等用户批准；批准后模型把方案落成计划文档（`.pi/plans/`），写完自动收尾并回到**进入前的模式**。dangerous 关掉沙箱删除拦截，bypass 开启。详见下文 |
+| `plan-mode/` | Claude Code 式 plan mode + **三态权限模式**（`dangerous` / `bypass` / `plan`）。两个弹框（模型进入同意框、计划审批框）的正文走 `text` 槽（fg），标题与高亮选项保留 accent（`consent.ts`，2026-09-30）。`shift+tab` 走固定循环 `dangerous → bypass → plan → dangerous`；`/plan` 只切 plan（永远不落到 dangerous）、`--plan` 启动即进；模型可自行调 `enter_plan_mode` 进入、用 `exit_plan_mode` 提交**一份完整方案文本**等用户批准；批准后模型把方案落成计划文档（`.pi/plans/`），写完自动收尾并回到**进入前的模式**。dangerous 关掉沙箱删除拦截，bypass 开启。两个工具调用块带 `renderShell: "self"` 的树形渲染（用户 2026-09-29 定，与 bash / simple-task 块同一套壳）：**无底色、无下空行**（上方只剩 pi self 模式固定的那一行留白）；标题行 = 状态圆点 + 加粗工具原名 + 结局标记（**从圆点起顶格**，圆点前无空格；几何是 `•` 列 0、`│`/`└` 列 2、正文列 4 —— 树符正好落在工具名首字母正下方，与 bash 块同一张表）—— 成功绿 `•`+`✔`（`success` 槽）/ 被用户否掉或被打回灰 `•`+`✘`（`dim`）/ 真错误红 `•`+`✘`（`error`）/ 执行中灰 `•` 无标记；正文是**结果全文**折行挂树 —— 除末行外 `│ `、**末行 `└ `**（与 bash 块「`└` 只落在第一个实质输出行」刻意分叉，见 `render.ts` 文件头），结构符 `muted` 自成一段 SGR；正文走 `text` 槽（fg 颜色，用户 2026-09-29 定）——计划正文要用户逐字读并据此拍板，不跟 read / grep 输出一样被 `toolOutput` 压暗。结局分类读 `details`（`consented` / `accepted` 严格 true 才算成功，isError 优先），标题标记靠 renderResult 写 `context.state` + renderCall 懒组件读回（同一次 updateDisplay 里 callRenderer 先于 resultRenderer，当场读不到）。形态断言见 `render.test.ts` / `index.test.ts`。详见下文 |
 | `core-rules/` | 对抗全局 AGENTS.md 的注意力衰退：把蒸馏版核心铁律（`~/.pi/agent/AGENTS.core.md`，约 6KB，仓库镜像 `clients/pi/AGENTS.core.md`）在会话开始 / 压缩后 / 内容变更三个时机持久化注入到上下文末尾（用户消息之后），照 Codex 的 world-state diff 语义（不变不发、变了带替换声明）。判定在 `decision.ts`；`PI_CORE_RULES=off` 关闭 |
 | `verify-loop/` | **验证闭环 + 评估器**（补 issue #12 权重最高的一格空白），对齐 CC 的两个原生件，落在 pi 官方的 `agent_before_settle` 边界上（"the final actionable boundary: it can append entries and request one continuation"）。**(1) 闸**（CC 的 `type:"command"` Stop hook）：每次 settle（仅 `outcome==="completed"`，abort / error 不触发 —— CC 的 Stop / StopFailure 分流）检查本次 run（最后一条 user 消息之后）：有文件改动（`edit`/`write`/`apply_patch`/`multiedit`，非文档路径）但**改动之后没跑过任何 bash 命令** → 追加一条 `display:true` 的注入消息（用户可见 = CC 的 "Stop hook feedback"；同时以 user 角色进模型上下文）并 `continue:true` 强制续跑一轮。**拦截次数不用内存计数器，而是数投影里已注入的同类消息** —— `agent_start` 在每次边界续跑时都会再 fire（`runAgentLoopContinue` 里 emit），挂在它上面的复位会在续跑链里把计数清零、上限失效；从投影数则天然分支正确、resume 后仍正确、无可变状态，且注入消息是 `role:"custom"`（不是 user），不会切断 run 窗口 —— 整条续跑链共用一个窗口，正是 CC「同一 turn 内连续 block」的语义。上限默认 2（`PI_VERIFY_LOOP_CAP`；CC 的通用 8 是给任意用户 hook 的）。**verification 口径 = 任何 bash 调用**：2026-09-25 第一次活体冒烟量到误报 —— 模型改完 `probe.js` 跑的是 `node --input-type=module -e "import('./probe.js')…"`，真证据但不匹配任何测试形状，被闸第二次拦下；词法判不了「这条命令是不是*相关的*测试」（那是评估器的活），所以闸只问「改动之后有没有观察过实际状态」。`PI_VERIFY_PATTERN=strict` 恢复只认测试/构建/lint 形状，或给自定义正则。**(2) `/goal`**（CC 的会话级 prompt 评估器，手动设定、之后每轮自动评估）：`/goal <条件>`（≤4000 字符，CC 同限）存 `appendEntry` 并立即以条件为指令起一轮；此后每次 settle 先问子代理在不在跑（在 → 本轮跳过，CC 的 "background work defers evaluation"，复用 `recap/subagents.ts` 的 RPC），再发一次**不带工具**的独立模型调用（条件 + `serializeConversation(convertToLlm(投影))` 截尾，默认 120k 字符），解析三裁决 JSON（`met`/`not_met`/`impossible`，裸 / 包 code fence 都认）：未达成 → 理由注入续跑；达成 / 不可能 → 记录条目并清除。**fail-open**：评估失败 / 超时 / 解析不出 → 放行（CC 的 hook 失败同样不拦回合）。无进展检测（连续 2 轮续跑零工具调用 → 停循环、goal 保留，CC："stops the loop … with the goal still set"）与 8 次续跑上限（`PI_GOAL_CAP`，CC 的数字）同样从投影数。resume 恢复活跃 goal 但重置轮数计时（CC："carries the condition over but resets the turn count"）；已达成 / 已不可能的不恢复。评估模型 `PI_VERIFY_EVALUATOR_MODEL=provider/modelId`，缺省 `litellm-any/qwen3.8-flash`，再退回当前会话模型；已知成本 —— 这些路由的 thinking 是 `gateway/config.yaml` 钉死的，评估调用也付 thinking（实测 3-20s）。**与 CC 的唯一有意偏离**：CC 默认不装任何 hook（用户在 settings.json 配置）；这里没有 hooks 配置层，所以闸**默认 block 开启**、触发条件收得极窄，`PI_VERIFY_LOOP=off|notify|block` 一键切换。2026-09-25 活体验证（隔离 agent dir + SDK 驱动）：闸拦一次后模型补验证放行；`/goal VALUE=42` 驱动模型真改文件到 `met`（证据是命令输出）；只口头声称的一轮被判 `not_met` → 注入理由 → 真干活 → `met`；不可满足条件判 `impossible` 并清除。量到的一个 pi 限制（非本扩展 bug）：会触发回合的扩展命令（`/goal`，以及既有的 `/init`）在 `-p` print 模式下不生效 —— `session.prompt()` 在命令的 `sendUserMessage` 回合开始前就返回。91 个 `node --test` 用例：`gate.test.ts`（24）/ `goal.test.ts`（23）/ `evaluator.test.ts`（23）纯逻辑 + `index.test.ts`（21）走 pi 真加载器（假子代理总线 + 假 model registry） |
-| `memory/` | **类 CC auto-memory**（补 issue #13 权重最高的一格空白：记忆 / 跨会话学习）。存储照 CC：`~/.pi/agent/memory/<git根slug>/` 下 `MEMORY.md` 索引 + 一记忆一文件（CC 兼容 frontmatter：`name`/`description`/`metadata.type` 四选一 user/feedback/project/reference /`modified`）。**方案 C：索引由扩展机械派生，模型不手写** —— `memory_write` 写完正文后扫全部正文 frontmatter 自动重建索引（内容一致不落盘，幂等），消除 CC/Qoder 都在搏斗的「忘更新索引 → 写进去却永远召回不到」故障源；手改正文文件后下次 `before_agent_start` 自动纳入索引。注入走 `before_agent_start` 改 `systemPromptOptions.sections.memory`（纪律文本 + 索引，空库不注入）—— section 进 system message、随 transcript 重放、压缩后存活；索引只在写入时变化，字节天然稳定，**不需要 pi-memory 那套 KV 缓存快照机制**。纪律文本 = CC 三道闸（applicable/durable/legible）+ 时态判据（只存过去时观察，不存现在时仓库状态断言 —— 过去时永不过期，现在时必然腐烂）+ 读取端核实义务（记忆是快照不是地面真相，点名文件/函数/flag 的记忆行动前先核实，AGENTS.md `## Verification` 同款）+ 不存密钥。四个工具：`memory_write`（写正文+重建索引，同名=更新）、`memory_read`（读正文/列全部）、`memory_forget`（删除+索引更新）、`memory_search`（零依赖关键词检索，frontmatter 命中权重 3 / 正文 1）；全部文件读写包 `withFileMutationQueue`（工具调用并行执行）。`/memory` 命令（对标 CC 三项）：状态行 + 打开目录 + 显示索引 + 开关（per-project `.disabled` 标记）。`PI_MEMORY=off` 整体关闭，`PI_MEMORY_DIR` 覆盖记忆根（测试隔离）。**v1 刻意不做**：后台 dream 固化（留挂载点）、USER/PROJECT 双 scope（仅 per-project）、qmd 语义搜索、写入机械闸（时态/密钥靠纪律文本）。26 个 `node --test` 用例：`store.test.ts`（10）/ `context.test.ts`（4）纯逻辑 + `index.test.ts`（12）走 pi 真加载器（含 issue #13 那个 promptSnippet 被剥 bug 的回归断言）。设计文档 `docs/superpowers/specs/2026-09-26-pi-memory-design.md` |
+| `memory/` | **类 CC auto-memory**（补 issue #13 权重最高的一格空白：记忆 / 跨会话学习）。存储照 CC：`~/.pi/agent/memory/<git根slug>/` 下 `MEMORY.md` 索引 + 一记忆一文件（CC 兼容 frontmatter：`name`/`description`/`metadata.type` 四选一 user/feedback/project/reference /`modified`）。**方案 C：索引由扩展机械派生，模型不手写** —— `memory_write` 写完正文后扫全部正文 frontmatter 自动重建索引（内容一致不落盘，幂等），消除 CC/Qoder 都在搏斗的「忘更新索引 → 写进去却永远召回不到」故障源；手改正文文件后下次 `before_agent_start` 自动纳入索引。注入走 `before_agent_start` 改 `systemPromptOptions.sections.memory`（纪律文本 + 索引，空库不注入）—— section 进 system message、随 transcript 重放、压缩后存活；索引只在写入时变化，字节天然稳定，**不需要 pi-memory 那套 KV 缓存快照机制**。纪律文本 = CC 三道闸（applicable/durable/legible）+ 时态判据（只存过去时观察，不存现在时仓库状态断言 —— 过去时永不过期，现在时必然腐烂）+ 读取端核实义务（记忆是快照不是地面真相，点名文件/函数/flag 的记忆行动前先核实，AGENTS.md `## Verification` 同款）+ 不存密钥。四个工具：`memory_write`（写正文+重建索引，同名=更新）、`memory_read`（读正文/列全部）、`memory_forget`（删除+索引更新）、`memory_search`（零依赖关键词检索，frontmatter 命中权重 3 / 正文 1）；全部文件读写包 `withFileMutationQueue`（工具调用并行执行）。`/memory` 命令（对标 CC 三项）：状态行 + 打开目录 + 显示索引 + 开关（per-project `.disabled` 标记）。`PI_MEMORY=off` 整体关闭，`PI_MEMORY_DIR` 覆盖记忆根（测试隔离）。**v1 刻意不做**：后台 dream 固化（留挂载点）、USER/PROJECT 双 scope（仅 per-project）、qmd 语义搜索、写入机械闸（时态/密钥靠纪律文本）。**四个工具块的展示形态**（用户 2026-09-30 定：与 bash / plan / 后台任务块同族）：都不再走 pi 默认壳（`toolSuccessBg` 底色 + 上下空行 + 平铺正文），改成 `renderShell: "self"` + 树形：标题行 `• 工具名` 顶格（圆点是结局灯：成功绿 `success`、declined 灰 `dim`、错误红 `error`；declined = `details.action` 落在 `rejected` / `blocked` / `not_found`），正文挂 2 列缩进的树（`│` 续行、`└` 末行，结构符 `muted`、正文 `text` 槽），几何与 plan 块同一张表（`•` 列 0、`│`/`└` 列 2、正文列 4 —— 对齐工具名首字母）。**工具块不打任何标记**（同后台任务块那套语言：圆点已是结局灯，记忆工具是一次同步读写、没有「还在跑」的后续，`✔`/`✘` 都是同一件事说两遍）。形态决定（结局分类 / 标题装饰 / 树前缀 / 预览截断）在纯模块 `render.ts`，上色折行在 `index.ts`；预览截断保留 pi 默认壳原有行为：非展开态裁到 10 行 + `… (N more lines, ctrl+o to expand)` 提示，展开态（ctrl+o）不裁 —— 否则 `memory_read` 读长正文或不带 name 列几十条记忆会平铺满屏。46 个 `node --test` 用例：`store.test.ts`（10）/ `context.test.ts`（4）/ `render.test.ts`（11，结局分类 / 标题装饰四态均无标记 / 树前缀 / 几何常量 / 预览提示文案）纯逻辑 + `index.test.ts`（21）走 pi 真加载器（含 issue #13 那个 promptSnippet 被剥 bug 的回归断言，以及**工具块渲染形态 9 例**：self 壳、标题四态含「无任何标记、区分只在点色」（painted 主题断言色槽）、树形正文几何、折行后 `└` 仍只在末行、预览截断 + 展开态、经 pi 真组件渲染无底色无边界空行 + 「其他工具底色照旧」对照、执行中块只有标题行）。设计文档 `docs/superpowers/specs/2026-09-26-pi-memory-design.md` |
 | `working-indicator/` | 语义化工作标签（`Tools Calling` / `Editing` / `Writing` / `Reading` / `Thinking`，否则 `Working`）+ 每秒回合计时 + 幻彩 spinner + 长提示词自动摘要 + bash 运行 `●` 指示。**watchdog 提示**：pi-subagents 的 watchdog 在改过仓库的回合的 `agent_end` 里跑一次独立审查模型（实测 7~17s），而 pi 要等所有 `agent_end` handler 跑完才清 spinner —— 那段时间 spinner 一直转却没解释。本扩展在 `agent_end` 后起一个一次性定时器（`PI_WORKING_INDICATOR_WATCHDOG_DELAY_MS`，默认 2s），到点还没 settle 就把文案切成 `Subagent watchdog reviewing`（用户指定，英文，不带时长/token）；`agent_settled` / `agent_before_settle` / `session_before_compact` / `agent_start` / `session_shutdown` 任一到就复位 —— 后两个是为了不把自动压缩与 verify-loop 的 `/goal` 评估（都发生在应用层 agent_end 之后、settled 之前）误标成 watchdog。正常回合 settled 是毫秒级，2s 阈值不误报。`PI_WORKING_INDICATOR_WATCHDOG=off` 关闭 |
-| `background-tasks/` | **最简版 `run_in_background`**（补 pi 0.87.1 的后台执行原语空白：`run_in_background` 在全部 dist 里 0 命中，`ExecOptions` 只有 signal / timeout / cwd，长任务只能前台阻塞到超时）。工具面对齐 CC 三件套：`run_in_background`（= Bash 的 `run_in_background: true`）/ `background_output`（= `BashOutput`，默认增量读，offset 是累计字符绝对值）/ `background_kill`（= `KillShell`），外加 `/background` 命令（= CC 的 `/bashes`：列表 / `<id>` 详情+日志尾部 / `kill <id>`）。**完成即唤醒**：任务进终态时注入一条 `<background-task-notification>` 并 `triggerTurn` 起一轮模型跟进（空闲直接起新一轮，流式中 `deliverAs:"followUp"` 排到本轮结束），所以工具描述里明写「不要 sleep / 不要轮询等它」。**任务随 pi 会话生死**：`session_shutdown` 里 `killAll()`（幂等）；spawn 用 `detached:true` 只为让命令当自己进程组组长，好让 `kill(-pid)` 整组带走（`npm test` 的 worker、管道各段），**不 unref**，因此不需要跨重启恢复逻辑。代价两条已记录：pi 被 SIGKILL 时没机会跑 shutdown，以及 `/reload` 会结束在跑的任务。会话替换（`/clear`、`/new`、`/resume`）也发 `session_shutdown` 但扩展实例不死，所以 `session_start` 一到就把 `disposed` 复位（否则新会话里的任务永远唤醒不了模型），并用 registry 身份闸挡住旧会话被 killAll 的任务的迟到 exit 注入新会话。**后台命令不经过前台 bash 的 seatbelt 删除边界**（扩展直接 spawn，语义等同用户自己 `cmd &`），工具描述与 `/background` 输出里都印了这句提示。输出双写：内存环形缓冲（256KB，超限丢最旧块并如实报 `droppedBefore`）+ 日志文件 `<agentDir>/bg-tasks/<sessionId>/<id>.log`（完整，不受环形上限影响；文件同步 touch 出来，因为工具结果当场就把路径交给了模型）。stdout / stderr 合并成一条流（等价 `2>&1`）。`registry.ts` 是纯逻辑（spawn / now / 上限 / 宽限期全可注入），`index.ts` 只接线。**statusline 底部的任务 dock**：有任务在跑（或刚进终态）时 footer 最底部多一行 `⚙ bg_1 running 12s · npm run test --silent…` —— 文案与配色在纯模块 `status.ts`（图标 dim / id accent / 状态词按结局着色：running → warning、exit 0 → success、非 0 与 killed → error / 时长 muted / 命令 dim），`index.ts` 只负责发布与节拍：一个 1s 的 `setInterval`（`unref`）重算并 `ctx.ui.setStatus("background-tasks", …)`，没东西可显示时自己停表并清键；永远只显示一行（最新启动的 running 任务优先，没 running 时取驻留窗口内最新的终态任务，同类其余折叠成 `(+N)`），终态行驻留 `TERMINAL_LINGER_MS`（10s）后消失；**`(+N)` 刻意放在命令之前**（超宽时只有行尾命令被截，计数正是多任务时唯一的信息，不能跟着没）；弹窗期间（`ui_prompt_start` → `ui_prompt_end`）**一次都不发布** —— 不只是停掉秒级 tick，连事件驱动的那一下（任务恰好在弹窗里结束时的终态回调）也跳过：pi 主屏渲染每次把视口钉在底部，一次重绘同样会把用户手动上翻的 scrollback 拽回去（与 working-indicator 冻结重绘同一条理由）。弹窗一关，`ui_prompt_end` 按**当前真实状态**重算，所以什么都不丢（时长也是重算的，不会停在旧值）。60 个 `node --test` 用例：`registry.test.ts`（16，假子进程驱动完整状态机；假 pid 取在系统上限之上，组杀路径永远不会误伤真进程）+ `status.test.ts`（16，dock 行的四种结局形态 / 任务选取 / 驻留边界 / 命令粗截 / 色槽 / `(+N)` 截断回归）+ `index.test.ts`（28，走 pi 真加载器 + **真 spawn**：完成通知、增量读不重复、组杀连孙进程一起带走、shutdown 不留孤儿进程、`/background` 详情不推进模型的增量 offset、会话替换后 disposed 复位、旧 registry 迟到终态不注入新会话，以及 dock 的 8 个：启动即发布、秒级 tick 推进时长、终态驻留后自动清键且停表、弹窗冻结/恢复、**弹窗期间连事件驱动的那一下也不发布**（终态通知落在弹窗里同样不重绘）、shutdown 清键停表、`DOCK=off` 时一次 setStatus 都不调）。`PI_BACKGROUND_TASKS=off` 关闭，`PI_BACKGROUND_TASKS_DIR` 覆盖日志根（测试隔离），`PI_BACKGROUND_TASKS_DOCK=off` 只关 statusline 那一行（工具与通知照旧），`PI_BACKGROUND_TASKS_DOCK_LINGER_MS` 改终态行驻留时长 |
+| `background-tasks/` | **最简版 `run_in_background`**（补 pi 0.87.1 的后台执行原语空白：`run_in_background` 在全部 dist 里 0 命中，`ExecOptions` 只有 signal / timeout / cwd，长任务只能前台阻塞到超时）。工具面对齐 CC 三件套：`run_in_background`（= Bash 的 `run_in_background: true`）/ `background_output`（= `BashOutput`，默认增量读，offset 是累计字符绝对值）/ `background_kill`（= `KillShell`），外加 `/background` 命令（= CC 的 `/bashes`：列表 / `<id>` 详情+日志尾部 / `kill <id>`）。**完成即唤醒**：任务进终态时注入一条 `<background-task-notification>` 并 `triggerTurn` 起一轮模型跟进（空闲直接起新一轮，流式中 `deliverAs:"followUp"` 排到本轮结束），所以工具描述里明写「不要 sleep / 不要轮询等它」。**任务随 pi 会话生死**：`session_shutdown` 里 `killAll()`（幂等）；spawn 用 `detached:true` 只为让命令当自己进程组组长，好让 `kill(-pid)` 整组带走（`npm test` 的 worker、管道各段），**不 unref**，因此不需要跨重启恢复逻辑。代价两条已记录：pi 被 SIGKILL 时没机会跑 shutdown，以及 `/reload` 会结束在跑的任务。会话替换（`/clear`、`/new`、`/resume`）也发 `session_shutdown` 但扩展实例不死，所以 `session_start` 一到就把 `disposed` 复位（否则新会话里的任务永远唤醒不了模型），并用 registry 身份闸挡住旧会话被 killAll 的任务的迟到 exit 注入新会话。**后台命令不经过前台 bash 的 seatbelt 删除边界**（扩展直接 spawn，语义等同用户自己 `cmd &`），工具描述与 `/background` 输出里都印了这句提示。输出双写：内存环形缓冲（256KB，超限丢最旧块并如实报 `droppedBefore`）+ 日志文件 `<agentDir>/bg-tasks/<sessionId>/<id>.log`（完整，不受环形上限影响；文件同步 touch 出来，因为工具结果当场就把路径交给了模型）。stdout / stderr 合并成一条流（等价 `2>&1`）。`registry.ts` 是纯逻辑（spawn / now / 上限 / 宽限期全可注入），`index.ts` 只接线。**worktree 隔离**（用户 2026-09-30 定，对齐 CC 的 `isolation: "worktree"`）：默认**每个后台任务在仓库的一份独立 git worktree 里跑** —— 多个并发任务不再共享同一份工作区（起因是 mc-heavy 那次实测：`bg_4` 的 A/B 脚本改写 `minecart-config.js` 时，`bg_3` 声称在测「基线」却读到了处理组的代码，基线数据静默作废；限流解决不了它，因为 8 个并发全在阈值以下而 `cargo test`/`npm install` 这类安全并行反会被误伤）。三个实现选择：**基线是 HEAD**（未提交改动不带进去，起点干净正是「有没有改动」判定可靠的前提；代价是先在前台改完文件再起后台测试会测到旧代码 —— 要验证当前工作区必须 `worktree: false`）、**被 ignore 的 `node_modules` symlink 主仓库那一份**（不链任务根本跑不起来；已被 `lstat` 挡掉链中链）、**worktree 落在 `$TMPDIR`**（`fs.mkdtempSync(os.tmpdir()+"/pi-bg-")`，在 seatbelt 可删边界内所以 `git worktree remove` 不会被拦，且保留态不污染仓库树）。建用 `git worktree add --detach <dir> HEAD`（`--detach` 而非 CC 的 `-B`：不动 `git branch` 列表）。**清理三态照抄 CC**（`worktree.ts` 的 `cleanupWorktree`）：无改动 → `git worktree remove --force` + `prune`，**完全无痕**；有未提交改动或新 commit → **保留**并把路径（有新 commit 还带一个 `pi/bg_<id>-<时间戳>` 分支，否则 detached commit 会被 gc 丢掉）写进终态通知；删除失败 → 保留 + 原始报错（fail-safe）。**通知前先清完**（`finishTask` 里 `await cleanupWorktree` 再 `sendMessage`）：通知是 `triggerTurn` 的，反过来会把「worktree 还在不在」变成竞态；清理**不**受 `disposed` 闸门约束（`session_shutdown` 的 `killAll` 是泄漏最多的一条路，必须照清）。建/删都走 `serializeGit` 进程内队列（只排这几毫秒的元数据操作，任务本身仍并行）。不在 git 仓库 / 建失败 → **静默降级**为不隔离在原 cwd 跑，只把事实告诉模型（`未隔离（不在 git 仓库里）`）—— 隔离是增强不是前提。**有一处实测坑必须记住**：`.gitignore` 的 `node_modules/` 只匹配**目录**，而链进去的是**符号链接**，git 把它当未跟踪文件（`?? node_modules`），不排除的话每个任务都会被判成「有改动」、无改动就删的那一态永远走不到 —— `detectChanges` 因此用 pathspec 排除（`git status --porcelain -- . ':(exclude)node_modules'`），且传进去的必须是**相对路径**（`path.relative` 会把相对项当成相对进程 cwd 的路径、算出爬出 worktree 的 `../..` 然后被过滤掉，实测踩到过）。开关 `PI_BACKGROUND_TASKS_WORKTREE=off` 整体关闭。已知限制：每次调用多 ~100–300ms（`git worktree add` + symlink + 一次 status）；任务往 `node_modules/` 里写（`npm install`、工具缓存）会落到主仓库那份，隔离不完整；`$TMPDIR` 的保留态可能被系统清理；worktree 元数据仍写在主仓库 `.git/worktrees/`（`git worktree add` 机制，删路径时一并 prune），而**当仓库不在沙箱可删边界内时连 `git worktree add` 都会被内核拦下**（`.git/worktrees/<name>/HEAD.lock` 的 unlink）—— mc-heavy 实测如此，报错会如实返回、任务降级为不隔离。**工具块与终态通知的展示形态**（用户 2026-09-30 定：参照 plan 工具调用块）：三个工具（`run_in_background` / `background_output` / `background_kill`）与终态通知都不再走 pi 默认壳（`toolSuccessBg` 底色 + 上下空行 + 平铺正文），改成 `renderShell: "self"` + 树形：标题行 `• 工具名` 顶格（圆点是结局灯：成功绿 `success`、declined 灰 `dim`、错误红 `error`），正文挂 2 列缩进的树（`│` 续行、`└` 末行，结构符 `muted`、正文 `text` 槽 —— 与 `exit_plan_mode` 下方正文同色）。**工具块不打任何标记**（用户 2026-09-30 分两轮定：先去掉成功的 `✔`，再去掉失败的 `✘`）：对号在这套界面语言里的意思是「任务跑完了」，而 `run_in_background` 成功恰恰意味着任务**才刚开始**、还在后台跑，打对号会被读成「已经结束」并与终态通知的 ✔ 撞车；叉号对工具块也是多余的 —— 圆点颜色已经是结局灯，再叠一个叉是同一件事说两遗，而且 `background_kill` 这类调用里「没办成」（找不到任务 / 已终态）是模型自己下一步就能纠正的普通分支、不是需要警示的故障，正文里已经写了原因。代价（已接受）：declined 与 pending 的圆点同为 `dim`，标题行上不可区分 —— 但 pending 没有正文（结果未到）、declined 有，屏幕上仍分得开。终态通知从旧的 `✓ 后台任务 bg_1 结束:`（前缀对号 + `customMessageBg` 底色 + 上下空行）改成 `• 后台任务 bg_1 结束 ✔`（圆点顶格、**对号移行末**、无底色无下空行）—— 通知与工具块不同，**保留标记**：它是会话里唯一一条「任务结局」的权威陈述，而且模型会因为它被叫醒开新一轮；且**只要结束就是 `✔`**（用户 2026-09-30 第三轮定）：`✔` 断言的是「结束」而非「成功」，exit 0、被 kill、非 0 退出都打 `✔`，成败由**圆点颜色**（结局灯：exit 0 绿、killed / 非 0 / 形状认不出 红）与正文措辞（`已成功结束` / `已失败结束（exit=1）`）表达，而不是靠把对号换成叉号 —— 这个二值点色判定与改形前的 `failed` 判定同语义。形态决定（结局分类 / 标题装饰 / 树前缀 / 预览截断）在纯模块 `render.ts`（与 `plan-mode/render.ts` 同形；标题装饰分 `bgToolTitleParts`（工具块，只回点色槽）与 `bgNotificationTitleParts`（终态通知，点 + 行末标记同色）两个函数，后者复用前者取点色），上色折行在 `index.ts`。预览截断保留 pi 默认壳原有的行为：非展开态裁到 10 行 + `… (N more lines, ctrl+o to expand)` 提示，展开态（ctrl+o）不裁 —— 否则 `background_output` 一次 30000 字符的返回会平铺满屏。**statusline 底部的任务 dock**：有任务在跑（或刚进终态）时 footer 最底部多一行 `⚙ bg_1 running 12s · npm run test --silent…` —— 文案与配色在纯模块 `status.ts`（图标 dim / id accent / 状态词按结局着色：running → warning、exit 0 → success、非 0 与 killed → error / 时长 muted / 命令 dim），`index.ts` 只负责发布与节拍：一个 1s 的 `setInterval`（`unref`）重算并 `ctx.ui.setStatus("background-tasks", …)`，没东西可显示时自己停表并清键；永远只显示一行（最新启动的 running 任务优先，没 running 时取驻留窗口内最新的终态任务，同类其余折叠成 `(+N)`），终态行驻留 `TERMINAL_LINGER_MS`（10s）后消失；**`(+N)` 刻意放在命令之前**（超宽时只有行尾命令被截，计数正是多任务时唯一的信息，不能跟着没）；弹窗期间（`ui_prompt_start` → `ui_prompt_end`）**一次都不发布** —— 不只是停掉秒级 tick，连事件驱动的那一下（任务恰好在弹窗里结束时的终态回调）也跳过：pi 主屏渲染每次把视口钉在底部，一次重绘同样会把用户手动上翻的 scrollback 拽回去（与 working-indicator 冻结重绘同一条理由）。弹窗一关，`ui_prompt_end` 按**当前真实状态**重算，所以什么都不丢（时长也是重算的，不会停在旧值）。103 个 `node --test` 用例：`registry.test.ts`（16，假子进程驱动完整状态机；假 pid 取在系统上限之上，组杀路径永远不会误伤真进程）+ `worktree.test.ts`（17，**真 git fixture**：tmpdir 里 `git init` + 一次 commit + 被 ignore 的 `node_modules`；建/路径/runCwd、未提交改动不带进去、symlink 与 pathspec 排除（含“不排除时 git 确实会把它当未跟踪”的反证）、未 ignore 的目录不链、非 git/空仓库降级、三态各一例、detached commit 挂分支、幂等、`serializeGit` 串行与失败不毒化、realpath 归一）+ `status.test.ts`（26，dock 行的四种结局形态 / 任务选取 / 驻留边界 / 命令粗截 / 色槽 / `(+N)` 截断回归，外加结轮第二行的 10 例）+ `render.test.ts`（20，结局分类 / 两套标题装饰（工具块四态均无标记 vs 通知恒 ✔、失败时点与 ✔ 同红）/ 树前缀 / 几何常量 / 预览提示文案）+ `index.test.ts`（46，走 pi 真加载器 + **真 spawn**：完成通知、增量读不重复、组杀连孙进程一起带走、shutdown 不留孤儿进程、`/background` 详情不推进模型的增量 offset、会话替换后 disposed 复位、旧 registry 迟到终态不注入新会话、**工具块与终态通知的渲染形态 10 例**（self 壳、标题四态含「工具块无任何标记、区分只在点色」、树形正文、预览截断 + 展开态、无底色、通知「只要结束就是 ✔」与失败点色、色槽），以及 dock 的 11 个：启动即发布、秒级 tick 推进时长、终态驻留后自动清键且停表、弹窗冻结/恢复、**弹窗期间连事件驱动的那一下也不发布**（终态通知落在弹窗里同样不重绘）、shutdown 清键停表、`DOCK=off` 时一次 setStatus 都不调、`agent_settled` 后补第二行且 `agent_start` 清掉、终态任务不被补第二行、两个回合钩子的注册面），外加 **worktree 隔离 5 例**：默认隔离下命令真跑在 `$TMPDIR` 的 worktree 里（会话目录不出现产物、未提交文件不在其中）、无改动终态后目录与 `git worktree list` 都清干净、改文件后保留且通知带路径与改动数、`worktree: false` 落回原 cwd 且看得到未提交改动、非 git 目录静默降级。测试隔离用 `setIsolationEnv`，它把 `PI_BACKGROUND_TASKS_WORKTREE`/`TMPDIR` 记进**单独的待还原列表**并在每次 `loadHarness()` 开头还原 —— 混进全局 `cleanup`（要到文件跑完才执行）会让前一个用例的 `TMPDIR` 把后一个用例的 worktree 落进前一个用例的临时目录、`WORKTREE=off` 也会漏到下一个用例（实测踩到过）。`PI_BACKGROUND_TASKS=off` 关闭，`PI_BACKGROUND_TASKS_DIR` 覆盖日志根（测试隔离），`PI_BACKGROUND_TASKS_DOCK=off` 只关 statusline 那一行（工具与通知照旧），`PI_BACKGROUND_TASKS_WORKTREE=off` 关掉 worktree 隔离，`PI_BACKGROUND_TASKS_DOCK_LINGER_MS` 改终态行驻留时长，`PI_BACKGROUND_TASKS_TURN_NOTE_MS` 改结轮提示的运行时长阈值（默认 5s）。**结轮提示第二行**（用户 2026-09-29，来自 bg_2 那次事故：主任务 05:38 就收工，bg_2/bg_3 一直挂到 05:43，dock 却和正常在跑长得一模一样）：本轮 `agent_settled` 之后、仍在跑且已跑满阈值的任务，下面多一行 `  └ 本轮已结束，该任务仍在运行`（`└` U+2514 悬在任务 id 下方，自身 muted、文案 warning）。措辞是**事实陈述，不是价值判断** —— 扩展分不出「孤儿残留」（截图早已落盘、进程只是不退出）与「本来就该长跑」（8 分钟的 `npm test` 跨过回合结束完全正常），所以只说能证明的那半句；用户明确否掉了「这些任务已不需要 / 可以删除」的强措辞与另发一条一次性 `[提示]`，dock 行就是全部。三个条件同时满足才出现：任务 `running`（终态驻留窗口里不需要这句）、本轮已结束、且 `now - startedAt >= TURN_NOTE_THRESHOLD_MS`（默认 5000ms）；`agent_settled` 激活、`agent_start` 清除、`session_start` 也清除（新建会话不能继承上一轮的回合状态）；用 `agent_settled` 而非 `agent_end` 是因为自动压缩与 verify-loop 的 `/goal` 评估都跑在 app 级 `agent_end` 之后、`agent_settled` 之前。`formatBackgroundStatus` 多一个可选的 `turn` 入参，命中时返回值**恰好含一个 `\n`**，不传时与旧单行形状逐字节一致 |
 | `bash-command-collapse/sandbox.ts` + `allowlist.ts` | bash 命令的 seatbelt 删除能力边界（`bash-command-collapse.ts` 的 `execute` 里包裹）与**三档授权**（用户 2026-09-24 定）：**永不删除**（身份/凭据/手写配置：`~/.zshrc`、`~/.gitconfig`、`~/.env`、`~/.bash_history`、`~/.envrc`、`~/.tool-versions` 等 home 一级文件（49 项），以及 `~/.ssh`、`~/.gnupg`、`~/.aws`、`~/.kube`、`~/.docker`、`~/.azure`、`~/.gcloud`、`~/.terraform.d`、`~/.helm`、`~/.minikube`、`~/.password-store` 等子树（21 项）；**名字里可以带斜杠** —— `~/.config/gh`（`hosts.yml` 存 GitHub token）与 `~/.config/gcloud`（凭据库）是两条嵌套条目，2026-09-25 补，专门把「`~/.config` 整棵移出本档」之后落在两级的真凭据捞回来；代价是 `isSafeAllowlistRoot` / `isSafeSessionRoot` 的**祖先闸改为只查危险档**（用户 2026-09-25 选），否则 `~/.config` 会因「是 `~/.config/gh` 的祖先」而永远记不住 —— 安全上无损失，内核 deny 行在 allow 行之后无条件收回，`classifyOutsidePaths` 也先判 blocked 再判白名单，记住 `~/.config` 交不出 `~/.config/gh`；`~/.config`、`~/.pi`、`~/.claude`、`~/.codex` 于 2026-09-25 移出本档 —— 它们是工具状态目录，含 lock/缓存/会话日志，整棵子树不给删连 pi 自己清理 stale lock 都会被内核拦死，现走普通档弹框可记住）——**不弹框、无任何放行选项**，白名单 / 会话豁免 / `PI_SANDBOX_EXTRA_WRITE` 都压不过（profile 在 allow 行之后另起一行 deny 收回，内核级强制）；**危险目录**（系统根 / bin / 应用安装目录 / `~/Library` / 含 `.git`）每次删除必问、只支持会话级豁免（选项 `Deny` / `Allow once` / `Allow for this session`）；**普通目录**问一次（`Deny` / `Allow for this session（并记住该目录）` / `Allow once`），选中间那项后把目录范围写进持久白名单 `~/.pi/agent/sandbox-allowlist.json`（`PI_SANDBOX_ALLOWLIST` 可改位置），以后含 headless 都不再问。记住一个目录 = 把它并进 seatbelt profile 的 `file-write-unlink` 放行名单，删除在沙箱内直接成功。可删边界 = 项目目录 + 临时目录（`/tmp`、`/private/tmp`、`/var/folders`、`/private/var/folders`、`/var/tmp`、`/private/var/tmp`）+ **可再生缓存**（`~/.cache`、`~/.npm`、`~/.gradle/caches`、`~/.m2/repository`、`~/.cargo/registry`、`~/.bun/install/cache`、`~/.node-gyp`、`~/.Trash`、`~/Library/Caches`、`~/Library/Developer/Xcode/DerivedData` —— 删了能干净重建，静默放行；`~/Library/pnpm/store`、`~/.deno`、`~/.nvm` 含不可重建内容，**不在**名单）+ `PI_SANDBOX_EXTRA_WRITE`；`/var/tmp` 是 macOS 自带 bash 3.2 的 heredoc 临时目录（编译期写死、`TMPDIR` 改不动），不放行则沙箱内任何 heredoc 都 100% 失败。从失败输出里抽被拦路径用的是**排除法**（保留「行内绝对路径 token」兜底扫描，只排除含 `here document` 的行与行首 prog 是 shell / `sandbox-exec` 的行）而不是程序名白名单 —— 白名单会静默丢掉 python3 `PermissionError`、`find:`、`ln:` 这三类真实删除形状。**抽不出路径就不弹框**，原样报错并追加一行 `[沙箱]` 提示（出口是 `/sandbox-boundary allow <目录>`）；旧的「按整条命令会话级问一次、同意后沙箱外裸跑」降级路径已删。`/sandbox-boundary` 查看边界与白名单，`forget <path>` / `clear` / `allow <path>` 管理条目（`allow` 对永不删除路径直接拒）。同目录的 `sandbox-mode.ts` 是 plan-mode 三态的运行期开关单例（dangerous 关掉整个拦截层，见下文 plan mode 一节）。完整口径与名单见仓库根 `CLAUDE.md` 的 `### Capability boundary` 一节 |
 | `sandbox-boundary/` | 同一道删除边界的非 shell 侧：`apply_patch` 的 `*** Delete File:` 行在 `tool_call` 钩子上拦截（write/edit 不拦），与 bash 侧共用同一套 `classifyOutsidePaths` 判定与同一个白名单单例，所以一边记住另一边立刻生效；命中白名单时静默放行但补一行 notify。永不删除路径整份 patch 一起拒（不给「批准其余部分」的机会）。与 bash 侧的区别：它在执行前就能拦、且已知全部目标路径，没有「命令重跑一次」的代价 |
 
@@ -644,6 +695,18 @@ pi 的加载器不保证给两个扩展同一个模块实例，挂 globalThis �
 保持既有 headless 行为（那边没有人会被打扰）。这正是 CC 敢把判据写松的原因：它的 `EnterPlanMode`
 是 `shouldDefer: true`，误判的代价被弹框吸收成「用户按一次键」，而不是被迫走完「进 plan → 出方案 →
 审批 → 写文档」一整圈。
+
+**两个弹框的正文用 fg，标题与高亮选项保留 accent（用户 2026-09-30 定）。** 同意弹框与审批弹框都走
+`ctx.ui.select()`（pi 的 `ExtensionSelectorComponent`，没有 message 参数，正文只能塞进 title），
+而那个组件把**整个 title 包成一段 `theme.fg("accent", …)`** —— 于是模型给的理由、`批准这个计划？`
+下的计划全文原先整段都是 accent（本机三套皮肤里是浅蓝）。改法在 `consent.ts`：title 里给正文
+**逐行**套一层 `fg("text", line)`（空行跳过），内层显式颜色覆盖外层，正文就变回皮肤的主前景色，
+而标题行、`→ ` 光标与选项行各自的包裹不受影响。逐行而非整块是因为 pi-tui 的 `Text` 按行切分并
+逐行重置样式 —— 整块只加一次开头色码，第二行起就会丢掉颜色退回 accent。已用真主题 + 真组件 +
+真 `Text` 验证：上色前后**可见文本逐字节相同**（宽度 24 / 40 / 64 / 100 下的折行与留白都不变，
+只多了颜色码），正文渲染为 `#f8f8f2`、标题与高亮选项仍是 accent。代价：行尾多一次重复的
+SGR 重置码，显示无影响。测试见 `consent.test.ts`（10 例，断言色槽归属与「纯文本主题下与原实现
+逐字一致」）。
 
 **brainstorming 互斥闸（二选一，用户 2026-09-26 定）。** superpowers 的 `brainstorming` 技能自带
 「澄清 → 2-3 方案 → 批准 → 设计文档 → writing-plans 实施计划」全流程，与 plan mode 完全重叠。
@@ -786,6 +849,9 @@ modifyOtherKeys。而 pi **启动时会主动启用 Kitty 协议**（`pi-tui` �
   dock 行会静默退回拼接的第二行，没有任何报错。dock 行自带 ANSI（发布侧逐段着色），
   line.ts 原样渲染；终端宽度收口在 `truncateToWidth`，所以 id / 状态 / 时长永不被截，
   只截行尾的命令。没有后台任务时 footer 输出与以前逐字节一致。
+  **值可以带一个 `\n`**（「本轮已结束」的结轮提示第二行）：line.ts 按 `\r?\n` 拆成
+  连续多个 footer 行，每行各自参与截断；**不做 `trim()`** —— 第二行的行内缩进就是
+  `└` 悬在任务 id 下方的那两格，trim 掉会静默破坏对齐（只跳过纯空行）。
 - **`simple-task/gap.ts` 的「看邻居」是靠*渲染邻居*实现的**：它没有枚举别人 widget 的接口，
   只能从 TUI 根往下找到装着自己的 Container，再看紧邻兄弟面向自己那一侧的渲染结果。于是
   `recap` 反过来渲染 `simple-task` 时就是**互递归**（无保护时实测递归到 depth 61+ 才被栈拦住）——
@@ -799,7 +865,7 @@ modifyOtherKeys。而 pi **启动时会主动启用 Kitty 协议**（`pi-tui` �
   实测：内置 footer 在 ~470ms 出首帧，我们的 statusline 到 ~1.2s 才装上）没有上一帧可重放，由
   `statusline/footer-suppress.ts` 在**扩展工厂**里（此时 TUI 还没 new 出来）接管 `FooterComponent.prototype.render`，
   窗口内渲染 0 行 —— 底部留白，而不是先画一个马上要变的默认状态行；我们的 footer 挂上的一刻交还，
-  30s 兜底（`mcp` 握手 20s 上限也在这个窗口里，因为 `Runner.emit()` 串行 await，字母序在前的 `mcp` 先跑）。
+  30s 兜底（因为 `Runner.emit()` 串行 await，字母序在前的 `mcp` 排在前面，它连 MCP server 的时间也在这个窗口里）。
   ② **换会话窗口**由 `footer-guard.ts` 重放上一帧压住（有旧状态可留，比留白更好）。两个开关独立：
   `PI_STATUSLINE_BOOT_SUPPRESS=off` / `PI_STATUSLINE_FREEZE=off`。
   补丁打的是包根导出的 `FooterComponent` —— 实测（0.87.1 bundle 形态，A/B pty 捕获，两次只差这一处）
@@ -916,6 +982,11 @@ modifyOtherKeys。而 pi **启动时会主动启用 Kitty 协议**（`pi-tui` �
   `Box(1, 1)` 原本提供的那一列左边距（每行前置一个空格、不顶格，用户同日补定），
   **`paddingY = 0`** 保持上下不留空行，无 bgFn，所以不用再包 Box。`render.test.ts` 的 3 个用例
   过 pi 自己的加载器 + `ToolExecutionComponent` 钉住形状（含「其他工具底色照旧」的对照断言）。
+- **`ask_user_question` 走的是同一套壳**（2026-09-26 定，与 simple-task 同日同口径）：
+  工具块原来走 pi 默认的 `Box(1, 1, bgFn)`，于是成功态染绿底、上下各留一行空行；现在声明
+  `renderShell: "self"` + 两个 renderer 返回 `new Text(…, 1, 0)`，只留标题行与结果行。
+  注意这**只管工具块**：`ctx.ui.custom()` 弹出的问卷本体（`view.ts` 画的 `─` 边框那条路）
+  不经过 `ToolExecutionComponent`，与本节无关。`render.test.ts` 的 4 个用例钉住形状。
 - **两个覆盖内置 bash / edit / write 的扩展都用 `renderShell: "self"`**，动机不同：
   `tool-diff.ts` 是为了逐行拼 `\x1b[48;2;…m` 画整行 diff 底色（走 `selfRenderContainer` 就绕开了
   `tool-execution.js` 里按状态整块染色的 `bgFn`，否则逐行底色会被整块绿底盖掉；它**不用 Box**）；
@@ -989,11 +1060,15 @@ modifyOtherKeys。而 pi **启动时会主动启用 Kitty 协议**（`pi-tui` �
 | `~/.pi/agent/sandbox-allowlist.json` | 删除边界的持久白名单（哪个目录被用户确认过安全），是授权决定不是配置，换机器不该跟着走 |
 | `~/.pi/agent/plans/` | 机器本地的计划与一次性脚本 |
 | `~/.pi/agent/npm/`、`bin/` | pnpm 装的包（靠 `pi install` 重拉）与 pi 自带的 `fd` / `rg` |
+| `~/.pi/agent/git/` | `pi install git:…` 拉下来的 git 包（靠 `settings.json` 的 `packages` 重拉；里面自带 `.gitignore` 把内容全忽略，只留 `.gitignore`） |
 | `~/.pi/agent/web-search-cache/`、`~/.pi/folder-history/*.jsonl` | 运行时缓存 / 历史数据 |
 
 另外，`settings.json` 的 `extensions` 字段是本快照与本机真实配置**唯一刻意保留的差异**：真实文件里它指向
 `~/.loongsuite-pilot/plugins/pi-coding-agent/index.mjs`（另一个工具装的遥测扩展，本机版本已被置空成 no-op；
 机器专属绝对路径、不属于 pi 自身配置），模板里置为 `[]`，只保留 `extensions/` 目录的自动发现。
+
+（另有一个**格式性**差异：`~/.pi/agent/settings.json` 末尾没有换行、快照里补上了。这不是语义差异，
+用 `diff` 对比时会多出一行 `\ No newline at end of file`，别当成漏镜。）
 
 ## 快照维护约定
 
@@ -1004,7 +1079,8 @@ modifyOtherKeys。而 pi **启动时会主动启用 Kitty 协议**（`pi-tui` �
   保持模板与实际环境一致 —— 只有上文列的那三处是刻意差异，其余应当逐字节相同。
   （`mcp.json` 里是**本机 MCP 可执行文件的绝对路径**，与 `models.json` 的 `baseUrl` 同类：入库作模板，
   换机器照着改 `command`。）
-- **换机器 / 重装** → 按前面的 `cp` 装回去，再 `pi install npm:pi-web-access` 与 `pi install npm:pi-subagents`。
+- **换机器 / 重装** → 按前面的 `cp` 装回去，再 `pi install npm:pi-web-access`、
+  `pi install npm:pi-subagents` 与 `pi install git:github.com/jayli/superpowers`。
 - **改完扩展的最低验证**是真起一次 pi（见上文「pi 平台的坑」——`node --test` 不校验语法）。
 - **面向本机 pi 的写法约定**：纯逻辑模块刻意**不 import pi / pi-tui**（鸭子类型 + 结构化最小接口），
   这样 `node --test` 能直接跑；`tool-diff/`、`statusline/`、`recap/`、`rewind/`、`simple-task/`、

@@ -1,5 +1,5 @@
 {
-  "lastChangelogVersion": "0.85.1",
+  "lastChangelogVersion": "0.99.1",
   "theme": "pi-coder-1337",
   "defaultThinkingLevel": "xhigh",
   "compaction": {
@@ -15,7 +15,8 @@
   "tuiMode": "regular",
   "packages": [
     "npm:pi-web-access",
-    "npm:pi-subagents"
+    "npm:pi-subagents",
+    "git:github.com/jayli/superpowers"
   ],
   "steeringMode": "one-at-a-time",
   "markdown": {
@@ -23,6 +24,14 @@
   },
   "doubleEscapeAction": "none",
   "subagents": {
+    "defaultModel": "inherit",
+    "modelScope": {
+      "enforce": true,
+      "strict": true,
+      "allow": [
+        "inherit"
+      ]
+    },
     "watchdog": {
       "enabled": true
     },

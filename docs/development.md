@@ -9,7 +9,7 @@ These come from pi's extension discovery and they decide where a file may live:
 | `extensions/*.ts`, `extensions/*.js` | **Yes** — top-level files only. |
 | `extensions/<dir>/index.ts` or `index.js` | **Yes**. |
 | `extensions/<dir>/*.ts` without an `index` | No. Helper modules, imported by other extensions. |
-| `extensions/<dir>/<subdir>/*` | No — nested directories are never scanned, which is how `mcp/fixtures/` ships test servers. |
+| `extensions/<dir>/<subdir>/*` | No — nested directories are never scanned. |
 | `extensions/<dir>/*.test.ts` | No — only the directory's `index.ts` is loaded. |
 | `extensions/*.test.ts` (top level) | **Yes** — pi would try to load it. Never put tests at the top level. |
 
@@ -26,20 +26,27 @@ Two consequences worth remembering:
 ## Tests
 
 ```bash
-npm test        # node --test — 1269 tests, ~45 s
+npm test        # node --test — 1256 tests, ~45 s
 ```
 
-Test files run in parallel (`os.availableParallelism()` — 15 on the machine this was written on). Under that load one case is unreliable: the real spawned MCP handshake in `mcp/client.test.ts` intermittently hits its own 5 s handshake budget (seen twice in four full runs here, and never in isolation). The whole suite passes reliably with reduced parallelism at the same wall time:
+Test files run in parallel (`os.availableParallelism()` — 15 on the machine this was written on). The whole suite is more stable with reduced parallelism at about the same wall time:
 
 ```bash
-node --test --test-concurrency=4      # 1269 tests, ~45 s
+node --test --test-concurrency=4      # 1256 tests, ~45 s
 ```
 
-The 5 s budget is inside the snapshot's `client.test.ts`, which this package keeps byte-identical — it belongs upstream in `clients/pi/`, not here.
+**22 of the 1256 are skipped on purpose.** They are the real-sandbox cases in `bash-command-collapse/render.test.ts`: nested `sandbox-exec` cannot run inside a pi session, so they declare themselves skipped rather than faking a pass. They are the ones that prove the boundary is enforced by the **kernel** rather than by a pattern match, so run them from a plain terminal when you touch `sandbox.ts`.
 
-**22 of the 1269 are skipped on purpose.** They are the real-sandbox cases in `bash-command-collapse/render.test.ts`: nested `sandbox-exec` cannot run inside a pi session, so they declare themselves skipped rather than faking a pass. They are the ones that prove the boundary is enforced by the **kernel** rather than by a pattern match, so run them from a plain terminal when you touch `sandbox.ts`.
+**Eight more fail against pi 0.99.1, and the snapshot repository shows the identical eight** — they are a pi-version condition, not a regression from a sync. Seven are color assertions in `bash-command-collapse/render.test.ts` (5) and `read-path-collapse/render.test.ts` (2): they mutate `theme.fgColors` to prove the dot color is read from the theme at render time rather than hardcoded, and **pi 0.99.1 made that field private** — the singleton now carries `fgAnsi` / `resolvedColors` instead (0.87.1 still exposed a public `fgColors` map). The eighth is the `dangerous`-mode case, whose `bypass` control group expects the wrapped command to throw and under 0.99.1 it returns normally instead. Point the loader at a 0.87.1 entry and all eight pass — the whole suite goes clean:
 
-The pure-logic modules are written so this works: they do not import `@earendil-works/pi-*` at all, take injected dependencies instead (a `widthOf` function, an `exec` function, a minimal theme interface), and are duck-typed against structural interfaces. That is why `thinking-collapse/window.ts`, `statusline/line.ts`, `tool-diff/title-row.ts`, `rewind/checkpoints.ts`, `prompt-editor/bash-prompt.ts`, `background-tasks/status.ts`, `bash-command-collapse/sandbox.ts`, `allowlist.ts` and the rest can run under plain `node --test`. `mcp/` goes further in the same direction: `protocol.ts`, `config.ts`, `client.ts`, `tools.ts` and `headers-command.ts` are pi-free too, so the whole chain — including a **real** spawned stdio server (`fixtures/fake-mcp-server.mjs`) and real `node:http` servers for the HTTP and SSE transports — is covered with no transport mocking.
+```bash
+PI_TEST_PI_ENTRY=~/.pi/agent/npm/node_modules/@earendil-works/pi-coding-agent/dist/bundle/index.js \
+  node --test --test-concurrency=4     # 1256 tests, 1234 pass, 0 fail, 22 skipped
+```
+
+Both are **test-side** couplings to pi internals, not rendering regressions: `bash-command-collapse.ts`'s own `bashOutput` override guards on `typeof fgColors?.set === "function"` and falls through to the plain render when the field is gone, so on 0.99.1 that one cosmetic token is simply inert (bash output uses `toolOutput`) instead of broken. Fixing the assertions means finding 0.99.1's public surface for "the color table the renderer reads"; that belongs upstream in `clients/pi/`, which keeps these files byte-identical. Until then a sync must reproduce the eight rather than chase them.
+
+The pure-logic modules are written so this works: they do not import `@earendil-works/pi-*` at all, take injected dependencies instead (a `widthOf` function, an `exec` function, a minimal theme interface), and are duck-typed against structural interfaces. That is why `thinking-collapse/window.ts`, `statusline/line.ts`, `tool-diff/title-row.ts`, `rewind/checkpoints.ts`, `prompt-editor/bash-prompt.ts`, `background-tasks/status.ts`, `worktree.ts`, `render.ts`, `memory/render.ts`, `plan-mode/render.ts`, `plan-mode/consent.ts`, `bash-command-collapse/sandbox.ts`, `allowlist.ts` and the rest can run under plain `node --test`. `background-tasks/worktree.test.ts` goes one step further and drives **real git** in a tmpdir fixture (`git init`, a commit, then create and clean up a worktree), because the three cleanup outcomes are the whole point of the feature and a fake `runGit` would only assert the arguments.
 
 Two test files go the other way: [`prompt-editor/render.test.ts`](../extensions/prompt-editor/render.test.ts) loads the **real** extension through pi's own loader and asserts the `!` bash-mode render contract line by line and column by column, with only the surroundings faked (a `tui` that has just `terminal.rows` and `requestRender()`, an identity `borderColor`, keybindings that never match); [`user-message-bar/index.test.ts`](../extensions/user-message-bar/index.test.ts) does the same for the message box, comparing patched and unpatched frames of the same text at the same width — which is what proves the prototype patch landed on the class pi actually renders with, the one failure this feature can have. [`bash-command-collapse/render.test.ts`](../extensions/bash-command-collapse/render.test.ts) goes through the same loader and `ToolExecutionComponent` and asserts the rendered lines of the command block, including a failed command's status line. [`read-path-collapse/render.test.ts`](../extensions/read-path-collapse/render.test.ts) does it for the read block — the `• ` dot, its per-state color, the two-column indent, the absence of a background and of boundary blank lines, plus a control case proving other tools keep pi's default shell. All of them locate pi's library entry by reading the `# cmd-shim-target=` line out of the `pi` shim, and all **skip** — rather than failing or faking a pass — when pi cannot be resolved, because the copy under `~/.pi/agent/npm` is often an empty shell after `pi update --extensions`. Point them at a real entry with `PI_TEST_PI_ENTRY=/path/to/index.js`.
 
@@ -65,14 +72,9 @@ Isolate the run instead — a scratch agent directory has no global extensions, 
 PI_CODING_AGENT_DIR=$(mktemp -d) pi -e /absolute/path/to/pi-coder
 ```
 
-Then check that all 30 loaded by reading the startup list:
+Then check that all 29 loaded. **Do not look for the startup resource list** — `startup-logo` prunes it in full (`[Context]`, `[Skills]`, `[Prompts]`, `[Extensions]`, `[Themes]`), so nothing of it is printed. The visible signals of a successful load are the logo header, the statusline footer and the `❯ ` prompt; for the extension list itself use `pi config`, or the loader check below.
 
-```
-[Extensions]
-  ask-user-question, auto-default-model, bash-command-collapse.ts, ... working-indicator
-```
-
-A headless start cannot show you that list (`-p` exits after one turn and prints only the answer), so the fastest machine check is the same loader the `render.test.ts` files use — `discoverAndLoadExtensions` against the 30 entries (`extensions/*.ts` plus `extensions/*/index.ts`), asserting `errors: []` and `extensions.length === 30`. It is also the cheapest way to catch a `ParseError` that `node --test` accepted, because it is pi's own loader and not node's. Point it at a real library entry the way those tests do (`PI_TEST_PI_ENTRY`).
+A headless start cannot show you any of that (`-p` exits after one turn and prints only the answer), so the fastest machine check is the same loader the `render.test.ts` files use — `discoverAndLoadExtensions` against the 29 entries (`extensions/*.ts` plus `extensions/*/index.ts`), asserting `errors: []`. It is also the cheapest way to catch a `ParseError` that `node --test` accepted, because it is pi's own loader and not node's. Point it at a real library entry the way those tests do (`PI_TEST_PI_ENTRY`). Measured on this sync, all 29 entries load with `errors: []` against pi 0.85.1, 0.87.1 and 0.99.1.
 
 `/reload` re-reads the checkout, so the loop is: edit → `/reload` → look. That works for `pi -e` runs as well as for an installed package; you do not need to restart pi for extension edits. `settings.json` and `AGENTS.md` are read once at startup, so those do need a restart.
 
@@ -115,10 +117,11 @@ A new tool name and a new command name must not collide with any other extension
 
 This package is a distribution copy, not the master copy. The author's live environment is `~/.pi/agent/`, snapshotted into a separate repository under `clients/pi/`; this package was produced by copying that snapshot verbatim (extensions, themes, and the config files) with four deliberate deltas:
 
-1. `config/models.json` and `config/mcp.json` are not shipped, and the four model selections were removed from `config/settings.json` (`defaultProvider`, `defaultModel`, `modelThinkingLevels`, `subagents.watchdog.main.model`). Both excluded files hold machine-local values — gateway registrations and absolute paths of local MCP server executables. `config/settings.json` otherwise matches the snapshot, including the `theme` key, which is kept even though the packager's own copy points at a gateway-specific default, and `subagents.watchdog.enabled`, which is kept on with the reviewer model left to inherit the session model. See [configuration.md](configuration.md#what-is-not-shipped).
-2. `docs/handbook.zh.md` is the snapshot's README, kept verbatim as the Chinese handbook.
-3. Everything else under `docs/`, plus `README.md` and `CHANGELOG.md`, is written for this package: extension count, test count and the switch tables have to be updated by hand.
-4. `extensions/bash-command-collapse/render.test.ts` resolves the repository root by walking up to the first `.git` directory instead of the snapshot's hard-coded four `..` segments. The snapshot nests two levels deeper (`clients/pi/extensions/…` vs `extensions/…`), so the hard-coded form resolves the dangerous-mode probe into `$HOME` here and the test fails; the walk-up form works in both layouts.
+1. `config/models.json` and `config/mcp.json` are not shipped, and the machine-local model selections were removed from `config/settings.json`: `defaultProvider`, `defaultModel`, `modelThinkingLevels`, `subagents.watchdog.main.model`, and the `litellm-any/deepseek-flash-qd` entry inside `subagents.modelScope.allow` (the key itself is kept, with `allow: ["inherit"]`). Both excluded files hold machine-local values — gateway registrations and absolute paths of local MCP server executables. `config/settings.json` otherwise matches the snapshot, including the `theme` key, which is kept even though the packager's own copy points at a gateway-specific default, `subagents.watchdog.enabled`, which is kept on with the reviewer model left to inherit the session model, and the whole `packages` array — `npm:pi-web-access`, `npm:pi-subagents` and `git:github.com/jayli/superpowers` are all public. See [configuration.md](configuration.md#what-is-not-shipped).
+2. `config/subagent/config.json` (pi-subagents' own `timeoutMs` / `checkpointBeforeDeadlineMs` tuning, added to the snapshot on 2026-09-30) is not shipped either. It is not machine-local, but it configures a companion package rather than any extension here, and `pi-subagents` works zero-config without it.
+3. `docs/handbook.zh.md` is the snapshot's README, kept verbatim as the Chinese handbook.
+4. Everything else under `docs/`, plus `README.md` and `CHANGELOG.md`, is written for this package: extension count, test count and the switch tables have to be updated by hand.
+5. `extensions/bash-command-collapse/render.test.ts` resolves the repository root by walking up to the first `.git` directory instead of the snapshot's hard-coded four `..` segments. The snapshot nests two levels deeper (`clients/pi/extensions/…` vs `extensions/…`), so the hard-coded form resolves the dangerous-mode probe into `$HOME` here and the test fails; the walk-up form works in both layouts. **`rsync` overwrites this file on every sync** — re-apply the delta afterwards, and expect it to be the one line `diff -r` reports.
 
 So when the snapshot changes upstream:
 
@@ -131,17 +134,21 @@ cp "$SRC/AGENTS.md" "$DST/config/AGENTS.md"
 cp "$SRC/AGENTS.core.md" "$DST/config/AGENTS.core.md"   # the distilled core `core-rules` re-injects
 cp "$SRC/README.md" "$DST/docs/handbook.zh.md"   # the handbook is the snapshot README, verbatim
 cp /path/to/litellm-any/docs/pi-coder-palettes.html "$DST/assets/pi-coder-palettes.html"
-diff -r "$SRC/extensions" "$DST/extensions"     # expect: only render.test.ts (delta 4 above)
+diff -r "$SRC/extensions" "$DST/extensions"     # expect: only render.test.ts (delta 5 above)
 diff -r "$SRC/themes" "$DST/themes"              # expect: only ayu1.png / ayu2.png, which live in assets/ here
+diff "$SRC/README.md" "$DST/docs/handbook.zh.md"  # expect: no output
+diff "$DST/config/settings.json" "$SRC/config/settings.json"   # expect: only the model selections of delta 1
 npm test
 # bump "version" in package.json, add a CHANGELOG entry, update the counts in README.md and docs/
 ```
+
+`config/settings.json` is **not** in that list of copies: it is hand-reconciled, because a blind `cp` would ship the gateway's model ids. Read delta 1, apply the snapshot's new keys by hand, and leave the model selections out.
 
 The two `rsync --delete` runs are deliberate: a snapshot sync must remove what upstream removed. `cp -R` leaves stale files behind — `themes/pi-coder-summer-night.json` survived this way in 2.0.0–2.0.5 — and a stale theme or extension is invisible until someone notices it in `/theme` or a startup list. Because `--delete` is destructive, run it only against `extensions/` and `themes/`, where the destination is a pure copy of the source; never against `docs/`, `assets/` or `config/`.
 
 `docs/handbook.zh.md` is the snapshot README verbatim, so it is not hand-edited here; the package-specific instructions live in the English docs. It still describes the snapshot's own repository layout (`cp clients/pi/...`), which is the machine it was written for.
 
-Nothing else is copied. `config/settings.json` is the only file in the package that may differ from the snapshot in content, and `diff` on it is expected to show exactly the four removed model selections; everything under `docs/`, plus `README.md`, `CHANGELOG.md` and `assets/`, is written for this package and is not touched by a sync.
+Nothing else is copied. `config/settings.json` is the only file in the package that may differ from the snapshot in content, and `diff` on it is expected to show exactly the removed model selections of delta 1 and nothing else; everything under `docs/`, plus `README.md`, `CHANGELOG.md` and `assets/`, is written for this package and is not touched by a sync.
 
 Two things under `extensions/` are newer than the sync procedure above and belong in the checklist: `bash-command-collapse/sandbox.ts`, `allowlist.ts` and `sandbox-mode.ts` are **live code** (imported by `sandbox-boundary/`, and `sandbox-mode.ts` also by `plan-mode/`), not test helpers, so deleting that directory breaks two more extensions; `recap/subagents.ts` is likewise live code imported by `verify-loop/`; and the persistent allowlist at `~/.pi/agent/sandbox-allowlist.json` is **machine-local state**, deliberately absent from `clients/pi/` — a sync must never copy it in either direction.
 

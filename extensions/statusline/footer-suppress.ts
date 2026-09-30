@@ -5,7 +5,7 @@
  * `ensureTool("fd"/"rg")` → `rebindCurrentSession()` → 才 emit `session_start`
  * （`interactive-mode.js` 的 `init()`）。扩展拿到 ctx、能 `setFooter()` 只能等到最后一步，
  * 而 Runner 的 `emit()` 是**串行 await** 每个扩展的 handler，排在 `statusline` 前面的扩展
- * （本机是 `mcp`，握手要连 MCP server）还会再往后推一点。实测本机冷启动：内置 footer 在
+ * （本机是 `mcp`，要连 MCP server）还会再往后推一点。实测本机冷启动：内置 footer 在
  * ~480ms 出第一帧，我们的 statusline 到 ~1.2s 才装上 —— 中间那 ~0.7s 底部是 pi 默认状态行
  * （`~/path` + `0.0%/1.0M (auto) ... deepseek-flash • max`），然后整块换成 `🅼 ...`。
  * 用户看到的就是「先默认、后扩展」闪一下。
@@ -34,8 +34,8 @@ export const FOOTER_SUPPRESS_KEY: symbol = Symbol.for("litellm-any.pi-statusline
 
 /**
  * 兜底时长：正常 `session_start` 远早于它解除，只有交接失败才会走到这里。
- * 取 30s 是因为我们排在别的扩展后面 —— `Runner.emit()` 串行 await，`mcp`（字母序在前）
- * 只在握手全部结束后才轮到我们，握手本身的上限就是 20s。
+ * 取 30s 是因为我们排在别的扩展后面 —— `Runner.emit()` 串行 await，字母序在前的 `mcp`
+ * 连完 MCP server 才轮到我们，那段等待也落在窗口里。
  */
 export const FOOTER_SUPPRESS_MAX_AGE_MS = 30_000;
 

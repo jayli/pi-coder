@@ -136,7 +136,16 @@ export function composeFooterLines(
 	if (statuses) lines.push(`${LEADING_INDENT}${statuses}`);
 	// dock 文案由 background-tasks 侧逐段着过色（恒带 ANSI），原样渲染；
 	// 终端宽度收口在下面的 truncate，所以 id / 状态 / 时长永不被截，只截行尾的命令。
-	if (dock && dock.trim().length > 0) lines.push(`${LEADING_INDENT}${dock.trim()}`);
+	// 值可能含**一个换行**（结轮提示的第二行，见 background-tasks/status.ts 文件头）：
+	// 按行拆成多个 footer 行，每行照样缩进一格、照样各自参与截断。
+	// 不做 `trim()`：第二行的缩进（`└` 悬在任务 id 下方）就靠前导空格表达，
+	// trim 会把它吃掉，而行内缩进是发布侧的事。只跳过纯空行。
+	// 发布侧从不给自己加前导空格，所以缩进仍恒为 `LEADING_INDENT` 那一格。
+	if (dock && dock.trim().length > 0) {
+		for (const row of dock.split(/\r?\n/)) {
+			if (row.trim().length > 0) lines.push(`${LEADING_INDENT}${row}`);
+		}
+	}
 	return lines.map((line) => truncate(line, width, ELLIPSIS));
 }
 

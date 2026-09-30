@@ -24,10 +24,22 @@ import fs from "node:fs";
 import path from "node:path";
 
 import { Type } from "typebox";
-import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { wrapTextWithAnsi } from "@earendil-works/pi-tui";
+import type { ExtensionAPI, ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
 import { withFileMutationQueue } from "@earendil-works/pi-coding-agent";
 
 import { buildMemoryContext } from "./context.ts";
+import {
+	BODY_INDENT,
+	GUTTER_WIDTH,
+	PREVIEW_MAX_LINES,
+	TREE_PIPE,
+	classifyMemoryToolOutcome,
+	memoryResultTreePrefixes,
+	memoryToolTitleParts,
+	previewMoreLinesHint,
+	type MemoryToolOutcome,
+} from "./render.ts";
 import {
 	DISABLED_MARKER,
 	INDEX_FILENAME,
@@ -104,6 +116,130 @@ function textResult(text: string, details: Record<string, unknown>) {
 	return { content: [{ type: "text" as const, text }], details };
 }
 
+// =============================================================================
+// 展示形态：四个工具共用的 self 壳 + 树形标题/正文（形态决定见 render.ts 文件头）
+// =============================================================================
+
+/** pi 传给 renderCall / renderResult 的渲染上下文（跨帧同一个 state 对象）。 */
+interface MemoryToolRenderContext {
+	state?: { outcome?: MemoryToolOutcome };
+	isPartial: boolean;
+	isError: boolean;
+}
+
+/** 结果块里的文本正文（其余块类型这四个工具不会产生）。 */
+interface MemoryToolResultLike {
+	content?: ReadonlyArray<{ type?: string; text?: string }>;
+	details?: unknown;
+}
+
+/** 把结果里的所有 text 块拼成全文（按块顺序，块之间换行）。 */
+function memoryResultText(result: MemoryToolResultLike): string {
+	const blocks = Array.isArray(result.content) ? result.content : [];
+	return blocks
+		.filter((block) => block?.type === "text" && typeof block.text === "string")
+		.map((block) => block.text as string)
+		.join("\n");
+}
+
+/**
+ * 四个工具共用的渲染器：`renderShell: "self"` + 树形标题/正文。
+ *
+ * ## 为什么必须 self 壳
+ *
+ * 默认壳是 `contentBox = new Box(1, 1, bgFn)`（tool-execution.js）：整块套
+ * `toolPendingBg` / `toolSuccessBg` / `toolErrorBg` 底色，`paddingY = 1` 给上下各一行
+ * 空行，构造时那个 `Spacer(1)` 再给上方一行。self 模式下 `render()` 绕过
+ * `super.render()`（Spacer 不画）、容器是纯 `Container`（`instanceof Box` 为 false，
+ * bgFn 套不上去），于是**没有底色、下方没有空行**；上方只剩 pi 在 self 分支里写死的
+ * 那一行 `lines.push("")` —— 去不掉，bash / simple-task / plan / 后台任务块同样如此。
+ *
+ * 形态（圆点顶格、正文列 4 对齐工具名首字母、除末行 `│ ` 末行 `└ `、无标记、10 行预览
+ * 截断）与配色槽位全部由 `render.ts` 定，这里只负责上色与折行。
+ */
+function memoryToolRenderers(toolName: string) {
+	return {
+		renderShell: "self" as const,
+		renderCall(_args: unknown, theme: Theme, context: MemoryToolRenderContext) {
+			// state 是跨帧同一个对象，所以 render(width) 时读到的是 renderResult 刚写的分类；
+			// 兜底（state 里还没有 outcome）只发生在「结果没到过」的行：执行中按 isPartial
+			// 判 pending，其余按 isError 判 error / declined。
+			const state = context.state;
+			return {
+				render(width: number): string[] {
+					const outcome: MemoryToolOutcome =
+						state?.outcome ?? (context.isPartial ? "pending" : context.isError ? "error" : "declined");
+					// 工具块只有圆点、不打任何标记：点的颜色就是结局灯（见 render.ts）
+					const parts = memoryToolTitleParts(outcome);
+					const title = `${theme.fg(parts.dotSlot, "\u2022")} ${theme.fg("toolTitle", theme.bold(toolName))}`;
+					// 标题行顶格（不挂 BODY_INDENT），所以折行预算就是整个宽度
+					return wrapTextWithAnsi(title, Math.max(1, width || 80));
+				},
+				invalidate() {},
+			};
+		},
+		renderResult(
+			result: MemoryToolResultLike,
+			options: { expanded: boolean },
+			theme: Theme,
+			context: MemoryToolRenderContext,
+		) {
+			// isError 必须从 **context** 读：pi 传给 resultRenderer 的对象是
+			// `{ content, details }`，**没有 isError 字段**（它只在 getRenderContext() 里）。
+			if (context.state) {
+				context.state.outcome = classifyMemoryToolOutcome(context.isError === true, result?.details);
+			}
+			const sourceLines = memoryResultText(result ?? {}).split("\n");
+			const expanded = options?.expanded === true;
+			// 结果是静态的，按 width 缓存排版（同 plan 块 / 后台任务块）
+			const cache = new Map<number, string[]>();
+			return {
+				render(width: number): string[] {
+					const hit = cache.get(width);
+					if (hit !== undefined) return hit;
+					const bodyWidth = Math.max(1, (width || 80) - BODY_INDENT.length - GUTTER_WIDTH);
+					const rows: string[] = [];
+					for (const line of sourceLines) {
+						// 空行也占一行（wrapTextWithAnsi("") → [""]）：段落间距是可读性的一部分
+						rows.push(...wrapTextWithAnsi(line, bodyWidth));
+					}
+					if (rows.every((row) => row.trim() === "")) {
+						cache.set(width, []);
+						return [];
+					}
+					// 预览截断：非展开态裁到 PREVIEW_MAX_LINES 行，提示行挂在被裁正文的末尾。
+					// 展开态（ctrl+o）不裁。截断按折行后的视觉行数算（与树前缀同口径）。
+					let visible = rows;
+					let hidden = 0;
+					if (!expanded && rows.length > PREVIEW_MAX_LINES) {
+						visible = rows.slice(0, PREVIEW_MAX_LINES);
+						hidden = rows.length - visible.length;
+					}
+					// 前缀按**折行 + 截断之后**的视觉行数算：折行碎片与截断提示行各算独立行，
+					// 否则一个折成三行的长句会在第一片就画上 `└`，看着像树提前结束了。
+					const lineCount = visible.length + (hidden > 0 ? 1 : 0);
+					const prefixes = memoryResultTreePrefixes(lineCount);
+					const lines = visible.map(
+						(row, index) => BODY_INDENT + theme.fg("muted", prefixes[index] ?? TREE_PIPE) + theme.fg("text", row),
+					);
+					if (hidden > 0) {
+						lines.push(
+							BODY_INDENT +
+								theme.fg("muted", prefixes[visible.length] ?? TREE_PIPE) +
+								theme.fg("muted", previewMoreLinesHint(hidden)),
+						);
+					}
+					cache.set(width, lines);
+					return lines;
+				},
+				invalidate() {
+					cache.clear();
+				},
+			};
+		},
+	};
+}
+
 export default function memory(pi: ExtensionAPI): void {
 	if (process.env.PI_MEMORY === "off") return;
 
@@ -126,6 +262,7 @@ export default function memory(pi: ExtensionAPI): void {
 	pi.registerTool({
 		name: "memory_write",
 		label: "Memory Write",
+		...memoryToolRenderers("memory_write"),
 		description: [
 			"Save or update one durable memory for this project (one topic per memory).",
 			"Use when the user says 'remember this', or when the user's latest message taught a durable, applicable lesson (a correction, a confirmed approach, a standing preference, a decision with its reason).",
@@ -180,6 +317,7 @@ export default function memory(pi: ExtensionAPI): void {
 	pi.registerTool({
 		name: "memory_read",
 		label: "Memory Read",
+		...memoryToolRenderers("memory_read"),
 		description: [
 			"Read one memory's full body by name, or list all memories when name is omitted.",
 			"The injected index only carries one-line descriptions; read the body before acting on a memory.",
@@ -208,6 +346,7 @@ export default function memory(pi: ExtensionAPI): void {
 	pi.registerTool({
 		name: "memory_forget",
 		label: "Memory Forget",
+		...memoryToolRenderers("memory_forget"),
 		description:
 			"Delete one memory that turned out wrong, obsolete, or superseded. Prefer updating (memory_write with the same name) unless nothing in it is worth keeping.",
 		promptSnippet: "Delete one obsolete or wrong memory.",
@@ -231,6 +370,7 @@ export default function memory(pi: ExtensionAPI): void {
 	pi.registerTool({
 		name: "memory_search",
 		label: "Memory Search",
+		...memoryToolRenderers("memory_search"),
 		description:
 			"Keyword search across all memories (names, descriptions, bodies). Use when the injected index does not obviously contain what you need.",
 		promptSnippet: "Keyword search across all memories.",

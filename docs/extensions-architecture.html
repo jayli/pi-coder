@@ -68,7 +68,7 @@
 
 <header>
   <h1>pi-coder 扩展架构</h1>
-  <div class="sub">底座是 pi 内核（<code>@earendil-works/pi-coding-agent</code> 0.87.1），30 个扩展全部通过同一套扩展 API 挂载 · 依据 <code>docs/extensions.md</code> 与源码实测</div>
+  <div class="sub">底座是 pi 内核（<code>@earendil-works/pi-coding-agent</code> 0.87.1），29 个扩展全部通过同一套扩展 API 挂载 · 依据 <code>docs/extensions.md</code> 与源码实测</div>
 </header>
 
 <!-- ================= 主图：分层架构 ================= -->
@@ -82,7 +82,7 @@
 
   <!-- ========== 扩展层 ========== -->
   <rect x="20" y="24" width="1080" height="330" rx="14" fill="#161b22" stroke="#2d3646"/>
-  <text x="40" y="17" fill="#9aa7b8" font-size="12.5" font-weight="700" letter-spacing="1">扩展层 · 30 个</text>
+  <text x="40" y="17" fill="#9aa7b8" font-size="12.5" font-weight="700" letter-spacing="1">扩展层 · 29 个</text>
 
   <!-- 工具渲染覆盖 (5) -->
   <text x="40" y="58" fill="#e8875b" font-size="13" font-weight="700">工具渲染覆盖 · 5</text>
@@ -120,7 +120,7 @@
   </g>
 
   <!-- 模型与工具 (10) -->
-  <text x="670" y="58" fill="#7ee787" font-size="13" font-weight="700">模型与工具 · 10</text>
+  <text x="670" y="58" fill="#7ee787" font-size="13" font-weight="700">模型与工具 · 9</text>
   <g font-family="ui-monospace, 'SF Mono', Menlo, monospace" font-size="11">
     <rect x="670"  y="70"  width="190" height="28" rx="7" fill="#1c2330" stroke="#7ee787" stroke-opacity=".55"/><text x="765" y="88"  text-anchor="middle" fill="#e6edf3">plan-mode</text>
     <rect x="880"  y="70"  width="190" height="28" rx="7" fill="#1c2330" stroke="#7ee787" stroke-opacity=".55"/><text x="975" y="88"  text-anchor="middle" fill="#e6edf3">sandbox-boundary</text>
@@ -129,8 +129,7 @@
     <rect x="670"  y="138" width="190" height="28" rx="7" fill="#1c2330" stroke="#7ee787" stroke-opacity=".55"/><text x="765" y="156" text-anchor="middle" fill="#e6edf3">memory</text>
     <rect x="880"  y="138" width="190" height="28" rx="7" fill="#1c2330" stroke="#7ee787" stroke-opacity=".55"/><text x="975" y="156" text-anchor="middle" fill="#e6edf3">background-tasks</text>
     <rect x="670"  y="172" width="190" height="28" rx="7" fill="#1c2330" stroke="#7ee787" stroke-opacity=".55"/><text x="765" y="190" text-anchor="middle" fill="#e6edf3">ask-user-question</text>
-    <rect x="880"  y="172" width="190" height="28" rx="7" fill="#1c2330" stroke="#7ee787" stroke-opacity=".55"/><text x="975" y="190" text-anchor="middle" fill="#e6edf3">mcp</text>
-    <rect x="670"  y="206" width="190" height="28" rx="7" fill="#1c2330" stroke="#7ee787" stroke-opacity=".55"/><text x="765" y="224" text-anchor="middle" fill="#e6edf3">auto-default-model</text>
+    <rect x="880"  y="172" width="190" height="28" rx="7" fill="#1c2330" stroke="#7ee787" stroke-opacity=".55"/><text x="975" y="190" text-anchor="middle" fill="#e6edf3">auto-default-model</text>
     <rect x="880"  y="206" width="190" height="28" rx="7" fill="#1c2330" stroke="#7ee787" stroke-opacity=".55"/><text x="975" y="224" text-anchor="middle" fill="#e6edf3">subagent-log-guard</text>
   </g>
 
@@ -142,8 +141,8 @@
   <rect x="20" y="410" width="1080" height="130" rx="14" fill="#161b22" stroke="#2d3646"/>
   <text x="40" y="403" fill="#9aa7b8" font-size="12.5" font-weight="700" letter-spacing="1">扩展 API 接口面（pi loader 加载，全部扩展共用）</text>
   <g font-family="ui-monospace, 'SF Mono', Menlo, monospace" font-size="11.5">
-    <rect x="40"  y="432" width="170" height="30" rx="15" fill="rgba(45,212,191,.08)" stroke="rgba(45,212,191,.35)"/><text x="125" y="451" text-anchor="middle" fill="#2dd4bf">registerTool ×18</text>
-    <rect x="224" y="432" width="200" height="30" rx="15" fill="rgba(45,212,191,.08)" stroke="rgba(45,212,191,.35)"/><text x="324" y="451" text-anchor="middle" fill="#2dd4bf">registerCommand ×17</text>
+    <rect x="40"  y="432" width="170" height="30" rx="15" fill="rgba(45,212,191,.08)" stroke="rgba(45,212,191,.35)"/><text x="125" y="451" text-anchor="middle" fill="#2dd4bf">registerTool ×17</text>
+    <rect x="224" y="432" width="200" height="30" rx="15" fill="rgba(45,212,191,.08)" stroke="rgba(45,212,191,.35)"/><text x="324" y="451" text-anchor="middle" fill="#2dd4bf">registerCommand ×16</text>
     <rect x="438" y="432" width="250" height="30" rx="15" fill="rgba(45,212,191,.08)" stroke="rgba(45,212,191,.35)"/><text x="563" y="451" text-anchor="middle" fill="#2dd4bf">registerMessageRenderer ×2</text>
     <rect x="702" y="432" width="290" height="30" rx="15" fill="rgba(45,212,191,.08)" stroke="rgba(45,212,191,.35)"/><text x="847" y="451" text-anchor="middle" fill="#2dd4bf">registerMarkdownTransformer ×1</text>
     <rect x="40"  y="472" width="330" height="30" rx="15" fill="rgba(45,212,191,.08)" stroke="rgba(45,212,191,.35)"/><text x="205" y="491" text-anchor="middle" fill="#2dd4bf">ctx.on(session_start | tool_call | input | …)</text>
@@ -326,7 +325,7 @@
 </div>
 
 <footer>
-  <p><b>分层依据</b>：四大类分类与 30 个扩展清单来自 <code>docs/extensions.md</code>（仓库权威扩展文档）；API 接口面的调用次数为源码 grep 实测（registerTool ×18、registerCommand ×17、registerMessageRenderer ×2、registerMarkdownTransformer ×1）。</p>
+  <p><b>分层依据</b>：四大类分类与 29 个扩展清单来自 <code>docs/extensions.md</code>（仓库权威扩展文档）；API 接口面的调用次数为源码 grep 实测（registerTool ×17、registerCommand ×16、registerMessageRenderer ×2、registerMarkdownTransformer ×1）。</p>
   <p><b>底座语义</b>：pi 内核提供 agent 循环、8 个内置工具、会话 JSONL 与 pi-tui；扩展以「同名工具先注册者整包接管」的方式覆盖 bash / read / edit / write 的渲染与行为。内核没有后台执行原语，background-tasks/ 是扩展级补法。</p>
   <p>生成于 2026-09-27 · 对应仓库 HEAD <code>d82fa69</code>（v2.1.6）</p>
 </footer>

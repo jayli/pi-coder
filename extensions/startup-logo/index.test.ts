@@ -1,5 +1,5 @@
 /**
- * Tests for startup-logo/index.ts — 「启动 header 的 logo」与「剪掉三段启动清单」这条链路。
+ * Tests for startup-logo/index.ts — 「启动 header 的 logo」与「剪掉整份启动清单」这条链路。
  *
  * Run with:  node --test clients/pi/extensions/startup-logo/index.test.ts
  *
@@ -241,7 +241,7 @@ test("扩展注册面：只有会话事件，不再有 `/logo` 命令", { skip, 
 	}
 });
 
-test("session_start：header 是 logo（每行缩进一格、没有 /logo 提示），清单被剪掉三段", { skip, timeout: 30_000 }, async () => {
+test("session_start：header 是 logo（每行缩进一格、没有 /logo 提示），整份清单被剪空", { skip, timeout: 30_000 }, async () => {
 	const workspace = makeWorkspace();
 	try {
 		const extension = await loadExtension(workspace.agentDir, workspace.projectDir);
@@ -266,20 +266,21 @@ test("session_start：header 是 logo（每行缩进一格、没有 /logo 提示
 		assert.ok(plain.some((line) => line.includes("Pi can explain its own features")), "说明行应该保留");
 		assert.equal(plain.some((line) => line.includes("/logo")), false, "`/logo toggles this header.` 提示已删掉");
 
-		// 已加载资源清单：按 pi 的顺序填，被剪的三段连同各自的空行都不该进去
+		// 已加载资源清单：按 pi 的顺序填，四段连同各自的空行都不该进去（含开头那个额外空行）
 		const { loadedResourcesContainer: loaded } = tui;
 		loaded.addChild(new FakeSpacer());
-		for (const name of ["Context", "Skills", "Prompts", "Extensions", "Themes"]) {
+		for (const name of ["Context", "Skills", "Prompts", "Extensions"]) {
 			loaded.addChild(new FakeSection(name));
 			loaded.addChild(new FakeSpacer());
 		}
-		assert.deepEqual(sectionTitlesIn(loaded), ["Skills", "Extensions"]);
+		assert.deepEqual(sectionTitlesIn(loaded), []);
+		assert.equal(loaded.children.length, 0, "连开头那个额外空行也收掉，不留多余留白");
 	} finally {
 		workspace.cleanup();
 	}
 });
 
-test("session_tree 重装 header：接管幂等，清单里依旧只有 Skills / Extensions", { skip, timeout: 30_000 }, async () => {
+test("session_tree 重装 header：接管幂等，诊断段仍照常显示", { skip, timeout: 30_000 }, async () => {
 	const workspace = makeWorkspace();
 	try {
 		const extension = await loadExtension(workspace.agentDir, workspace.projectDir);
@@ -298,7 +299,9 @@ test("session_tree 重装 header：接管幂等，清单里依旧只有 Skills /
 		tui.loadedResourcesContainer.addChild(new FakeSection("Themes"));
 		tui.loadedResourcesContainer.addChild(new FakeSpacer());
 		tui.loadedResourcesContainer.addChild(new FakeSection("Skills"));
-		assert.deepEqual(sectionTitlesIn(tui.loadedResourcesContainer), ["Skills"]);
+		tui.loadedResourcesContainer.addChild(new FakeSpacer());
+		tui.loadedResourcesContainer.addChild(new FakeSection("Skill conflicts"));
+		assert.deepEqual(sectionTitlesIn(tui.loadedResourcesContainer), ["Skill conflicts"]);
 	} finally {
 		workspace.cleanup();
 	}

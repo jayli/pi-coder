@@ -48,7 +48,7 @@
     "customMessageBg": "userMessageBg",
     "customMessageText": "fg",
     "customMessageLabel": "accent",
-    "toolPendingBg": "",
+    "toolPendingBg": "toolSuccessBg",
     "toolSuccessBg": "toolSuccessBg",
     "toolErrorBg": "toolErrorBg",
     "toolTitle": "accent",

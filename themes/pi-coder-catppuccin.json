@@ -52,7 +52,7 @@
     "customMessageBg": "mantle",
     "customMessageText": "text",
     "customMessageLabel": "mauve",
-    "toolPendingBg": "",
+    "toolPendingBg": "successPanel",
     "toolSuccessBg": "successPanel",
     "toolErrorBg": "errorPanel",
     "toolTitle": "mauve",

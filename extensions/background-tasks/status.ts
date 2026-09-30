@@ -14,6 +14,19 @@
  * 最终按终端宽度收口的是 statusline 扩展的 `truncateToWidth` —— 所以 id / 状态 / 时长
  * 永远看得见，超宽只截命令。
  *
+ * ## 可选第二行：本轮已结束时仍挂着的任务
+ *
+ * 本轮结束（`agent_settled`）后还在跑的任务，在下面再加一行说明：
+ *
+ *   ⚙ bg_2 running 5m10s · <cmd>
+ *     └ 本轮已结束，该任务仍在运行
+ *
+ * 三个条件同时满足才出现：任务**还在跑**（终态不需要这句话）、**本轮已结束**
+ * （`agent_start` 一到就清掉，所以新一轮进行中时不会说假话）、且任务**已跑满阈值**
+ * （`TURN_NOTE_THRESHOLD_MS`，默认 5s）—— 阈值挡掉「本轮刚结束、长任务才起 1 秒」
+ * 这种完全正常的情况。这是**事实陈述**（回合状态可由事件判定），不是「任务没用了」
+ * 的推断：扩展无从区分「孤儿残留」与「本来就该长跑」，所以只报前者能确认的那半句。
+ *
  * ## 显示哪个任务
  *
  * 永远一行：优先最新启动（startedAt 最大）的 **running** 任务；没有 running 时显示
@@ -49,6 +62,24 @@ export const DOCK_TICK_MS = 1_000;
  */
 export const DOCK_ICON = "\u2699";
 
+/** 结轮提示第二行的文案。**事实**：本轮结束了，而这条任务还在跑。 */
+export const TURN_ENDED_NOTE = "本轮已结束，该任务仍在运行";
+
+/**
+ * 结轮提示的阈值：任务运行满这么久、且本轮已结束，才补第二行。
+ * `PI_BACKGROUND_TASKS_TURN_NOTE_MS` 可覆盖。
+ */
+export const TURN_NOTE_THRESHOLD_MS = 5_000;
+
+/**
+ * └ U+2514 BOX DRAWINGS LIGHT UP AND RIGHT。与 bash 块同一套树形约定
+ * （`└` 落在正文列、取 muted 槽），源码里写转义、测试按码位钉死。
+ */
+export const NOTE_GLYPH = "\u2514";
+
+/** `└` 的缩进：落在正文列（id 首字符那一列），后面再接一个空格放文案。 */
+const NOTE_INDENT = "  ";
+
 /** 渲染 dock 行需要的任务最小面（registry 的 `BackgroundTask` 结构兼容）。 */
 export interface BackgroundStatusTask {
 	id: string;
@@ -62,6 +93,14 @@ export interface BackgroundStatusTask {
 
 export interface BackgroundStatusTheme {
 	fg(color: string, text: string): string;
+}
+
+/** 回合状态：本轮是否已经结束（决定要不要补第二行）。 */
+export interface TurnSettledInput {
+	/** 本轮结束的时刻；`undefined` = 本轮仍在进行（或还没跑过轮次）→ 不补第二行。 */
+	settledAt: number | undefined;
+	/** 阈值覆盖（index.ts 读 `PI_BACKGROUND_TASKS_TURN_NOTE_MS`）；默认 `TURN_NOTE_THRESHOLD_MS`。 */
+	noteMs?: number;
 }
 
 /** 状态词与色槽：running 橙、exit 0 绿、非 0 / killed / 带信号退出 红。 */
@@ -79,12 +118,16 @@ function statusWord(task: BackgroundStatusTask): { word: string; slot: string } 
  * 终态任务（同规则）。`(+N)` 放在命令**之前**：dock 行超宽时只有行尾的命令会被
  * 终端宽度截掉，计数放前面才能永远看得见。`lingerMs` 由调用方注入（index.ts 读 env），
  * 默认 10s。
+ *
+ * 返回值可能含**一个换行**（结轮提示的第二行，见文件头）；statusline 侧按行拆成
+ * 多个 footer 行渲染。`turn` 省略 = 本轮状态未知 → 永远单行。
  */
 export function formatBackgroundStatus(
 	theme: BackgroundStatusTheme,
 	tasks: readonly BackgroundStatusTask[],
 	now: number,
 	lingerMs: number = TERMINAL_LINGER_MS,
+	turn?: TurnSettledInput,
 ): string | undefined {
 	const running = tasks.filter((task) => task.status === "running");
 	const lingering = tasks.filter(
@@ -112,5 +155,23 @@ export function formatBackgroundStatus(
 	if (extra > 0) parts.push(theme.fg("muted", `(+${extra})`));
 	parts.push(theme.fg("dim", "\u00b7"));
 	parts.push(theme.fg("dim", truncateCommand(pick.command, STATUS_COMMAND_MAX)));
-	return parts.join(" ");
+	const line = parts.join(" ");
+	if (!needsTurnEndedNote(pick, now, turn)) return line;
+	// `└` 单独取 muted：结构字符不吃后面文案的颜色（bash 块的同一条约定）。
+	const sub = `${NOTE_INDENT}${theme.fg("muted", NOTE_GLYPH)} ${theme.fg("warning", TURN_ENDED_NOTE)}`;
+	return `${line}\n${sub}`;
+}
+
+/**
+ * 该不该给这一行补「本轮已结束」：还在跑 + 本轮已结束 + 已跑满阈值，三者缺一不可。
+ * 终态任务不补（驻留窗口里那几秒不需要这句话），阈值挡掉刚起几秒的正常长任务。
+ */
+function needsTurnEndedNote(
+	task: BackgroundStatusTask,
+	now: number,
+	turn: TurnSettledInput | undefined,
+): boolean {
+	if (task.status !== "running") return false;
+	if (turn?.settledAt === undefined) return false;
+	return now - task.startedAt >= (turn.noteMs ?? TURN_NOTE_THRESHOLD_MS);
 }

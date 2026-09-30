@@ -40,17 +40,19 @@ pi's default is `"tree"` (the built-in session-tree navigator). The `rewind` ext
 
 | Key | Value here | Notes |
 | --- | --- | --- |
-| `lastChangelogVersion` | `"0.85.1"` | Internal marker for "last changelog the user saw". It only suppresses a changelog notice; harmless to keep or delete. |
+| `lastChangelogVersion` | `"0.99.1"` | Internal marker for "last changelog the user saw". It only suppresses a changelog notice; harmless to keep or delete. |
 | `theme` | `"pi-coder-1337"` | Must equal the `name` field inside `themes/pi-coder-1337.json`, not just the file name. |
 | `defaultThinkingLevel` | `"xhigh"` | Startup thinking level. Not available on every model; see `thinkingLevelMap` in your `models.json`. |
 | `compaction.enabled` / `reserveTokens` / `keepRecentTokens` | `true` / `52429` / `20000` | `keepRecentTokens` is pi's default; `reserveTokens` is raised well above pi's `16384` default because this setup's models stream long thinking blocks. |
 | `npmCommand` | `["pnpm", "--config.node-linker=hoisted"]` | See above. Machine-specific. |
 | `extensions` | `[]` | No explicit extension paths — auto-discovery of `~/.pi/agent/extensions/` and package resources only. The author's real file pointed at a telemetry extension from another tool; that absolute path was intentionally dropped. |
 | `tuiMode` | `"regular"` | pi's default, written out explicitly. |
-| `packages` | `["npm:pi-web-access", "npm:pi-subagents"]` | The two companion packages. This array is exactly what `pi install` writes. |
+| `packages` | `["npm:pi-web-access", "npm:pi-subagents", "git:github.com/jayli/superpowers"]` | The three companion packages. This array is exactly what `pi install` writes. `git:` means pi clones the repository itself into `~/.pi/agent/git/`, and that package brings both an extension and its 15 skills — see [installation.md](installation.md#companion-packages). |
 | `steeringMode` | `"one-at-a-time"` | pi's default, explicit. |
 | `markdown.mermaid` | `"streaming"` | pi's default, explicit. |
 | `doubleEscapeAction` | `"none"` | See above. |
+| `subagents.defaultModel` | `"inherit"` | Pins every subagent to the parent session's model instead of a frontmatter choice. Built-in agents already inherit, so this is mostly a statement of intent — and it **does not** cover the watchdog, which reads `subagents.watchdog.main.model`. |
+| `subagents.modelScope` | `{ "enforce": true, "strict": true, "allow": ["inherit"] }` | Caps which models a subagent may run on: only the inherited session model passes, and anything outside the list is a hard error rather than a warning (`strict`). The snapshot allows one extra model, `litellm-any/deepseek-flash-qd`, which is machine-local and removed here — see below. `enforce: true` requires at least one non-empty `allow`, which `["inherit"]` satisfies. |
 | `subagents.watchdog` | `{ "enabled": true }` | A `pi-subagents` setting: the opt-in second-model reviewer. On every turn that changed the repository it feeds that turn's diff plus the user's scope to an independent reviewer model looking for missed constraints, correctness risks, test gaps, unsafe changes and drift; clean turns are silent, `high` findings are pushed back into the model's context, `low` / `medium` are shown to the user only, and three identical warnings in a row are judged a deadlock and stop it. `/subagents-watchdog on\|off\|status` drives it inside a session; `settings.json` is read at startup, so an edit takes effect next session. The snapshot also sets `main.model`, which is machine-specific and removed here — see below. |
 | `subagents.agentOverrides` | `researcher` / `delegate` / `worker` → `tools: "inherit"` | A `pi-subagents` setting, not a pi core one. |
 
@@ -71,9 +73,11 @@ Interaction tools need no exclusion: `ask_user_question` checks `ctx.hasUI` and 
 
 ### `config/settings.json` and `config/AGENTS.md`
 
-`config/settings.json` holds the two machine-specific entries above; everything else in it is portable. `config/AGENTS.md` is the agent's global working rules and is not machine-specific at all; `config/AGENTS.core.md` is its distilled core and equally portable, but remember it is **load-bearing**: `core-rules` injects it, and a missing file means that extension is silently absent from a session.
+`config/settings.json` holds the machine-specific entries described above; everything else in it is portable. `config/AGENTS.md` is the agent's global working rules and is not machine-specific at all; `config/AGENTS.core.md` is its distilled core and equally portable, but remember it is **load-bearing**: `core-rules` injects it, and a missing file means that extension is silently absent from a session.
 
-`config/models.json` and `config/mcp.json` are **not** shipped: provider registrations point at a local gateway and the MCP file holds absolute paths of local server executables, so both belong to the machine that runs them. MCP servers are configured in `~/.pi/agent/mcp.json` or a project `.mcp.json`.
+`config/models.json` and `config/mcp.json` are **not** shipped: provider registrations point at a local gateway and the MCP file holds absolute paths of local server executables, so both belong to the machine that runs them. MCP servers are configured in `~/.pi/agent/mcp.json` or a project `.pi/mcp.json`, and since pi 0.99.1 they are read by pi's built-in `builtin:mcp` rather than by any extension in this package.
+
+`config/subagent/config.json` is new in the snapshot and is **also not shipped**, though it is not machine-local: it holds `pi-subagents`' own `timeoutMs` (3 600 000) and `checkpointBeforeDeadlineMs` (300 000) tuning, and it belongs to `pi-subagents`, which works zero-config without it. The file it mirrors on a real machine is `~/.pi/agent/extensions/subagent/config.json` (note the path: `extensions/`, not the `config/` layout of this snapshot), and `pi-subagents` documents every key in its own `docs/configuration.md`.
 
 Provider and model registrations are machine-specific: this setup's `litellm-any` provider points at a LiteLLM gateway on `127.0.0.1:996` (LAN address on other machines), carries a compat configuration, and registers six model ids that must match the gateway's routes exactly. Shipping it would be wrong on every other machine, so it is excluded.
 
@@ -85,6 +89,7 @@ The settings keys that select a model were removed along with it:
 | `defaultModel: "deepseek-flash"` | Depends on that provider. |
 | `modelThinkingLevels` | Pins `deepseek-flash` and `deepseek-flash-qd` to `max`; model ids again. |
 | `subagents.watchdog.main.model` | `"litellm-any/deepseek-flash-qd"` — the same provider. Omitting it makes the watchdog inherit the current session model, which is the documented fallback; the author's choice is a speed pick (~1.4 s through the gateway), not a requirement. |
+| `subagents.modelScope.allow`'s second entry | `"litellm-any/deepseek-flash-qd"` again. The key itself is kept — `{ "enforce": true, "strict": true, "allow": ["inherit"] }` is portable policy — only the machine-local model id is dropped. |
 
 Everything else in `settings.json` is byte-for-byte the author's file. If you run your own gateway you can add them back:
 
@@ -103,6 +108,8 @@ and merge a `main` block into the `subagents.watchdog` object that is already th
 }
 ```
 
+An extra model in `subagents.modelScope.allow` needs adding there too — with `enforce: true` (and `strict: true`, which also rejects inherited out-of-scope models) anything not in the list is a hard error, so a reviewer model added to the watchdog but not to the scope aborts the run.
+
 A configured reviewer model must be fully qualified as `provider/model` and authenticated in your registry; an unavailable one is **reported, not silently replaced**. Omitting `main.model` altogether inherits the current session model and thinking level, which is what this package relies on. Three sub-switches stay off here as they do upstream — `children` (review subagents), `clarification` (an extra review per prompt) and `cadence` (review every N tool calls) — and `agentEndTimeoutMs` defaults to 30000, after which the review is abandoned rather than blocking the turn. Findings carry an `importance` of `low` / `medium` / `high`: only `high` is steered back into the model's context and triggers a continuation, `low` and `medium` are persisted for the user alone, and a clean review shows nothing. `stalemateRepeats` defaults to 3 — after that many identical warnings in a row the finding is shown as `stalemate`, no continuation is triggered and the turn ends, with your next prompt resetting the count. Its Test Gap category overlaps the `verify-loop` gate on purpose: the gate is deterministic and free, the watchdog is a model judgement that costs a call, so one catches "nothing ran" and the other catches drift and missed edits.
 
 For how providers and thinking levels work, see pi's own `docs/models.md` and `docs/custom-provider.md`.
@@ -111,9 +118,9 @@ For how providers and thinking levels work, see pi's own `docs/models.md` and `d
 
 The MCP server list is machine-specific in the same way: the snapshot's only entry points at the absolute path of a local server executable, which exists on one machine only.
 
-MCP servers are configured in `~/.pi/agent/mcp.json` and/or the nearest project `.mcp.json`, in Claude Code's shape. Neither file is shipped. With no config at all the `mcp/` extension loads, registers no tools and says so in `/mcp`. The format — including `headersCommand` for dynamic auth headers — is documented in [extensions.md](extensions.md) and, in more detail, in the [Chinese handbook](handbook.zh.md).
+MCP servers are configured in `~/.pi/agent/mcp.json` and/or a project `.pi/mcp.json`, in Claude Code's `mcpServers` shape. Neither file is shipped. Since pi 0.99.1 the reader is pi's built-in `builtin:mcp`; this package's own twelve-file implementation was retired on 2026-09-30 because it registered `/mcp` too and pi resolves that collision first-registered-wins. `pi mcp add` writes the file for you, and `/mcp` opens the management UI. Three differences from the retired extension matter for a copied config: `timeout` is in **seconds** (a `120000` is rejected), project config is **only** `.pi/mcp.json` (symlink an existing `.mcp.json` to it), and legacy SSE (`type: "sse"`) is unsupported. `headersCommand` is gone too; use OAuth or `${VAR}` / `!command` inside static `headers`. The full surface is documented in [extensions.md](extensions.md#mcp-servers--pis-built-in-extension-not-this-packages) and the [Chinese handbook](handbook.zh.md).
 
-So two snapshot config files are deliberately left out of this package: `models.json` (gateway registrations) and `mcp.json` (paths of local MCP server executables). `AGENTS.md` and `settings.json` are shipped, and `settings.json` is the only shipped config file that differs from the snapshot — the four removed model selections in the table above.
+So three snapshot config files are deliberately left out of this package: `models.json` (gateway registrations), `mcp.json` (paths of local MCP server executables) and `subagent/config.json` (a companion package's own tuning). `AGENTS.md` and `settings.json` are shipped, and `settings.json` is the only shipped config file that differs from the snapshot — the removed model selections in the table above and nothing else.
 
 ### `pi-statusline.json` is legacy
 

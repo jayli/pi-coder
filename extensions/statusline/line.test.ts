@@ -17,6 +17,7 @@ import {
 	type StatuslineState,
 	type StatuslineTheme,
 	BRANCH_ICON,
+	LEADING_INDENT,
 	MODEL_ICON,
 	composeFooterLines,
 	ELLIPSIS,
@@ -31,6 +32,13 @@ import { STATUS_KEY as PLAN_MODE_STATUS_KEY } from "../plan-mode/render.ts";
 // 后台任务 dock 的保留键住在 background-tasks 那边：这里 import 它而不是重写字面量，
 // 两份字面量一旦漂移，下面的用例就会静默测不到真正的 dock 行。
 import { STATUS_KEY as BACKGROUND_DOCK_STATUS_KEY } from "../background-tasks/status.ts";
+// 结轮提示的两行由发布侧生成，所以这里 import 真模块而不是手写字符串：本用例要钉的
+// 就是「发布侧格式 → footer 行」这条跨模块契约（措辞 / 缩进 / 字形都算）。
+import {
+	NOTE_GLYPH,
+	TURN_ENDED_NOTE,
+	formatBackgroundStatus,
+} from "../background-tasks/status.ts";
 
 const plain: StatuslineTheme = { fg: (_color, text) => text };
 const painted: StatuslineTheme = { fg: (color, text) => `${color}(${text})` };
@@ -484,5 +492,71 @@ describe("composeFooterLines — background-task dock row", () => {
 	it("pins the reserved key to the publisher's literal", () => {
 		assert.equal(BACKGROUND_DOCK_STATUS_KEY, "background-tasks");
 		assert.notEqual(BACKGROUND_DOCK_STATUS_KEY, PLAN_MODE_STATUS_KEY);
+	});
+
+	it("把多行 dock 值拆成多行（结轮提示的第二行）", () => {
+		// 用发布侧真格式：同 DOCK 形状的任务（bg_1 / 12s，已超 5s 阈值），本轮已结束。
+		const multi = formatBackgroundStatus(
+			{ fg: (_slot, text) => text },
+			[
+				{
+					id: "bg_1",
+					command: "npm run test --silent",
+					status: "running",
+					startedAt: 0,
+					endedAt: undefined,
+					exitCode: undefined,
+					signal: undefined,
+				},
+			],
+			12_000,
+			10_000,
+			{ settledAt: 1_000 },
+		)!;
+		assert.equal(multi.split("\n").length, 2, "发布侧给的就是两行");
+		assert.equal(multi.split("\n")[0], DOCK, "第一行就是原来的单行文案");
+
+		const rendered = lines(new Map([[BACKGROUND_DOCK_STATUS_KEY, multi]]));
+		assert.equal(rendered.length, 3, "主行 + dock 两行");
+		assert.equal(rendered[1], ` ${DOCK}`);
+		// 行内缩进由发布侧给（`└` 悬在 id 下方就靠它的 NOTE_INDENT），footer 只加 LEADING_INDENT。
+		// 用常量拼期望值而不是数字符：缩进量由两个模块共同决定，写死就成第二个真相。
+		assert.equal(rendered[2], `${LEADING_INDENT}  ${NOTE_GLYPH} ${TURN_ENDED_NOTE}`);
+		for (const row of rendered) assert.equal(row.includes("\n"), false, JSON.stringify(row));
+
+		// 对齐约定：`└` 悬在第一行任务 id 的首字符那一列。
+		assert.equal(rendered[2]!.indexOf(NOTE_GLYPH), rendered[1]!.indexOf("bg_1"), "└ 应当悬在 id 下方");
+	});
+
+	it("保留第二行的行内缩进（不 trim），只跳过纯空行", () => {
+		// 行内缩进由发布侧决定（`└` 悬在 id 下方就靠它），所以 footer 侧不能 trim 掉；
+		// 否则多行用例里的对齐会静默消失。空行则不产生行。
+		const rendered = lines(
+			new Map([[BACKGROUND_DOCK_STATUS_KEY, `${DOCK}\n\n  ${NOTE_GLYPH} 说明\n  `]]),
+		);
+		assert.equal(rendered.length, 3, "空行不产生 footer 行");
+		assert.equal(
+			rendered[2],
+			`${LEADING_INDENT}  ${NOTE_GLYPH} 说明`,
+			"行内缩进原样保留（只加 LEADING_INDENT 那一格）",
+		);
+	});
+
+	it("多行 dock 的每一行各自参与截断", () => {
+		const truncate = (text: string, max: number, ellipsis: string) =>
+			[...text].length > max ? `${[...text].slice(0, max - 1).join("")}${ellipsis}` : text;
+		const rendered = composeFooterLines(
+			plain,
+			sourceOf(),
+			gitOf("main", new Map([[BACKGROUND_DOCK_STATUS_KEY, `${DOCK}\n  ${NOTE_GLYPH} ${TURN_ENDED_NOTE}`]])),
+			stateOf(),
+			30,
+			truncate,
+		);
+		assert.equal(rendered.length, 3);
+		for (const row of rendered.slice(1)) {
+			assert.ok([...row].length <= 30, `${row} 超宽`);
+		}
+		assert.ok(rendered[1]!.includes("bg_1 running 12s"), "第一行头部三段永远看得见");
 	});
 });

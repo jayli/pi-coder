@@ -2,7 +2,8 @@
 
 ## Requirements
 
-- pi **0.85.1** or newer. The extensions hook into pi internals (extension UI containers, renderer signatures, `SettingsManager`), so a much older pi may load them and behave oddly.
+- pi **0.85.1** or newer. The extensions hook into pi internals (extension UI containers, renderer signatures, `SettingsManager`), so a much older pi may load them and behave oddly. All 29 entries were verified against pi 0.85.1, 0.87.1 and 0.99.1 through pi's own loader.
+- pi **0.99.1** for MCP. `builtin:mcp` first shipped there, and this package no longer carries an MCP extension of its own — on an older pi there are simply no MCP tools.
 - Node **22.19+** (pi's own requirement).
 - macOS or Linux. The delete boundary (`bash-command-collapse/sandbox.ts`, `sandbox-boundary/`) needs macOS's `sandbox-exec`; elsewhere it turns itself off with `PI_SANDBOX=off` semantics and only the `AGENTS.md` discipline is left.
 
@@ -53,7 +54,7 @@ Expected visible results of a successful load:
 - The editor shows a `❯ ` prompt (`prompt-editor`).
 - A user message has a `▎ ` at the head of every line, including the blank lines above and below the text, in the theme's `accent` color (`user-message-bar`).
 - A bash run starts with a `• ` dot followed by `Run `, with **no background** behind the block (`bash-command-collapse`); pressing `shift+tab` cycles the permission mode and the statusline's second line shows `⏵ bypass` → `⏸ plan` → `☢ dangerous` (`plan-mode`).
-- `/theme`, `/tasks`, `/recap`, `/rewind`, `/init`, `/clear`, `/exit`, `/ask`, `/mcp`, `/memory`, `/plan`, `/plan-status`, `/goal`, `/sandbox-boundary`, `/background` and the `/bash-*` family (`/bash-preview`, `/bash-timeout`) all exist. Type `/` and scroll the command list.
+- `/theme`, `/tasks`, `/recap`, `/rewind`, `/init`, `/clear`, `/exit`, `/ask`, `/memory`, `/plan`, `/plan-status`, `/goal`, `/sandbox-boundary`, `/background` and the `/bash-*` family (`/bash-preview`, `/bash-timeout`) all exist. Type `/` and scroll the command list. `/mcp` also exists, but it comes from pi's own `builtin:mcp`, not from this package.
 - `/sandbox-boundary` prints the delete boundary (project directory, the temp roots `/tmp` / `/var/folders` / `/var/tmp`, the regenerable caches) and a `持久白名单` line, and `~/.pi/agent/AGENTS.core.md` exists — `core-rules` does nothing, silently, without it.
 
 If something is missing, start pi and search the screen for `Failed to load extension` — a parse error in one file does not stop the others.
@@ -84,7 +85,7 @@ mkdir -p ~/.pi/agent/themes
 cp "$PKG/themes/"*.json          ~/.pi/agent/themes/            # optional: themes are already loaded from the package
 ```
 
-`config/mcp.json` is **not** shipped, for the same reason as `config/models.json`: its entries are absolute paths of local MCP server executables. To use MCP servers, create `~/.pi/agent/mcp.json` (global) or a project `.mcp.json` yourself — the `mcp/` extension reads both, and registers no tools until one exists. See [configuration.md](configuration.md#mcpjson).
+`config/mcp.json` is **not** shipped, for the same reason as `config/models.json`: its entries are absolute paths of local MCP server executables. To use MCP servers, run `pi mcp add …` (or write `~/.pi/agent/mcp.json` / a project `.pi/mcp.json` yourself) — pi's built-in `builtin:mcp` reads those and registers no tools until one exists. Three differences from the retired extension are worth knowing: `timeout` is in **seconds**, project config is only `.pi/mcp.json` (symlink an existing `.mcp.json` to it), and legacy SSE is not supported. See [configuration.md](configuration.md#mcpjson).
 
 `config/settings.json` also overwrites your settings wholesale — read [configuration.md](configuration.md) first, because it pins `pnpm` in `npmCommand` and disables pi's built-in double-Escape action.
 
@@ -92,19 +93,23 @@ Then restart pi. Extensions are hot-reloadable in their auto-discovery directori
 
 ## Companion packages
 
-The environment assumes two packages the extensions integrate with:
+The environment assumes three packages the extensions integrate with:
 
 ```bash
-pi install npm:pi-web-access   # pi_web_search / fetch_content / source_check / get_search_content
-pi install npm:pi-subagents    # subagent / bg_wait / subagent_supervisor
+pi install npm:pi-web-access                  # pi_web_search / fetch_content / source_check / get_search_content
+pi install npm:pi-subagents                   # subagent / bg_wait / subagent_supervisor
+pi install git:github.com/jayli/superpowers   # the skills the global AGENTS.md and plan mode refer to
 ```
 
-If you copied the shipped `config/settings.json`, both are already listed in its `packages` array — running the two commands above is still the reliable way to make sure they exist on disk, since it is exactly the action that writes those entries.
+If you copied the shipped `config/settings.json`, all three are already listed in its `packages` array — running the commands above is still the reliable way to make sure they exist on disk, since it is exactly the action that writes those entries.
 
-Two extensions behave differently without them:
+`superpowers` is a **pi package** carrying an extension plus 15 skills, and pi pulls it to `~/.pi/agent/git/github.com/jayli/superpowers/`. It replaces the older manual arrangement (skills copied into `~/.agents/skills/` and found by pi's native scan), so nothing needs copying by hand.
+
+Three extensions behave differently without them:
 
 - `recap` probes `pi-subagents` over its in-process event bus to avoid summarizing a conversation that still has background subagents running. Without the package the probe fails and is treated as "no subagents".
 - `below-editor-after-statusline` exists to move `pi-subagents`' fleet status line under the statusline. Without the package there is usually nothing to move.
+- `plan-mode`'s brainstorming mutual-exclusion gate detects a `read` of a `brainstorming/SKILL.md` path. With no `superpowers` package there is no such skill, so the gate simply never fires and every `enter_plan_mode` call shows its consent dialog (fail-open by design).
 
 ## Upgrade
 

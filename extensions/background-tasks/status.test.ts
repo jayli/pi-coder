@@ -13,9 +13,12 @@ import { describe, it } from "node:test";
 
 import {
 	DOCK_ICON,
+	NOTE_GLYPH,
 	STATUS_COMMAND_MAX,
 	STATUS_KEY,
 	TERMINAL_LINGER_MS,
+	TURN_ENDED_NOTE,
+	TURN_NOTE_THRESHOLD_MS,
 	formatBackgroundStatus,
 	type BackgroundStatusTask,
 	type BackgroundStatusTheme,
@@ -184,5 +187,96 @@ describe("formatBackgroundStatus", () => {
 
 	it("exposes the reserved status key the statusline pulls out", () => {
 		assert.equal(STATUS_KEY, "background-tasks");
+	});
+});
+
+// =============================================================================
+// 结轮提示的第二行（本轮已结束，任务仍在跑）
+// =============================================================================
+
+describe("formatBackgroundStatus — 结轮提示", () => {
+	// 任务已跑 5m10s，远超默认 5s 阈值。
+	const longRunning = taskOf({ id: "bg_2", startedAt: NOW - 310_000 });
+	const settled = { settledAt: NOW - 1_000 };
+
+	it("在结轮且任务已跑满阈值时补第二行，`└` 悬在正文列", () => {
+		const line = formatBackgroundStatus(plain, [longRunning], NOW, TERMINAL_LINGER_MS, settled);
+		assert.equal(
+			line,
+			`${DOCK_ICON} bg_2 running 5m10s · npm run test --silent\n  ${NOTE_GLYPH} ${TURN_ENDED_NOTE}`,
+		);
+		// `└` 落在正文列（第一行 id 的首字符那一列）：行首两空格 + `└`。
+		assert.equal(line!.split("\n")[1]!.indexOf(NOTE_GLYPH), 2);
+	});
+
+	it("pins the glyph to U+2514 (no look-alike swap)", () => {
+		assert.equal(NOTE_GLYPH, "\u2514");
+		assert.equal([...NOTE_GLYPH].length, 1);
+	});
+
+	it("本轮进行中（settledAt === undefined）不出第二行", () => {
+		const line = formatBackgroundStatus(plain, [longRunning], NOW, TERMINAL_LINGER_MS, {
+			settledAt: undefined,
+		});
+		assert.equal(line, `${DOCK_ICON} bg_2 running 5m10s · npm run test --silent`);
+	});
+
+	it("省略 turn 参数时永不换行（向后兼容）", () => {
+		const line = formatBackgroundStatus(plain, [longRunning], NOW);
+		assert.equal(line!.includes("\n"), false);
+	});
+
+	it("任务还没跑满阈值（默认 5s）就不出第二行", () => {
+		// 4.9s：本轮刚结束、长任务才起几秒 —— 完全正常，不该被当成可能多余的。
+		const fresh = taskOf({ id: "bg_3", startedAt: NOW - 4_900 });
+		assert.equal(
+			formatBackgroundStatus(plain, [fresh], NOW, TERMINAL_LINGER_MS, settled),
+			`${DOCK_ICON} bg_3 running 4s · npm run test --silent`,
+		);
+		// 刚好到阈值就出（>= 包含边界）。
+		const atThreshold = taskOf({ id: "bg_4", startedAt: NOW - TURN_NOTE_THRESHOLD_MS });
+		assert.ok(formatBackgroundStatus(plain, [atThreshold], NOW, TERMINAL_LINGER_MS, settled)!.includes(TURN_ENDED_NOTE));
+	});
+
+	it("阈值可由 noteMs 覆盖；给 0 就是任务一起就提示", () => {
+		const fresh = taskOf({ id: "bg_3", startedAt: NOW - 100 });
+		assert.equal(
+			formatBackgroundStatus(plain, [fresh], NOW, TERMINAL_LINGER_MS, { settledAt: NOW, noteMs: 0 })!
+				.includes(TURN_ENDED_NOTE),
+			true,
+		);
+		// 调高阈值则重新变安静
+		assert.equal(
+			formatBackgroundStatus(plain, [fresh], NOW, TERMINAL_LINGER_MS, { settledAt: NOW, noteMs: 60_000 })!
+				.includes(TURN_ENDED_NOTE),
+			false,
+		);
+	});
+
+	it("终态任务不出第二行（驻留窗口里那几秒不需要这句话）", () => {
+		const done = taskOf({ id: "bg_5", status: "exited", startedAt: NOW - 310_000, endedAt: NOW - 500, exitCode: 0 });
+		const line = formatBackgroundStatus(plain, [done], NOW, TERMINAL_LINGER_MS, settled)!;
+		assert.equal(line.includes(TURN_ENDED_NOTE), false);
+	});
+
+	it("只有被选中的那条 running 任务决定第二行，而非被折叠的 (+N)", () => {
+		const tasks = [
+			// 老任务早已跑满阈值，但新任务刚起 → 选中的是新任务，不提示。
+			taskOf({ id: "bg_1", startedAt: NOW - 600_000 }),
+			taskOf({ id: "bg_2", startedAt: NOW - 1_000, command: "node --test" }),
+		];
+		const line = formatBackgroundStatus(plain, tasks, NOW, TERMINAL_LINGER_MS, settled)!;
+		assert.ok(line.includes("bg_2 running 1s (+1)"), line);
+		assert.equal(line.includes(TURN_ENDED_NOTE), false);
+	});
+
+	it("第二行按 warning 着色，`└` 单独取 muted（结构字符不吃后面文案的颜色）", () => {
+		const line = formatBackgroundStatus(painted, [longRunning], NOW, TERMINAL_LINGER_MS, settled)!;
+		const sub = line.split("\n")[1]!;
+		assert.equal(sub, `  muted(${NOTE_GLYPH}) warning(${TURN_ENDED_NOTE})`);
+	});
+
+	it("缺省阈值常量是 5s（用户 2026-09-29 定的）", () => {
+		assert.equal(TURN_NOTE_THRESHOLD_MS, 5_000);
 	});
 });

@@ -60,10 +60,19 @@ export interface ChildLike {
 
 export type SpawnFn = (file: string, args: string[], options: SpawnOptions) => ChildLike;
 
+/** 本任务挂着的隔离工作区（`index.ts` 建好后传入；registry 自己不认识 git）。 */
+export interface TaskWorktree {
+	path: string;
+	repoRoot: string;
+	baseCommit: string;
+}
+
 export interface BackgroundTask {
 	readonly id: string;
 	readonly command: string;
 	readonly cwd: string;
+	/** 有隔离时= worktree 里的路径；无隔离时与 `cwd` 相同。 */
+	readonly worktree: TaskWorktree | undefined;
 	readonly logPath: string;
 	readonly startedAt: number;
 	pid: number | undefined;
@@ -91,6 +100,8 @@ export interface StartTaskOptions {
 	cwd: string;
 	/** 日志目录，由调用方按会话算好（本模块不认识 pi 的 sessionManager）。 */
 	logDir: string;
+	/** 隔离工作区；调用方建好后传入，registry 只存不算。 */
+	worktree?: TaskWorktree;
 	env?: NodeJS.ProcessEnv;
 }
 
@@ -251,7 +262,7 @@ export function createRegistry(options: RegistryOptions = {}): Registry {
 	}
 
 	return {
-		startTask({ command, cwd, logDir, env }: StartTaskOptions): BackgroundTask {
+		startTask({ command, cwd, logDir, worktree, env }: StartTaskOptions): BackgroundTask {
 			const id = `bg_${++counter}`;
 			fs.mkdirSync(logDir, { recursive: true });
 			const logPath = path.join(logDir, `${id}.log`);
@@ -267,6 +278,7 @@ export function createRegistry(options: RegistryOptions = {}): Registry {
 				id,
 				command,
 				cwd,
+				worktree,
 				logPath,
 				startedAt: now(),
 				pid: undefined,

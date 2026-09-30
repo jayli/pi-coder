@@ -96,7 +96,7 @@ test("超时后自愈：交还原渲染并清掉接管记录", () => {
 	assert.deepEqual(footer.render(9), ["pi-default#9", "stats#9"]);
 });
 
-test("默认兜底时长能盖住慢启动（`mcp` 握手 20s 上限），且是个正数", () => {
+test("默认兜底时长能盖住慢启动（`mcp` 连 server 的那段等待），且是个正数", () => {
 	assert.ok(FOOTER_SUPPRESS_MAX_AGE_MS >= 25_000);
 });
 

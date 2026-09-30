@@ -88,7 +88,7 @@
  * `.pi/plans/`（被 .gitignore 排除 —— 计划是过程产物）。除此之外工作区不会多出任何东西。
  */
 
-import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { matchesKey, wrapTextWithAnsi } from "@earendil-works/pi-tui";
@@ -122,7 +122,16 @@ import {
 } from "./plan-text.ts";
 import { buildPlanDocPath } from "./plan-doc.ts";
 import { brainstormingLoadedInRun, messagesFromBranch } from "./brainstorm.ts";
-import { STATUS_KEY, formatPlanStatus } from "./render.ts";
+import { buildApprovalTitle, buildConsentTitle } from "./consent.ts";
+import {
+	STATUS_KEY,
+	TREE_PIPE,
+	classifyPlanToolOutcome,
+	formatPlanStatus,
+	planResultTreePrefixes,
+	planToolTitleParts,
+	type PlanToolOutcome,
+} from "./render.ts";
 import { THINKING_FALLBACK_KEY, keybindingsPath, rebindThinkingKey } from "./keybinding.ts";
 
 /** 关掉整个扩展。 */
@@ -226,6 +235,156 @@ function normalizeDocMode(value: unknown): PlanDocMode | undefined {
 /** 落盘条目里的 pending：2026-09-24 之前是步骤数组，现在只认字符串（旧计划丢弃）。 */
 function normalizePending(value: unknown): string | undefined {
 	return typeof value === "string" && value.trim() !== "" ? value : undefined;
+}
+
+// =============================================================================
+// 工具调用块的渲染（enter_plan_mode / exit_plan_mode 共用）
+// =============================================================================
+
+/**
+ * 正文树的前导缩进与树形 gutter 的几何（用户 2026-09-29 第三轮定）：
+ *
+ * ```
+ * • enter_plan_mode ✔
+ *   │ 正文……
+ * ```
+ *
+ * 标题行从状态圆点起**顶格**（圆点是这一块的状态灯，贴着左边界块与块才分得开）；
+ * 正文树前面挂 **2 列**缩进（`BODY_INDENT`），让 `│` / `└` 正好落在 `enter_plan_mode`
+ * 的第三个字母 `e` 正下方（列 2），正文从列 4 起。早期版本只挂 1 列（`│` 在列 1），
+ * 用户看实际效果后要求再加一格 —— 树与标题错开两列，层次比错一列更清楚。
+ */
+const BODY_INDENT = "  ";
+const GUTTER_WIDTH = 2;
+
+/**
+ * 行级渲染状态（pi 的 `rendererState`，每个工具行一份、renderCall 与 renderResult 共享）。
+ *
+ * 它存在的唯一理由：标题行的结局标记（✔ / ✘）取决于 `result.details`，而
+ *   ① `getRenderContext()` **不暴露 result 本体**（只有 isPartial / isError / state 等），
+ *   ② 同一次 `updateDisplay()` 里 callRenderer **先于** resultRenderer 执行。
+ * 所以 renderResult 把分类写进 state，renderCall 返回一个**在 `render(width)` 时才读
+ * state 的懒组件** —— 屏幕真正绘制发生在 updateDisplay() 之后，那时已经写好了。
+ * 懒组件（只需 `render` / `invalidate`）是 bash-command-collapse 的既有做法。
+ */
+interface PlanToolRenderState {
+	outcome?: PlanToolOutcome;
+}
+
+/** renderCall / renderResult 拿到的 context 里、本扩展真正会读的那几个字段。 */
+interface PlanToolRenderContext {
+	state: PlanToolRenderState;
+	isPartial: boolean;
+	isError: boolean;
+}
+
+/** 结果块里的文本正文（其余块类型这两个工具不会产生）。 */
+interface PlanToolResultLike {
+	content?: ReadonlyArray<{ type?: string; text?: string }>;
+	details?: unknown;
+}
+
+/** 把结果里的所有 text 块拼成全文（按块顺序，块之间换行）。 */
+function planResultText(result: PlanToolResultLike): string {
+	const blocks = Array.isArray(result.content) ? result.content : [];
+	return blocks
+		.filter((block) => block?.type === "text" && typeof block.text === "string")
+		.map((block) => block.text as string)
+		.join("\n");
+}
+
+/**
+ * 两个工具共用的渲染器：`renderShell: "self"` + 树形标题/正文。
+ *
+ * ## 为什么必须 self 壳
+ *
+ * 默认壳是 `contentBox = new Box(1, 1, bgFn)`（tool-execution.js）：整块套
+ * `toolPendingBg` / `toolSuccessBg` / `toolErrorBg` 底色，`paddingY = 1` 给上下各一行
+ * 空行，构造时那个 `Spacer(1)` 再给上方一行。self 模式下 `render()` 绕过
+ * `super.render()`（Spacer 不画）、容器是纯 `Container`（`instanceof Box` 为 false，
+ * bgFn 套不上去），于是**没有底色、下方没有空行**；上方只剩 pi 在 self 分支里写死的
+ * 那一行 `lines.push("")` —— 去不掉，bash / simple-task / tool-diff 块同样如此。
+ *
+ * ## 形态（用户 2026-09-29 定）
+ *
+ * ```
+ * • enter_plan_mode ✔
+ *   │ 已进入 plan mode（只读）。原因：跨 gateway/config.yaml 与 pi、
+ *   └ opencode、codex 三端配置的行为改动。
+ * ```
+ *
+ * 标题行 = 状态圆点 + 加粗工具原名 + 结局标记（四态配色见 `planToolTitleParts`），
+ * **从圆点起顶格**；正文是**结果全文**（用户选的：给模型的指令也一并显示），前面挂
+ * `BODY_INDENT` 那 2 列再折行挂树（于是 `│` 落在工具名首字母正下方）——
+ * 除末行外 `│ `，**末行 `└ `**（与 bash 块「`└` 只落在第一个实质输出行」刻意分叉，
+ * 见 render.ts 文件头）。结构符走 `muted` 槽且**自成一段 SGR**，不让正文色透上来。
+ *
+ * 正文走 `text` 槽（用户 2026-09-29 定）而不是 `toolOutput`：计划正文是要用户逐字读、
+ * 并据此拍板的内容，不该跟 read / grep 的输出正文一样被压暗。`text` 在本机三套皮肤里
+ * 都指向 `fg`（pi-coder-1337 / ayu 是 `"text": "fg"`，catppuccin 直接给 `#CDD6F4`），
+ * 所以「用 fg 颜色」= 用 `text` 槽，不写死色值 —— 换皮肤时正文跟着皮肤的主前景色走。
+ */
+function planToolRenderers(toolName: string) {
+	return {
+		renderShell: "self" as const,
+		renderCall(_args: unknown, theme: Theme, context: PlanToolRenderContext) {
+			// state 是跨帧同一个对象，所以 render(width) 时读到的是 renderResult 刚写的分类；
+			// 兜底（state 里还没有 outcome）只发生在「结果没到过」的行：执行中按 isPartial
+			// 判 pending，其余按 isError 判 error / declined。
+			const state = context.state;
+			return {
+				render(width: number): string[] {
+					const outcome: PlanToolOutcome =
+						state?.outcome ?? (context.isPartial ? "pending" : context.isError ? "error" : "declined");
+					const parts = planToolTitleParts(outcome);
+					let title = `${theme.fg(parts.dotSlot, "\u2022")} ${theme.fg("toolTitle", theme.bold(toolName))}`;
+					if (parts.mark !== "" && parts.markSlot !== undefined) {
+						title += ` ${theme.fg(parts.markSlot, parts.mark)}`;
+					}
+					// 标题行顶格（不挂 BODY_INDENT），所以折行预算就是整个宽度
+					return wrapTextWithAnsi(title, Math.max(1, width || 80));
+				},
+				invalidate() {},
+			};
+		},
+		renderResult(result: PlanToolResultLike, _options: unknown, theme: Theme, context: PlanToolRenderContext) {
+			// isError 必须从 **context** 读：pi 传给 resultRenderer 的对象是
+			// `{ content, details }`，**没有 isError 字段**（它只在 getRenderContext() 里）。
+			if (context.state) {
+				context.state.outcome = classifyPlanToolOutcome(context.isError === true, result?.details);
+			}
+			const sourceLines = planResultText(result ?? {}).split("\n");
+			// 结果是静态的，按 width 缓存排版（同 tool-diff 的 DiffCard）
+			const cache = new Map<number, string[]>();
+			return {
+				render(width: number): string[] {
+					const hit = cache.get(width);
+					if (hit !== undefined) return hit;
+					const bodyWidth = Math.max(1, (width || 80) - BODY_INDENT.length - GUTTER_WIDTH);
+					const rows: string[] = [];
+					for (const line of sourceLines) {
+						// 空行也占一行（wrapTextWithAnsi("") → [""]）：段落间距是可读性的一部分
+						rows.push(...wrapTextWithAnsi(line, bodyWidth));
+					}
+					if (rows.every((row) => row.trim() === "")) {
+						cache.set(width, []);
+						return [];
+					}
+					// 前缀按**折行之后**的视觉行数算：折行碎片也算独立行，否则一个折成三行的
+					// 长句会在第一片就画上 `└`，看着像树提前结束了。
+					const prefixes = planResultTreePrefixes(rows.length);
+					const lines = rows.map(
+						(row, index) => BODY_INDENT + theme.fg("muted", prefixes[index] ?? TREE_PIPE) + theme.fg("text", row),
+					);
+					cache.set(width, lines);
+					return lines;
+				},
+				invalidate() {
+					cache.clear();
+				},
+			};
+		},
+	};
 }
 
 export default function planMode(pi: ExtensionAPI) {
@@ -559,6 +718,7 @@ export default function planMode(pi: ExtensionAPI) {
 			name: ENTER_TOOL,
 			label: "Enter Plan Mode",
 			description: ENTER_TOOL_DESCRIPTION,
+			...planToolRenderers(ENTER_TOOL),
 			parameters: Type.Object({
 				reason: Type.Optional(Type.String({ description: "为什么这个任务需要先规划（一句话）" })),
 			}),
@@ -588,10 +748,16 @@ export default function planMode(pi: ExtensionAPI) {
 				// 那已经是用户自己的决定，再问一次是纯打扰。无 UI（pi -p）没有人会被打扰，
 				// 也不弹 —— 保持既有 headless 行为。
 				if (ctx.hasUI && !CONSENT_DISABLED) {
+					// 正文（理由 + 两条路线说明）走 `text` 槽，标题与高亮选项仍归 pi 的 accent ——
+					// `ui.select` 把整个 title 包成一段 accent，所以正文必须自己在 title 里上色
+					// （内层显式颜色覆盖外层）。理由见 consent.ts。
 					const choice = await ctx.ui.select(
-						`模型请求进入 plan mode（只读探索）。${reason ? `\n\n它的理由：${reason}` : ""}\n\n` +
-							`${CONSENT_PLAN}：先只读探索、出方案，你批准后才动手\n` +
-							`${CONSENT_IMPL}：跳过规划，现在就按你的指令直接改`,
+						buildConsentTitle(ctx.ui.theme, {
+							title: "模型请求进入 plan mode（只读探索）。",
+							reason,
+							planLine: `${CONSENT_PLAN}：先只读探索、出方案，你批准后才动手`,
+							implLine: `${CONSENT_IMPL}：跳过规划，现在就按你的指令直接改`,
+						}),
 						[CONSENT_PLAN, CONSENT_IMPL],
 					);
 					// esc（undefined）当作否决，与 CC 的 “must consent” 一致 ——
@@ -627,6 +793,7 @@ export default function planMode(pi: ExtensionAPI) {
 	pi.registerTool({
 		name: EXIT_TOOL,
 		label: "Submit Plan",
+		...planToolRenderers(EXIT_TOOL),
 		description:
 			"在 plan mode 里把方案提交给用户审批。调用前不要试图改动任何文件。提交后用户决定批准（进入执行）还是打回（继续规划）。",
 		parameters: Type.Object({
@@ -689,7 +856,11 @@ export default function planMode(pi: ExtensionAPI) {
 			// 非交互运行（`pi -p`）没有对话框可弹：自动按推荐路线（写文档并实施）走，
 			// 比死锁好 —— 模型已经规划完，卡在这里只会让整个运行白跑。
 			const choice = ctx.hasUI
-				? await ctx.ui.select(`批准这个计划？\n\n${dialogPlan}`, [CHOICE_EXECUTE, CHOICE_DOC_ONLY, CHOICE_REJECT])
+				? await ctx.ui.select(buildApprovalTitle(ctx.ui.theme, dialogPlan), [
+						CHOICE_EXECUTE,
+						CHOICE_DOC_ONLY,
+						CHOICE_REJECT,
+					])
 				: CHOICE_EXECUTE;
 
 			if (choice === undefined || choice === CHOICE_REJECT) {

@@ -188,6 +188,13 @@ export default function (pi: ExtensionAPI) {
 		parameters: AskParamsSchema,
 		// 阻塞式 UI：不能与别的工具调用并行执行，否则同一回合里两个弹窗抢输入焦点。
 		executionMode: "sequential",
+		// `renderShell: "self"`：让 pi 不再给整块套 `contentBox`（`Box(1, 1, bgFn)`），于是
+		//   ① **没有底色**（pending 的 `toolPendingBg` / 成功的 `toolSuccessBg` / 失败的
+		//      `toolErrorBg` 都不画 —— selfRenderContainer 是纯 Container，bgFn 套不上去，
+		//      扩展自己也不画），
+		//   ② **没有上下边界空行**（都是那个 Box 的 paddingY 画的）。
+		// 与 simple-task / bash / read 块同一套观感（用户 2026-09-26 定）。
+		renderShell: "self",
 
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
 			// 归一化跑在校验之前：保留 label 与重复 label 的比较必须用用户真正看到的文本。
@@ -198,6 +205,8 @@ export default function (pi: ExtensionAPI) {
 			return runQuestionnaire(ctx, typed);
 		},
 
+		// 两个 renderer 返回的 Text 都带 `paddingX = 1`：补回默认壳 `Box(1, 1)` 原本提供的
+		// 那一列左边距（每行前置一个空格、不顶格）；`paddingY = 0` 保持上下不留空行。
 		renderCall(args, theme) {
 			const questions = (args as Partial<AskParams>)?.questions;
 			const qs = Array.isArray(questions) ? questions : [];
@@ -211,17 +220,17 @@ export default function (pi: ExtensionAPI) {
 				const multi = q?.multiSelect ? " (multi)" : "";
 				text += `\n${theme.fg("dim", `  ${head}${labels.join(" · ")}${multi}`)}`;
 			}
-			return new Text(text, 0, 0);
+			return new Text(text, 1, 0);
 		},
 
 		renderResult(result, _options, theme, context) {
 			const details = result.details as AskResult | undefined;
 			if (!details) {
 				const first = result.content[0];
-				return new Text(first?.type === "text" ? first.text : "", 0, 0);
+				return new Text(first?.type === "text" ? first.text : "", 1, 0);
 			}
-			if (details.error) return new Text(theme.fg("error", `✗ ${details.error}`), 0, 0);
-			if (details.cancelled) return new Text(theme.fg("warning", "Cancelled"), 0, 0);
+			if (details.error) return new Text(theme.fg("error", `✗ ${details.error}`), 1, 0);
+			if (details.cancelled) return new Text(theme.fg("warning", "Cancelled"), 1, 0);
 
 			const questions = (context.args as Partial<AskParams>)?.questions;
 			const qs = Array.isArray(questions) ? questions : [];
@@ -230,7 +239,7 @@ export default function (pi: ExtensionAPI) {
 				const answer = a.kind === "custom" ? `✎ ${a.answer ?? ""}` : formatAnswerScalar(a);
 				return `${theme.fg("success", "✓")} ${theme.fg("muted", `${header}: `)}${theme.fg("text", answer)}`;
 			});
-			return new Text(lines.join("\n") || theme.fg("dim", "(no answers)"), 0, 0);
+			return new Text(lines.join("\n") || theme.fg("dim", "(no answers)"), 1, 0);
 		},
 	});
 

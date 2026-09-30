@@ -1,15 +1,23 @@
 /**
- * loaded-sections.ts — 启动时把 `[Context]` / `[Prompts]` / `[Themes]` 三段从「已加载资源」清单里剪掉
+ * loaded-sections.ts — 启动时把「已加载资源」清单整份剪掉（`[Context]` / `[Skills]` / `[Prompts]` / `[Extensions]` / `[Themes]`）
  *
  * pi 启动后会在 header 下面打一份「已加载资源」清单（`interactive-mode.js` 的 `showLoadedResources`，
  * 每段 = 一个 `ExpandableText` 标题行 + 一行内容 + 一个 `Spacer(1)`）：
  * `[Context]`（AGENTS.md 等上下文文件）、`[Skills]`、`[Prompts]`（斜杠模板）、`[Extensions]`、`[Themes]`。
- * 其中 `[Context]` / `[Prompts]` / `[Themes]` 对使用者没有信息量（前两个每次启动都一样、主题文件也没人会去数），
- * 留着只是白占屏幕，所以这里在**它们进容器之前**就丢掉；`[Skills]` / `[Extensions]` 以及
- * `[Skill conflicts]` 之类的诊断段全部原样保留。
+ * 这五段对使用者都没有信息量（每次启动都一样、主题文件也没人会去数），留着只是白占屏幕，
+ * 所以这里在**它们进容器之前**就丢掉（用户 2026-09-29 定：只留 `[Skills]`；2026-09-30 改定：
+ * `[Skills]` 也不要 —— 剪完只剩它一段孤零零地挂在顶上反而难看）。
  *
- * 为什么不用 pi 自己的 `quietStartup`：那个开关把**整份清单**（含 Skills / Extensions / 诊断）一起关掉，
- * 这里要的只是剪掉三段。清单是 pi 在 `bindCurrentSessionExtensions()` 里 `session_start` **之后**才填的
+ * **诊断段不剪**：`[Skill conflicts]` / `[Prompt conflicts]` / `[Extension issues]` / `[Theme conflicts]`
+ * 不在名单里，它们才是这份清单剪完之后唯一还可能出现的东西（也正是真正需要看见的东西）。
+ *
+ * 剪完最后一段时连同 pi 在 `[Context]` 前面额外插的那个 `Spacer(1)` 一起收掉（header 容器自己
+ * 已经带一个尾部空行），否则清单位置会剩一行无主的留白。
+ *
+ * 为什么不用 pi 自己的 `quietStartup`：那个开关除了清单还会一并关掉内置 header 与模型 scope 提示行
+ * （`interactive-mode.js` 的 `init()` 里三处都读它），而本扩展的 logo header 正是接在内置 header 的位置上；
+ * 这里要的只是剪清单，所以自己在容器层动手。
+ * 清单是 pi 在 `bindCurrentSessionExtensions()` 里 `session_start` **之后**才填的
  * （`showLoadedResources` 紧跟 `await session.bindExtensions(...)`），所以扩展在 `session_start` 里
  * 接管容器的 `addChild` 就赶得上：被隐藏的段一次都不会进容器，也就不存在「先画出来再抹掉」的闪帧。
  *
@@ -18,15 +26,15 @@
  * 构造函数），所以从**已挂载的 header 组件**反查出 header 容器（`findRenderContainer`），再往上找它的
  * 父容器、取紧随其后的那个兄弟容器即可。认不出就**什么都不做**（清单照旧显示），不猜下标、不抛错。
  *
- * 判定与剪枝都是内容驱动的，跟容器认的是谁无关：只有「渲染出来的第一行恰好是 `[Context]` / `[Prompts]` /
- * `[Themes]`」的组件才会被丢，所以万一 pi 挪了容器位置、我们摸到了别的容器（例如 chatContainer），
+ * 判定与剪枝都是内容驱动的，跟容器认的是谁无关：只有「渲染出来的第一行恰好是名单里某个 `[Name]`」
+ * 的组件才会被丢，所以万一 pi 挪了容器位置、我们摸到了别的容器（例如 chatContainer），
  * 最多是白接管一次，不会误删别的东西。任何一步抛错都当作「不是要剪的段」，一律放行。
  *
  * 全部是纯逻辑（容器只要求 `children` 数组 + `addChild`），不 import pi / pi-tui，`node --test` 直接跑。
  */
 
-/** 要剪掉的段名（与 pi 的 `addLoadedSection("Context"…)` 逐字一致，大小写敏感）。 */
-export const HIDDEN_SECTION_NAMES: readonly string[] = ["Context", "Prompts", "Themes"];
+/** 要剪掉的段名（与 pi 的 `addLoadedSection("Context"…)` 逐字一致，大小写敏感）。诊断段不在其中。 */
+export const HIDDEN_SECTION_NAMES: readonly string[] = ["Context", "Skills", "Prompts", "Extensions", "Themes"];
 
 /** 接管记录挂在容器上的符号键（全局符号注册表：`/reload` 后的新实例能看到并解除旧实例的接管）。 */
 export const SECTION_PRUNER_KEY: symbol = Symbol.for("litellm-any.pi-startup-logo.sectionPruner");
@@ -98,6 +106,16 @@ export function isBlankLineComponent(component: unknown, width: number = DETECT_
 }
 
 /**
+ * 容器里是不是「只剩一个空行」——那就是 pi 在 `[Context]` 前面插的那个额外 `Spacer(1)`。
+ *
+ * 剪掉第一段时顺手把它也收掉，否则整份清单剪完会在原位置剩一行无主的留白。只认「恰好一个空行」
+ * 这个形状：保留段（诊断段）自己的分隔空行旁边还站着它的主人，不会被误删。
+ */
+function isLoneLeadingBlank(container: PrunableContainer, width: number): boolean {
+	return container.children.length === 1 && isBlankLineComponent(container.children[0], width);
+}
+
+/**
  * 把 `container` 里现有的隐藏段（连同它后面那个分隔空行）直接删掉，返回删掉的段数。
  *
  * 正常路径用不到它（`addChild` 接管在前面就拦住了），留着是为了「接管装晚了」的情况 ——
@@ -122,6 +140,14 @@ export function pruneHiddenSections(
 		} catch {
 			// 数组只读之类：能删多少算多少，不再往下试。
 			break;
+		}
+	}
+	// 剪过东西之后如果只剩那个前置空行，一并收掉。
+	if (removed > 0 && isLoneLeadingBlank(target, width)) {
+		try {
+			children.splice(0, 1);
+		} catch {
+			// 同上：只读数组就算了。
 		}
 	}
 	return removed;
@@ -195,6 +221,8 @@ export function installHiddenSectionPruner(options: {
 			if (isHiddenSection(child, names, width)) {
 				// 段后面紧跟的就是它自己的 Spacer(1)，一起收掉，免得留下多余空行。
 				dropNextBlank = true;
+				// 剪掉的是第一段时，容器里只剩 pi 在 `[Context]` 前插的那个空行，一并收掉。
+				if (isLoneLeadingBlank(container, width)) container.children.splice(0, 1);
 				return;
 			}
 			if (dropNextBlank) {
