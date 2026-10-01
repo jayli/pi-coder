@@ -31,7 +31,7 @@ const EXTENSION_PATH = path.join(path.dirname(fileURLToPath(import.meta.url)), "
 const SKIP = "找不到本机 pi 的库入口（装过 pi 才有）";
 const ESC = "\u001b";
 
-const BAR = "\u258e";
+const BAR = "\u258f";
 /** 自造皮肤的 `accent`（`#95c4ce` = 本机 `pi-coder-summer-night` 的 sky）—— 默认取色槽。 */
 const ACCENT = "#95c4ce";
 const ACCENT_FG = "\u001b[38;2;149;196;206m";
@@ -234,7 +234,7 @@ const plainText = (line: string): string =>
 	line.replace(/\u001b\][^\u0007]*\u0007/g, "").replace(/\u001b\[[0-9;:?]*[a-zA-Z]/g, "");
 
 /**
- * 可见列数：剥掉零宽序列后按列数算（fixture 里只有 ASCII、汉字与 `▎`；汉字 2 列，其余 1 列）。
+ * 可见列数：剥掉零宽序列后按列数算（fixture 里只有 ASCII、汉字与 `▏`；汉字 2 列，其余 1 列）。
  * 独立实现一份是为了验证 pi 自己算出来的宽度与我们一致 —— 它是会不会撞上 pi-tui 超宽抛错的判据。
  */
 const visibleWidth = (line: string): number => {

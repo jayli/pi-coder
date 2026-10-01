@@ -60,7 +60,7 @@ Without `pi-web-access` and `pi-subagents` two more degrade instead of failing: 
 | [`read-path-collapse.ts`](extensions/read-path-collapse.ts) | Overrides `read`'s title row: the same `• ` dot and no-background shell as the bash block, results indented to the `Read` column, and long paths on one line with the ellipsis at the front and the file name kept whole. |
 | [`tool-diff.ts`](extensions/tool-diff.ts) | Overrides `edit`/`write`: Claude Code style full-line diff backgrounds, line-number gutter, inline and syntax highlighting. |
 | [`thinking-collapse.ts`](extensions/thinking-collapse.ts) | Thinking blocks render as one continuous horizontally scrolling line labelled `Think: `. |
-| [`user-message-bar/`](extensions/user-message-bar/) | A `▎` (U+258E) plus one space at the head of every line of a user message box, including the blank padding lines, in the theme's `accent` color. The glyph replaces the one column of left padding and the extra indent is taken back out of the trailing padding, so background, width and wrap positions stay as they were. |
+| [`user-message-bar/`](extensions/user-message-bar/) | A `▏` (U+258F) plus one space at the head of every line of a user message box, including the blank padding lines, in the theme's `accent` color. The glyph replaces the one column of left padding and the extra indent is taken back out of the trailing padding, so background, width and wrap positions stay as they were. |
 | [`prompt-editor.ts`](extensions/prompt-editor.ts) | A `❯ ` gutter in the editor, Claude Code style `!` bash mode, plus a blank line between the autocomplete list and the statusline. |
 | [`fenceless-code-block/`](extensions/fenceless-code-block/) | Markdown code blocks lose their fences (syntax colors kept, no background added). |
 | [`codemode-tree/`](extensions/codemode-tree/) | Renders the built-in `codemode` tool block as the same tree the bash and read blocks use: `• codemode` → syntax-highlighted script on `│ ` → result tree with one `└ `. The dot is three-state (white running, green success, red failure) and is the only outcome lamp now that the background is gone. It gets codemode's execution logic by running pi's own `createCodemodeExtension()` against a `Proxy` that captures the registered definition, so the schema stays the same object reference pi's MCP extension checks. Needs pi **0.99.1** and the shipped `settings.json`'s `-builtin:codemode` + `+codemode` pair. `PI_CODEMODE_TREE=off` removes the tool entirely rather than restoring the built-in. |
@@ -162,13 +162,13 @@ cp "$PKG/themes/"*.json             ~/.pi/agent/themes/            # optional: a
 | [docs/extensions.md](docs/extensions.md) | Reference for all 30 extensions: commands, switches, caveats, storage. |
 | [docs/themes.md](docs/themes.md) | Theme files, the custom tokens, and the rules that make them load. |
 | [Palette reference](https://raw.githack.com/jayli/pi-coder/main/assets/pi-coder-palettes.html) | **Chinese.** Every variable and slot assignment for the three themes, with a terminal preview that switches between them. |
-| [docs/development.md](docs/development.md) | Running the 1282 unit tests, verifying against a real pi, publishing. |
+| [docs/development.md](docs/development.md) | Running the 1334 unit tests, verifying against a real pi, publishing. |
 | [docs/handbook.zh.md](docs/handbook.zh.md) | **Chinese.** The original handbook this package was extracted from: the author's machine, gateway setup, and the full rationale behind every design decision. |
 
 ## Development
 
 ```bash
-npm test        # node --test, 1282 tests
+npm test        # node --test, 1334 tests
 ```
 
 The pure-logic modules are deliberately free of `@earendil-works/pi-*` imports so they run under plain `node --test`; see [docs/development.md](docs/development.md) for the layout rules, the tmux verification procedure and the traps this codebase documents.

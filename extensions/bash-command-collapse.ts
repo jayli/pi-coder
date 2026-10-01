@@ -369,6 +369,7 @@ import {
 	classifyOutsidePaths,
 	extractDeniedPaths,
 	isSandboxEnabled,
+	looksLikeDeletionCommand,
 	looksLikeSandboxDenial,
 	maskedDenialPaths,
 	memoryScopesFor,
@@ -1555,7 +1556,12 @@ export default function (pi: ExtensionAPI) {
 	function annotateMaskedDenial<T extends { content?: Array<{ type: string; text?: string }> }>(
 		result: T,
 		boundary: WriteBoundary,
+		command: string,
 	): T {
+		// 前置闸：命令里根本没出现删除动作，就不可能有被掩盖的删除。
+		// `maskedDenialPaths` 只按字节 + “路径在磁盘上”判定，而 `echo "rm: /p: Operation
+		// not permitted"` 这种纯文本输出会同时满足两条（详情见 `looksLikeDeletionCommand`）。
+		if (!looksLikeDeletionCommand(command)) return result;
 		const text = (result.content ?? [])
 			.filter((c) => c.type === "text")
 			.map((c) => c.text ?? "")
@@ -1702,18 +1708,50 @@ export default function (pi: ExtensionAPI) {
 			const extraRoots = [...allowlist().roots(), ...sessionScopes.roots()];
 			const wrapped = wrapWithSandbox(command, buildSeatbeltProfile(boundary, extraRoots), sandboxShellPath);
 
+			// ## 沙箱拒绝的两条投递路径（pi 0.99.1 起两条都要接）
+			//
+			// 0.87 时代内置 bash 非零退出必 `throw`，所以「抽被拦路径 → 按目录弹框 → 加宽
+			// profile 重跑」整段只写在 `catch` 里就够了。0.99.1 起内置 bash 改成
+			// `return { isError: true }`（`dist/core/tools/bash.js` 的 `exitCode !== 0` 分支），
+			// 沙箱的 EPERM 于是走**正常 return**，`catch` 永远进不去 —— 整条升级链路静默
+			// 失效：边界外删除在交互会话里也无法授权，只剩下 `/sandbox-boundary allow`、
+			// `PI_SANDBOX=off` 与 shift+tab dangerous 三个出口。
+			//
+			// 所以这里两条都接：`isError` 的 return（新语义）与 `throw`（旧语义、以及
+			// abort / timeout 这类真的会抛的路径）。取到的正文都当作 `denialMessage`。
+			const runWrapped = async (cmd: string) => {
+				const result = await base.execute(toolCallId, { ...nextParams, command: cmd }, signal, runOnUpdate, ctx);
+				if (result && (result as { isError?: boolean }).isError === true) {
+					const message = (result.content ?? [])
+						.filter((c: { type: string }) => c.type === "text")
+						.map((c: { text?: string }) => c.text ?? "")
+						.join("\n");
+					return { kind: "failed" as const, message, result };
+				}
+				return { kind: "ok" as const, result };
+			};
+
 			let denialMessage: string | undefined;
+			let failureResult: unknown;
 			try {
-				const result = await base.execute(toolCallId, { ...nextParams, command: wrapped }, signal, runOnUpdate, ctx);
-				return annotateMaskedDenial(result, boundary);
+				const outcome = await runWrapped(wrapped);
+				if (outcome.kind === "ok") return annotateMaskedDenial(outcome.result, boundary, command);
+				denialMessage = outcome.message;
+				failureResult = outcome.result;
 			} catch (err) {
-				// 内置 bash 在非零退出时 throw，输出正文就在 message 里 —— 那正是判定
-				// "是不是沙箱拦的" 的地方。只认 EPERM / Operation not permitted：
-				// `Permission denied` 是 EACCES（文件权限位），不是沙箱，拿它当升级信号
-				// 会把"这文件本来就没权限"误报成"沙箱拦的"。
+				// 只认 EPERM / Operation not permitted：`Permission denied` 是 EACCES
+				// （文件权限位），不是沙箱，拿它当升级信号会把"这文件本来就没权限"
+				// 误报成"沙箱拦的"。
 				const message = err instanceof Error ? err.message : String(err);
 				if (!looksLikeSandboxDenial(message)) throw err;
 				denialMessage = message;
+			}
+
+			// 命令失败但不像沙箱拒绝（普通非零退出）→ 原样把内置结果交回去（连 details /
+			// structuredContent 一起，不能自己造一个残缺的结果，否则渲染预览与 codemode
+			// 的 structuredContent 都会丢），不做任何授权动作。
+			if (!looksLikeSandboxDenial(denialMessage ?? "")) {
+				return failureResult as Awaited<ReturnType<typeof base.execute>>;
 			}
 
 			// ---- 被沙箱拦下了：从失败输出里抽被拦路径，按目录走两层授权 ----
@@ -1765,8 +1803,16 @@ export default function (pi: ExtensionAPI) {
 				const retryRoots = [...allowlist().roots(), ...sessionScopes.roots()];
 				const retry = wrapWithSandbox(command, buildSeatbeltProfile(boundary, retryRoots), sandboxShellPath);
 				try {
-					const result = await base.execute(toolCallId, { ...nextParams, command: retry }, signal, runOnUpdate, ctx);
-					return annotateMaskedDenial(result, boundary);
+					const outcome = await runWrapped(retry);
+					if (outcome.kind === "ok") return annotateMaskedDenial(outcome.result, boundary, command);
+					const message = outcome.message;
+					if (looksLikeSandboxDenial(message)) {
+						throw new Error(
+							`${message}\n\n[沙箱] 已按白名单加宽仍被拒绝，可能是路径识别有误。` +
+								`可用 /sandbox-boundary allow <目录> 手动授权后重试。`,
+						);
+					}
+					return outcome.result as Awaited<ReturnType<typeof base.execute>>;
 				} catch (err) {
 					const message = err instanceof Error ? err.message : String(err);
 					if (looksLikeSandboxDenial(message)) {
@@ -1880,8 +1926,16 @@ export default function (pi: ExtensionAPI) {
 			const widenedRoots = [...allowlist().roots(), ...sessionScopes.roots(), ...onceRoots];
 			const widened = wrapWithSandbox(command, buildSeatbeltProfile(boundary, widenedRoots), sandboxShellPath);
 			try {
-				const result = await base.execute(toolCallId, { ...nextParams, command: widened }, signal, runOnUpdate, ctx);
-				return annotateMaskedDenial(result, boundary);
+				const outcome = await runWrapped(widened);
+				if (outcome.kind === "ok") return annotateMaskedDenial(outcome.result, boundary, command);
+				const message = outcome.message;
+				if (looksLikeSandboxDenial(message)) {
+					throw new Error(
+						`${message}\n\n[沙箱] 已按批准的范围加宽仍被拒绝，可能还有别的路径被拦或路径识别有误。` +
+							`可用 /sandbox-boundary allow <目录> 手动授权后重试。`,
+					);
+				}
+				return outcome.result as Awaited<ReturnType<typeof base.execute>>;
 			} catch (err) {
 				const message = err instanceof Error ? err.message : String(err);
 				if (looksLikeSandboxDenial(message)) {

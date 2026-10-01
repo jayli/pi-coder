@@ -495,7 +495,6 @@ describe("composeFooterLines — background-task dock row", () => {
 	});
 
 	it("把多行 dock 值拆成多行（结轮提示的第二行）", () => {
-		// 用发布侧真格式：同 DOCK 形状的任务（bg_1 / 12s，已超 5s 阈值），本轮已结束。
 		const multi = formatBackgroundStatus(
 			{ fg: (_slot, text) => text },
 			[

@@ -4,11 +4,11 @@
  * 用户消息框本来就是 `Box(paddingX = outputPad, paddingY = 1)` + `userMessageBg` 底色，
  * 上下各一行空白内边距。本扩展给**每一行**（含上下那两条空白行）行首加一条竖线，正文再空一格：
  *
- *     ▎
- *     ▎ 正文正文
- *     ▎
+ *     ▏
+ *     ▏ 正文正文
+ *     ▏
  *
- * 竖线占的正是**原本就存在的那一格左内边距**：把行首第一格空格换成 `▎`；正文前多空的那一格
+ * 竖线占的正是**原本就存在的那一格左内边距**：把行首第一格空格换成 `▏`；正文前多空的那一格
  * （`BAR_INDENT`）则从**行尾补白**里等量吃掉，于是底色、行宽、正文折行位置全都与改之前一模一样。
  * 一格都不能靠「加一格等终端截断」省事 —— pi-tui 的主屏渲染器发现任何一行超过终端宽度就
  * **直接抛错**（`tui-main-screen.js` 先把整屏 dump 进 `pi-tui-crash.log`，再 throw
@@ -39,8 +39,8 @@
  * 本模块不 import pi / pi-tui：取色源与组件类都由调用方注入，`node --test` 能直跑。
  */
 
-/** 竖线字形：`▎`（U+258E）。 */
-export const BAR_GLYPH = "\u258E";
+/** 竖线字形：`▏`（U+258F）。 */
+export const BAR_GLYPH = "\u258F";
 
 /** 竖线与正文之间空出的半角格数（正文因此比行首竖线缩进两格）。 */
 export const BAR_INDENT = 1;
@@ -182,7 +182,7 @@ export interface UserMessageBarOptions {
 	theme: () => ThemeColorSource | undefined;
 	/** 取色槽位名，默认 `accent`（皮肤的强调色）。 */
 	colorName?: string;
-	/** 字形，默认 `▎`（U+258E）。 */
+	/** 字形，默认 `▏`（U+258F）。 */
 	glyph?: string;
 }
 

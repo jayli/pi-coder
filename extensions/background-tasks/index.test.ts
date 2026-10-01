@@ -1167,7 +1167,7 @@ test("dock：弹窗期间连事件驱动的那一下也不发布（终态通知�
 	await h.shutdown();
 });
 
-// ── 结轮提示（本轮已结束，任务仍在跑）────────────────────────────────────
+// ── 结轮提示（本轮已结束 + 任务仍在跑）────────────────────────────────────
 
 /** 取 dock 值的第二行；只有一行时返回 undefined。 */
 function noteLine(h: Harness): string | undefined {
@@ -1191,7 +1191,7 @@ test("dock：agent_settled 后给跑满阈值的任务补第二行，agent_start
 
 	// 过了阈值：下一帧重绘（秒级 tick）就补上那句提示。
 	await waitFor(() => noteLine(h) !== undefined, 6000, "阈值过后补第二行");
-	assert.match(noteLine(h)!, /本轮已结束，该任务仍在运行/);
+	assert.match(noteLine(h)!, /Task is still running/);
 	// harness 的 theme 是着色的（其它用例断言 `warning(running)` 同源），所以 `└` 外面
 	// 包着 muted(...)；只断言图形与缩进位置，不断言颜色包裹的写法。
 	assert.match(noteLine(h)!, /^\s+\S*\(?\u2514/, "第二行以 └ 开头（带缩进）");

@@ -1000,6 +1000,27 @@ test("沙箱：成功命令的输出里出现 Operation not permitted 字样不�
 	}
 });
 
+test("沙箱：echo 一段拒绝形状文本、且该路径真的存在 → 不加 [沙箱]（动词闸，2026-10-01）", { skip: sandboxSkip }, async () => {
+	assert.ok(cached);
+	const { definition, projectDir } = cached;
+
+	// 上一条用例的区别在于：那个目标的路径**不存在**，光靠存在性检查就够了。
+	// 这里把路径真的建出来 —— 旧的判据（拒绝字样 + 路径存在于磁盘）于是**两条全中**，
+	// 而命令根本没删任何东西。实测过的误报形状。
+	const probe = path.join(os.homedir(), `.sbx-echo-probe-${process.pid}-${Date.now()}.txt`);
+	fs.writeFileSync(probe, "still here\n");
+	try {
+		const echoed = await runCommand(definition, `echo "rm: ${probe}: Operation not permitted"`, projectDir);
+		assert.equal(echoed.ok, true, `echo 应当成功：${echoed.text}`);
+		assert.match(echoed.text, /Operation not permitted/, "被 echo 的那行本身要在输出里");
+		assert.ok(!/\[沙箱\]/.test(echoed.text), `echo 不是删除，不该追加沙箱说明：${echoed.text}`);
+		assert.equal(fs.existsSync(probe), true, "探针必须仍在（本来就没删过）");
+	} finally {
+		// 这个路径在可删边界之外（$HOME 下），所以用测试进程自己的 fs 清。
+		if (fs.existsSync(probe)) fs.rmSync(probe);
+	}
+});
+
 test("沙箱：越界 rmdir 同样被拒，目录仍在", { skip: sandboxSkip }, async () => {
 	assert.ok(cached);
 	const { definition, projectDir } = cached;

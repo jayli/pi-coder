@@ -19,14 +19,14 @@ const BG_RESET = "\u001b[49m";
 const FG = "\u001b[38;2;198;200;209m";
 const FG_RESET = "\u001b[39m";
 const ZONE = "\u001b]133;A\u0007";
-const BAR = "\u001b[38;2;45;44;93m\u258e\u001b[39m";
+const BAR = "\u001b[38;2;45;44;93m\u258f\u001b[39m";
 
 /** 去掉所有零宽序列后的可见文本（这些 fixture 全是等宽字符，长度即列数）。 */
 const plain = (line: string): string =>
 	line.replace(/\u001b\][^\u0007]*\u0007/g, "").replace(/\u001b\[[0-9;:?]*[a-zA-Z]/g, "");
 
-test("字形与缩进：默认 `▎`（U+258E），正文前空一格", () => {
-	assert.equal(BAR_GLYPH, "\u258e");
+test("字形与缩进：默认 `▏`（U+258F），正文前空一格", () => {
+	assert.equal(BAR_GLYPH, "\u258f");
 	assert.equal(BAR_INDENT, 1);
 });
 

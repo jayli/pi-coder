@@ -3,12 +3,15 @@
  *
  * Run with:  node --test clients/pi/extensions/bash-command-collapse/sandbox.test.ts
  *
- * 断言口径（用户 2026-09-24 定，同日收窄到「只管删除」）：
- *   - profile 以 `(deny default)` 打底（fail-closed 的来源）；
- *   - 写入全放行（`file-write*`），删除收窄：`file-write-unlink` 先全局 deny，
- *     再只对可删根 allow —— 可删根 = 项目目录 + /tmp + /private/tmp + /var/folders
+ * 断言口径（用户 2026-09-24 定，同日收窄到「只管删除」；2026-10-01 改为 `allow default`）：
+ *   - profile 以 `(allow default)` 打底，**只收回一个能力**：删除（`file-write-unlink`）——
+ *     用户口径是「只拦危险的删除，其他动作一律不拦」。旧形态用 `(deny default)` 打底再
+ *     逐项放行，拦截范围于是变成「没被枚举的每个 seatbelt 操作」，实测代价是
+ *     `screencapture` 因缺 `iokit-open` 而以 SIGTRAP 死掉（详见 `buildSeatbeltProfile` 注释）；
+ *   - 删除收窄：`file-write-unlink` 先全局 deny，再只对可删根 allow ——
+ *     可删根 = 项目目录 + /tmp + /private/tmp + /var/folders
  *     + /private/var/folders + /var/tmp + /private/var/tmp + 额外路径；
- *   - 读全放行（file-read*）、网络全放行（network*）；
+ *   - 读与网络不再单独列举（`allow default` 已覆盖，旧形态里也本就是显式全放行）；
  *   - isPathInWriteBoundary 是白名单判定：cwd 内/子目录、/tmp、$TMPDIR 在内；
  *     $HOME 下的全局文件、/usr/local 等一律在外；
  *   - 拒绝识别只认 EPERM / Operation not permitted，不认 Permission denied（EACCES）；
@@ -35,6 +38,7 @@ import {
 	isPathInWriteBoundary,
 	isSafeAllowlistRoot,
 	isSandboxEnabled,
+	looksLikeDeletionCommand,
 	looksLikeSandboxDenial,
 	makeBoundary,
 	maskedDenialPaths,
@@ -53,35 +57,39 @@ import {
 const CWD = "/Users/someone/project";
 const HOME = os.homedir();
 
-test("profile 以 deny default 打底，且放行读写网络与进程能力", () => {
+test("profile 以 allow default 打底，只收回删除一项能力（2026-10-01 改）", () => {
 	const profile = buildSeatbeltProfile(makeBoundary(CWD));
 	const lines = profile.split("\n");
 	assert.equal(lines[0], "(version 1)");
-	assert.equal(lines[1], "(deny default)", "fail-closed：没被显式放行的一律拒");
-	assert.ok(profile.includes("(allow file-read*)"), "读不限制");
-	assert.ok(profile.includes("(allow network*)"), "网络全放行");
-	assert.ok(profile.includes("(allow process-fork)"));
-	assert.ok(profile.includes("(allow process-exec)"));
-	assert.ok(profile.includes("(allow mach-lookup)"));
+	// 用户口径「只拦危险的删除」：默认放行，不再逐项枚举允许的能力。
+	assert.equal(lines[1], "(allow default)", "默认放行 —— 沙箱只管删除，不枚举允许什么");
+	// 旧的逐项放行已被 `allow default` 覆盖，留着只是噪音（且极易漏掉新操作）。
+	for (const stale of ["(allow file-read*)", "(allow network*)", "(allow file-write*)", "(allow mach-lookup)", "(allow process-exec)"]) {
+		assert.ok(!lines.includes(stale), `不应再逐项枚举 ${stale}`);
+	}
+	// 唯一保留的全局规则是收回删除。
+	assert.ok(lines.includes("(deny file-write-unlink)"));
 });
 
-test("profile 写入全放行，删除只对可删根放行（全局 deny + 局部 allow）", () => {
+test("profile 只收回删除：全局 deny + 可删根 allow + 永不删除再收回", () => {
 	const profile = buildSeatbeltProfile(makeBoundary(CWD, ["/Users/someone/.pm2"]));
 	const lines = profile.split("\n");
-	assert.ok(lines.includes("(allow file-write*)"), "写入不限制（用户 2026-09-24 口径）");
-	assert.ok(lines.includes("(deny file-write-unlink)"), "删除先全局收回");
+	// 只有两条 file-write-unlink 规则（外加 never-delete 那条 deny），没有别的能力规则。
+	const unlinkRules = lines.filter((l) => l.includes("file-write-unlink"));
+	assert.equal(unlinkRules.length, 3, `应当恰好三条 unlink 规则：${JSON.stringify(unlinkRules.map((l) => l.slice(0, 40)))}`);
+	assert.equal(unlinkRules[0], "(deny file-write-unlink)", "删除先全局收回");
 	const unlinkAllow = lines.find((l) => l.startsWith("(allow file-write-unlink "));
 	assert.ok(unlinkAllow, "删除再对可删根放行");
 	// 顺序：deny 必须在 allow 之前，seatbelt 后写的规则覆盖先写的
 	assert.ok(
-		lines.indexOf("(deny file-write-unlink)") < lines.indexOf(unlinkAllow),
+		lines.indexOf("(deny file-write-unlink)") < lines.indexOf(unlinkAllow!),
 		"deny 在前、allow 在后，否则全局 deny 会被覆盖失效",
 	);
-	assert.ok(unlinkAllow.includes(`(subpath "${CWD}")`));
+	assert.ok(unlinkAllow!.includes(`(subpath "${CWD}")`));
 	for (const root of TEMP_WRITE_ROOTS) {
-		assert.ok(unlinkAllow.includes(`(subpath "${root}")`), `缺少临时根 ${root}`);
+		assert.ok(unlinkAllow!.includes(`(subpath "${root}")`), `缺少临时根 ${root}`);
 	}
-	assert.ok(unlinkAllow.includes('(subpath "/Users/someone/.pm2")'), "额外路径要进 unlink 放行名单");
+	assert.ok(unlinkAllow!.includes('(subpath "/Users/someone/.pm2")'), "额外路径要进 unlink 放行名单");
 });
 
 test("isPathInWriteBoundary：cwd 内与子目录在边界内", () => {
@@ -701,4 +709,106 @@ test("maskedDenialPaths：无拒绝字样 / 抽不出路径 → 空", () => {
 		maskedDenialPaths("bash: cannot create temp file for here document: Operation not permitted\n", opts),
 		[],
 	);
+});
+
+/**
+ * `looksLikeDeletionCommand` 是 `maskedDenialPaths` 的**前置闸**（用户 2026-10-01 选）。
+ *
+ * 它存在的理由：后者的判据是「输出里有拒绝字样 + 路径在磁盘上」，而这两条同时成立
+ * 还有第二种情形 —— 输出里恰好**提到了**一段拒绝文本，而那个路径真的存在。
+ * 实测过的误报（纯 stdout、退出码 0、什么都没删）：
+ *
+ *   echo "rm: /Users/bachi/jaylli/.sbx-fp.txt: Operation not permitted"
+ *   → [沙箱] 命令整体成功，但以下删除被沙箱拦下（文件仍在）：/Users/…/.sbx-fp.txt
+ *
+ * 方向是刻意的：宁可漏注记（脚本内部删除会漏，但退出码非零时另有升级链路兜底），
+ * 不要对 `cat` / `grep` 日志持续输出噪音。
+ */
+const DELETION_COMMANDS: ReadonlyArray<readonly [string, string]> = [
+	["rm -f /tmp/x", "普通 rm"],
+	["/bin/rm /tmp/x", "带路径的 rm"],
+	["rmdir /tmp/x", "rmdir"],
+	["unlink /tmp/x", "unlink"],
+	["mv /a /b", "mv（rename = 源路径 unlink）"],
+	["ln -sf /a /b", "ln -sf（覆盖 = unlink 目标）"],
+	["echo x > f && rm f", "&&  串联"],
+	["cd /tmp; rm x", ";  串联"],
+	["cd /tmp && rm x", "cd 之后再删"],
+	["echo hi | xargs rm", "通过 xargs 删除"],
+	["sudo rm -f /x", "sudo 包装"],
+	["FOO=1 rm -f /x", "段首赋值前缀"],
+	["env FOO=1 rm -f /x", "env 包装 + 赋值"],
+	["nohup rm -f /x", "nohup 包装"],
+	['sed -i "" s/a/b/ f', "sed -i（就地编辑靠 rename）"],
+	["sed -i.bak s/a/b/ f", "sed -i.bak 变体"],
+	["perl -i -pe s/a/b/ f", "perl -i"],
+	["find /tmp -name x -delete", "find -delete"],
+	["find /tmp -exec rm {} ;", "find -exec rm"],
+	["git clean -xdf", "git clean"],
+	["git worktree remove /x", "git worktree remove"],
+	["git worktree prune", "git worktree prune"],
+	["rm /边界外 ; true", "被 `; true` 掩盖的真删除（备注机制的本命形状）"],
+];
+
+for (const [cmd, label] of DELETION_COMMANDS) {
+	test(`looksLikeDeletionCommand：真的删除 → true（${label}）`, () => {
+		assert.equal(looksLikeDeletionCommand(cmd), true, cmd);
+	});
+}
+
+/** 不应误报的形状：特别是 `grep` / `cat` 日志与 `echo` 一段拒绝文本。 */
+const NON_DELETION_COMMANDS: ReadonlyArray<readonly [string, string]> = [
+	["cat /tmp/log", "cat"],
+	['grep "Operation not permitted" /tmp/log', "grep 拒绝字样（本机制最经典的误报场景）"],
+	['echo "rm: /p: Operation not permitted"', "echo 一段拒绝形状的文本"],
+	['printf "rm: /p: EPERM\\n"', "printf 同上"],
+	["node script.js", "node 脚本（内部删除会漏 —— 刻意的方向）"],
+	["python3 x.py", "python 脚本（同上）"],
+	["git status", "git status"],
+	["git log --oneline", "git log"],
+	["git worktree list", "git worktree list"],
+	["find /tmp -name x", "find 不带删除动作"],
+	["sed s/a/b/ f", "sed 不带 -i"],
+	["ls -la", "ls"],
+	["npm test", "npm test"],
+	["", "空命令"],
+];
+
+for (const [cmd, label] of NON_DELETION_COMMANDS) {
+	test(`looksLikeDeletionCommand：不是删除 → false（${label}）`, () => {
+		assert.equal(looksLikeDeletionCommand(cmd), false, cmd);
+	});
+}
+
+/**
+ * `git` 子命令要精确定位：`clean` / `worktree remove|prune` 是删除，
+ * 而 `clean` **出现在参数或提交信息里**（`git commit -m "clean up"`、`--grep clean`）
+ * 不是。首版对整段扫 `\bclean\b`，正好把这类提交命令误判成删除，故单列一组回归。
+ */
+const GIT_CASES: ReadonlyArray<readonly [boolean, string]> = [
+	[true, "git clean -xdf"],
+	[true, "git clean"],
+	[true, "git -C /repo clean -fd"],
+	[true, "sudo git clean -xdf"],
+	[true, "git worktree remove /x"],
+	[true, "git worktree prune"],
+	[false, 'git commit -m "clean up"'],
+	[false, "git commit -m clean"],
+	[false, "git log --grep clean"],
+	[false, "git checkout clean-branch"],
+	[false, "git worktree list"],
+	[false, "git worktree add /x"],
+	[false, "git status"],
+];
+
+for (const [want, cmd] of GIT_CASES) {
+	test(`looksLikeDeletionCommand：git 子命令定位 —— ${want ? "删除" : "非删除"}（${cmd}）`, () => {
+		assert.equal(looksLikeDeletionCommand(cmd), want, cmd);
+	});
+}
+
+test("looksLikeDeletionCommand：多段命令里任一段是删除就算（前置闸不可漏掉真拒绝）", () => {
+	// grep 在前、rm 在后：不能因为第一段是 grep 就整条放行
+	assert.equal(looksLikeDeletionCommand('grep x log ; rm /越界'), true);
+	assert.equal(looksLikeDeletionCommand("ls\nrm /x"), true, "换行分隔也算");
 });

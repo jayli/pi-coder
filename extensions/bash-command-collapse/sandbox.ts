@@ -17,6 +17,10 @@
  *
  * ## 边界（用户 2026-09-24 定，同日收窄到「只管删除」）
  *
+ * 这一层**只收一项能力：删除**（`file-write-unlink`）。其余一概不管 —— profile 用
+ * `(allow default)` 打底，不枚举「允许什么」（2026-10-01 改，理由见 `buildSeatbeltProfile`
+ * 的 docstring）。
+ *
  * - **写入**：不限制。`echo x > ~/.zshrc` 这类边界外的写直接放行、不弹框 ——
  *   用户定的口径是「写入目标在可写边界之外不需要提醒」。
  * - **删除**：只有项目目录（`cwd`）+ 临时目录（`/tmp`、`/private/tmp`、`/var/folders`、`/var/tmp`）
@@ -717,6 +721,109 @@ function cleanExtractedPath(candidate: string | undefined): string | undefined {
 }
 
 /**
+ * 删除类程序名（只认 basename，不带路径）。
+ *
+ * `mv` 在里面是因为它靠 rename 实现，而 rename 在沙箱眼里就是对源路径的一次 unlink；
+ * `sed -i` / `perl -i` / `ruby -i` 同理（原地编辑 = 写临时文件 + rename 覆盖）。
+ */
+const DELETION_PROGRAMS: readonly string[] = ["rm", "rmdir", "unlink", "mv", "ln", "shred", "trash"];
+
+/** 带 `-i` 就地编辑的程序：不是删，但落盘靠 rename，会产生与删除同形的 EPERM。 */
+const INPLACE_EDIT_PROGRAMS: readonly string[] = ["sed", "perl", "ruby"];
+
+/** 命令段的分隔符：`;` `&&` `||` `|` `&` 与换行。 */
+const SEGMENT_SPLIT_RE = /(?:&&|\|\||[;&|\n])/;
+
+/** 段首可能出现的包装词：跳过它们才看得到真正的程序名。 */
+const WRAPPER_WORDS: readonly string[] = ["sudo", "doas", "command", "builtin", "exec", "env", "nohup", "time", "nice", "xargs"];
+
+/**
+ * 命令里是不是**真的**可能出现删除动作。
+ *
+ * `maskedDenialPaths` 靠「输出里有拒绝字样 + 路径在磁盘上」判定，而这两条同时成立
+ * 还存在第二种情形：命令输出里恰好**提到了**一段拒绝文本（`echo`、`cat`/`grep` 日志、
+ * 讨论 EPERM 的脚本），而那个路径真的存在。实测过一个纯 stdout 的例子：
+ *
+ * ```
+ * echo "rm: /Users/bachi/jaylli/.sbx-fp.txt: Operation not permitted"   # 什么都没删
+ * → [沙箱] 命令整体成功，但以下删除被沙箱拦下（文件仍在）：/Users/…/.sbx-fp.txt
+ * ```
+ *
+ * 所以加一道前置于字节匹配的闸：命令里没出现删除动作，就不可能产生被掩盖的删除。
+ *
+ * 算法：按 `;` `&&` `||` `|` `&` 与换行切段 → 跳过段首的 `VAR=…` 赋值前缀与
+ * `sudo` / `env` / `xargs` 这类包装词 → 取段首程序 basename 判定。
+ *
+ * ## 刻意的方向：宁可漏注记，不要误报
+ *
+ * 这是**白名单**，于是覆盖不到脚本内部的删除（`node x.js` / `python x.py` 里调 unlink）。
+ * 那个方向是安全的：漏注记只是少一行提示，而退出码非零时另有升级弹框链路兜底；
+ * 反过来，一个会对 `cat` / `grep` 日志乱注记的判定会持续输出噪音，比漏报更扰人。
+ *
+ * 注意 `maskedDenialPaths` 自身的字节匹配仍在，两道闸是**与**关系：
+ * 这个函数只负责「命令形状像不像会删除」，不负责「输出里有没有拒绝字样」。
+ */
+export function looksLikeDeletionCommand(command: string): boolean {
+	if (!command) return false;
+
+	for (const rawSegment of command.split(SEGMENT_SPLIT_RE)) {
+		const tokens = rawSegment.trim().split(/\s+/).filter(Boolean);
+		let i = 0;
+
+		// 段首的 `VAR=value` 赋值前缀（`FOO=1 rm x`）：跳过，不影响真正的程序名。
+		while (i < tokens.length && /^[A-Za-z_][A-Za-z0-9_]*=/.test(tokens[i]!)) i++;
+		// 包装词：`sudo` / `env`（含 `env X=1`）/ `nohup` / `time` / `xargs` …
+		while (i < tokens.length && WRAPPER_WORDS.includes(basenameOf(tokens[i]!))) {
+			i++;
+			// 包装词后面可能又跟一串 `VAR=value` 或 `-flag`，一并跳过。
+			while (i < tokens.length && (/^[A-Za-z_][A-Za-z0-9_]*=/.test(tokens[i]!) || tokens[i]!.startsWith("-"))) i++;
+		}
+
+		const prog = i < tokens.length ? basenameOf(tokens[i]!) : "";
+		if (!prog) continue;
+
+		if (DELETION_PROGRAMS.includes(prog)) return true;
+
+		// `sed -i` / `perl -i` / `ruby -i`：字符串含 ` -i` 且程序名对得上。
+		// 用整个段而非单个 token 判定 —— `-i` 可能被引号包着、也可能写成 `-i.bak`。
+		if (INPLACE_EDIT_PROGRAMS.includes(prog) && /(?:^|\s)-i/.test(tokens.slice(i + 1).join(" "))) return true;
+
+		// `find … -delete` / `find … -exec rm`：find 只在带删除动作时才算。
+		if (prog === "find" && /(?:^|\s)(?:-delete|-exec(?:dir)?\s)/.test(tokens.slice(i + 1).join(" "))) return true;
+
+		// `git clean` / `git worktree remove|prune`。必须先定位**子命令**再看参数 ——
+		// 直接对整段扫 `clean` 会把 `git commit -m "clean up"` 也算成删除。
+		// 取 `git` 之后第一个非选项 token 作子命令；`-C <dir>` / `-c <k=v>` 带值要一起跳。
+		if (prog === "git") {
+			const rest = tokens.slice(i + 1);
+			let j = 0;
+			while (j < rest.length) {
+				const tok = rest[j]!;
+				if (tok === "-C" || tok === "-c") { j += 2; continue; }
+				if (tok.startsWith("-")) { j++; continue; }
+				break;
+			}
+			const sub = rest[j];
+			if (sub === "clean") return true;
+			if (sub === "worktree") {
+				// `worktree` 的下一个非选项 token 才是动作（`remove` / `prune`）；`add` / `list` 不算。
+				let k = j + 1;
+				while (k < rest.length && rest[k]!.startsWith("-")) k++;
+				if (rest[k] === "remove" || rest[k] === "prune") return true;
+			}
+		}
+	}
+	return false;
+}
+
+/** 路径的 basename：`/bin/rm` → `rm`。无路径分隔符时原样返回。 */
+function basenameOf(token: string): string {
+	const cleaned = token.replace(/^["']+|["']+$/g, "");
+	const idx = cleaned.lastIndexOf("/");
+	return idx >= 0 ? cleaned.slice(idx + 1) : cleaned;
+}
+
+/**
  * 从一条**整体成功**（退出码 0）的命令输出里，找出被掩盖的越界删除目标。
  *
  * 为什么需要：pi 内置 bash 只在退出码非零时 throw，而升级弹框挂在 `catch` 上。
@@ -735,6 +842,11 @@ function cleanExtractedPath(candidate: string | undefined): string | undefined {
  * 2. 只留**磁盘上仍在**的路径。真实拒绝会把文件原样留下，所以「它还在」既是
  *    误报过滤（grep 命中的日志行里那个路径通常不存在），也是提示本身的语义
  *    前提 —— 说明文案要讲「文件仍在、可授权后删」，目标不存在时这句话是假的。
+ *
+ * 但这道过滤本身不够：**目标恰好存在**的情形很常见（`echo "rm: /p: Operation not
+ * permitted"` 里那个 /p 真的在），于是一段纯文本输出会被当成真实拒绝。第三道闸由
+ * 调用方在它之前加：`looksLikeDeletionCommand(command)` —— 命令里根本没出现删除动作
+ * 就不可能产生被掩盖的删除。
  *
  * 返回空数组 = 不需要追加任何说明。
  */
@@ -864,19 +976,41 @@ export function memoryScopesFor(paths: readonly string[], env: PathEnv, cwd = pr
 /**
  * 生成 seatbelt profile。
  *
- * 形状是 `deny default` 打底，再逐项放行 —— 顺序很重要：seatbelt 里**后写的规则覆盖先写的**，
- * 所以「全局放行 → 局部收回」这个顺序就是本 profile 的全部技巧。
+ * ## 形状：`allow default` 打底，只收回删除
  *
- * 放行的能力：
- * - `file-read*` 全放行（读不限制）
- * - `network*` 全放行（出站不限制）
- * - `process-fork` / `process-exec` / `signal`：跑子命令、`kill` 自己的进程组
- * - `sysctl-read` / `mach-lookup` / `ipc-posix*`：几乎所有程序启动都要
- * - `file-write*` **全放行**（写不限制 —— 用户 2026-09-24 定的口径）
+ * ```
+ * (version 1)
+ * (allow default)                        ← 默认放行一切
+ * (deny file-write-unlink)               ← 全局收回删除
+ * (allow file-write-unlink <可删根…>)     ← 边界内放行
+ * (deny file-write-unlink <永不删除…>)    ← 永不删除档，内核级收回
+ * ```
  *
- * 收回的能力只有一项：
- * - `file-write-unlink` 先全局 `deny`，再只对可写根 `allow`。于是边界外的 `rm` / `rmdir`
- *   （以及一切 rename，见文件头）拿到 `EPERM`，边界内照常删除。
+ * 顺序很重要：seatbelt 里**后写的规则覆盖先写的**，所以「全局收回 → 局部放行 → 再收回
+ * 永不删除」这个顺序是全部技巧。
+ *
+ * ## 为什么是 `allow default` 而不是 `deny default`（2026-10-01 改）
+ *
+ * 用户口径是「**只拦危险的删除，其他动作一律不拦**」。旧形态用 `(deny default)` 打底
+ * 再逐项放行，拦截范围于是不是「删除」，而是「**没被枚举的每一个 seatbelt 操作**」——
+ * 口径与实现对不上。实测代价：`screencapture` 需要 `iokit-open`（本 profile 没枚举），
+ * 于是在沙箱里以 `Trace/BPT trap: 5`（SIGTRAP，exit 133）死掉，而沙箱外正常出图。
+ * 逐条二分证实：只补 `(allow iokit-open)` 一条就够，缺的是枚举，不是权限判定。
+ *
+ * 改成 `(allow default)` 后不再枚举「允许什么」，只枚举「**不许删什么**」—— 与
+ * 用户口径一致，且未枚举的操作从「拦」变「放」，不会再冒出同类误拦。
+ *
+ * 等价性已实测：17 格矩阵下新旧两种底**逐格一致** —— 边界外 `rm` / `rmdir` / `mv` /
+ * `sed -i` / `rm -rf` 全拦，`~/.ssh` 下四种全拦，边界内五种全通。原因是
+ * `file-write-unlink` 是独立的 mach 层操作，`(allow default)` 不会替它开口子；
+ * 读 / 写 / 网络在旧形态里本就是显式全放行，也没有变化。
+ *
+ * **已知且不修的**：`ps` / `top` / `launchctl list` 在 `(allow default)` 下**仍被拦** ——
+ * 这是 seatbelt 自身的限制（进程信息类操作在沙箱里被系统挡掉），不是本 profile 的锅，
+ * 放宽 profile 解决不了。
+ *
+ * 代价说清楚：本 profile 不再兜底「未被枚举的未知操作」—— 除了删除，沙箱不再拦任何东西。
+ * 这是用户 2026-10-01 选定的口径，不是疏漏。
  *
  * `extraUnlinkRoots` 是两层授权的注入点：持久白名单与会话豁免的目录在这里并进
  * 同一行 `(allow file-write-unlink …)` —— 记住一个目录 = 加宽这一行，删除在沙箱内
@@ -890,11 +1024,8 @@ export function memoryScopesFor(paths: readonly string[], env: PathEnv, cwd = pr
  * 一个例外：**项目目录（`boundary.cwd`）落在某个永不删除路径之下时，该路径不进 deny
  * 行** —— 否则在 `~/.pi/agent/extensions/x` 这种项目里干活时，删自己的文件会被全部
  * 拦死（项目目录按定义在可删边界内，这是既有口径）。这里不用 SBPL 的嵌套过滤器
- * 表达「deny 整棵但挖掉 cwd」：本 profile 只用已实测可用的构造（`deny default` /
+ * 表达「deny 整棵但挖掉 cwd」：本 profile 只用已实测可用的构造（`allow default` /
  * `allow` / `deny` / `subpath` / `literal`），不引入无法在本环境验证的语法。
- *
- * 设备文件（`/dev/null` 等）的 `file-write-data` / `file-write-mode` 已被全局 `file-write*`
- * 覆盖，不再单列；`file-ioctl` 不属于 `file-write*`，仍需显式放行（tty 操作要用）。
  */
 export function buildSeatbeltProfile(boundary: WriteBoundary, extraUnlinkRoots: readonly string[] = []): string {
 	const unlinkSubpaths = [...writableRoots(boundary), ...extraUnlinkRoots]
@@ -911,27 +1042,13 @@ export function buildSeatbeltProfile(boundary: WriteBoundary, extraUnlinkRoots: 
 		.filter((root) => !(cwd === root || cwd.startsWith(`${root}/`)))
 		.map((root) => `(literal ${quoteSb(root)})(subpath ${quoteSb(root)})`);
 
-	const deviceLiterals = ["/dev/null", "/dev/zero", "/dev/tty", "/dev/urandom", "/dev/random", "/dev/dtracehelper"]
-		.map((dev) => `(literal ${quoteSb(dev)})`)
-		.join("");
-
 	return [
 		"(version 1)",
-		"(deny default)",
-		"(allow process-fork)",
-		"(allow process-exec)",
-		"(allow signal)",
-		"(allow sysctl-read)",
-		"(allow mach-lookup)",
-		"(allow ipc-posix*)",
-		"(allow file-read*)",
-		"(allow network*)",
-		"(allow file-write*)",
+		"(allow default)",
 		"(deny file-write-unlink)",
 		`(allow file-write-unlink ${unlinkSubpaths.join("")})`,
 		// 永不删除：allow 行之后收回（seatbelt 后写覆盖先写）。名单为空时不写这行。
 		...(neverDeleteFilters.length > 0 ? [`(deny file-write-unlink ${neverDeleteFilters.join("")})`] : []),
-		`(allow file-ioctl ${deviceLiterals})`,
 	].join("\n");
 }
 

@@ -52,7 +52,7 @@ Expected visible results of a successful load:
 - The header is replaced by a logo with the version and the shortened working directory (`startup-logo`).
 - The footer is a single statusline line (`statusline`), plus a second line with the working directory (`cwd-statusline`).
 - The editor shows a `❯ ` prompt (`prompt-editor`).
-- A user message has a `▎ ` at the head of every line, including the blank lines above and below the text, in the theme's `accent` color (`user-message-bar`).
+- A user message has a `▏ ` at the head of every line, including the blank lines above and below the text, in the theme's `accent` color (`user-message-bar`).
 - A bash run starts with a `• ` dot followed by `Run `, with **no background** behind the block (`bash-command-collapse`); pressing `shift+tab` cycles the permission mode and the statusline's second line shows `⏵ bypass` → `⏸ plan` → `☢ dangerous` (`plan-mode`).
 - `/theme`, `/tasks`, `/recap`, `/rewind`, `/init`, `/clear`, `/exit`, `/ask`, `/memory`, `/plan`, `/plan-status`, `/goal`, `/sandbox-boundary`, `/background` and the `/bash-*` family (`/bash-preview`, `/bash-timeout`) all exist. Type `/` and scroll the command list. `/mcp` also exists, but it comes from pi's own `builtin:mcp`, not from this package.
 - `/sandbox-boundary` prints the delete boundary (project directory, the temp roots `/tmp` / `/var/folders` / `/var/tmp`, the regenerable caches) and a `持久白名单` line, and `~/.pi/agent/AGENTS.core.md` exists — `core-rules` does nothing, silently, without it.
