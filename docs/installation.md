@@ -2,7 +2,7 @@
 
 ## Requirements
 
-- pi **0.85.1** or newer. The extensions hook into pi internals (extension UI containers, renderer signatures, `SettingsManager`), so a much older pi may load them and behave oddly. All 29 entries were verified against pi 0.85.1, 0.87.1 and 0.99.1 through pi's own loader.
+- pi **0.85.1** or newer. The extensions hook into pi internals (extension UI containers, renderer signatures, `SettingsManager`), so a much older pi may load them and behave oddly. 29 of the 30 entries load with `errors: []` through pi's own loader on 0.85.1 and 0.87.1; all 30 do on 0.99.1 and 0.99.2. The one that needs 0.99.1 is `codemode-tree/` (it captures the built-in `codemode` tool through `createCodemodeExtension()`, which only exists from 0.99.1 on); on an older pi that single entry fails to load and the other 29 are unaffected.
 - pi **0.99.1** for MCP. `builtin:mcp` first shipped there, and this package no longer carries an MCP extension of its own — on an older pi there are simply no MCP tools.
 - Node **22.19+** (pi's own requirement).
 - macOS or Linux. The delete boundary (`bash-command-collapse/sandbox.ts`, `sandbox-boundary/`) needs macOS's `sandbox-exec`; elsewhere it turns itself off with `PI_SANDBOX=off` semantics and only the `AGENTS.md` discipline is left.

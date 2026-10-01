@@ -48,4 +48,5 @@ Distilled from `~/.pi/agent/AGENTS.md`; must never decay mid-session.
 
 ## Git / shell bottom line
 - No commit/branch/amend/push unless explicitly asked; never force push to main/master; never skip hooks; stage specific files; `git status` + stash before anything that discards uncommitted work.
-- No interactive programs (`vim`, `git rebase -i`, pagers, REPLs); detach long-lived processes; treat command text as code.
+- No interactive programs (`vim`, `git rebase -i`, pagers, REPLs); treat command text as code.
+- Never `sleep`-poll a wait: for a long command use `run_in_background` and end the turn — its terminal notification wakes you.

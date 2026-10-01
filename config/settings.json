@@ -11,7 +11,8 @@
     "pnpm",
     "--config.node-linker=hoisted"
   ],
-  "extensions": [],
+  "extensions": ["-builtin:codemode"],
+  "defaultTools": ["+codemode"],
   "tuiMode": "regular",
   "packages": [
     "npm:pi-web-access",
@@ -19,6 +20,7 @@
     "git:github.com/jayli/superpowers"
   ],
   "steeringMode": "one-at-a-time",
+  "followUpMode": "all",
   "markdown": {
     "mermaid": "streaming"
   },

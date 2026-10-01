@@ -26,25 +26,35 @@ Two consequences worth remembering:
 ## Tests
 
 ```bash
-npm test        # node --test — 1256 tests, ~45 s
+npm test        # node --test — 1282 tests, ~45 s
 ```
 
 Test files run in parallel (`os.availableParallelism()` — 15 on the machine this was written on). The whole suite is more stable with reduced parallelism at about the same wall time:
 
 ```bash
-node --test --test-concurrency=4      # 1256 tests, ~45 s
+node --test --test-concurrency=4      # 1282 tests, ~45 s
 ```
 
-**22 of the 1256 are skipped on purpose.** They are the real-sandbox cases in `bash-command-collapse/render.test.ts`: nested `sandbox-exec` cannot run inside a pi session, so they declare themselves skipped rather than faking a pass. They are the ones that prove the boundary is enforced by the **kernel** rather than by a pattern match, so run them from a plain terminal when you touch `sandbox.ts`.
+**22 of the 1282 are skipped on purpose.** They are the real-sandbox cases in `bash-command-collapse/render.test.ts`: nested `sandbox-exec` cannot run inside a pi session, so they declare themselves skipped rather than faking a pass. They are the ones that prove the boundary is enforced by the **kernel** rather than by a pattern match, so run them from a plain terminal when you touch `sandbox.ts`. Inside a pi session the probe *succeeds* instead, and those 22 then run against the outer sandbox and fail — the counts below are all measured from a plain terminal.
 
-**Eight more fail against pi 0.99.1, and the snapshot repository shows the identical eight** — they are a pi-version condition, not a regression from a sync. Seven are color assertions in `bash-command-collapse/render.test.ts` (5) and `read-path-collapse/render.test.ts` (2): they mutate `theme.fgColors` to prove the dot color is read from the theme at render time rather than hardcoded, and **pi 0.99.1 made that field private** — the singleton now carries `fgAnsi` / `resolvedColors` instead (0.87.1 still exposed a public `fgColors` map). The eighth is the `dangerous`-mode case, whose `bypass` control group expects the wrapped command to throw and under 0.99.1 it returns normally instead. Point the loader at a 0.87.1 entry and all eight pass — the whole suite goes clean:
+**Eight fail against pi 0.99.1, and the snapshot repository shows the identical eight** — they are a pi-version condition, not a regression from a sync. Seven are color assertions in `bash-command-collapse/render.test.ts` (5) and `read-path-collapse/render.test.ts` (2): they mutate `theme.fgColors` to prove the dot color is read from the theme at render time rather than hardcoded, and **pi 0.99.1 made that field private** — the singleton now carries `fgAnsi` / `resolvedColors` instead (0.87.1 still exposed a public `fgColors` map). The eighth is the `dangerous`-mode case, whose `bypass` control group expects the wrapped command to throw and under 0.99.1 it returns normally instead. Point the loader at a 0.87.1 entry and all eight pass:
 
 ```bash
 PI_TEST_PI_ENTRY=~/.pi/agent/npm/node_modules/@earendil-works/pi-coding-agent/dist/bundle/index.js \
-  node --test --test-concurrency=4     # 1256 tests, 1234 pass, 0 fail, 22 skipped
+  node --test --test-concurrency=4     # 1271 tests, 1248 pass, 1 fail, 22 skipped
 ```
 
-Both are **test-side** couplings to pi internals, not rendering regressions: `bash-command-collapse.ts`'s own `bashOutput` override guards on `typeof fgColors?.set === "function"` and falls through to the plain render when the field is gone, so on 0.99.1 that one cosmetic token is simply inert (bash output uses `toolOutput`) instead of broken. Fixing the assertions means finding 0.99.1's public surface for "the color table the renderer reads"; that belongs upstream in `clients/pi/`, which keeps these files byte-identical. Until then a sync must reproduce the eight rather than chase them.
+That one remaining failure is `codemode-tree/index.test.ts` itself: it needs `createCodemodeExtension()`, which pi only exports from **0.99.1** on, so on 0.85.1 / 0.87.1 the file throws at load and its 12 cases never register (1282 − 12 + 1 file-level failure = 1271). `codemode-tree/render.test.ts`'s 11 pure-logic cases are unaffected.
+
+**pi 0.99.2 adds four more failures, all in `bash-command-collapse/render.test.ts`, and the snapshot repository shows the identical twelve.** Two are the ellipsis character — 0.99.2 renders the truncation hint as ASCII `... (2 earlier lines,  to expand)` where 0.99.1 used `…`, and the tests assert `│ …`; the extension's own `isTruncationHint` already accepts both forms, so the tree is still shaped correctly and only the assertion is stale. The third is a one-line shift in pi's output-preview window: the `└ ` lands on `line 28` where the test expects `line 29`. The fourth is a blank line pi now leaves between the `(no output)` placeholder and the appended `Command exited with code N` status, which the test reads as a break in the tree's fence. Measured on this sync:
+
+| pi entry | tests | pass | fail | skipped |
+| --- | --- | --- | --- | --- |
+| 0.85.1 / 0.87.1 | 1271 | 1248 | 1 | 22 |
+| 0.99.1 | 1282 | 1252 | 8 | 22 |
+| 0.99.2 (this machine's default) | 1282 | 1248 | 12 | 22 |
+
+All of these are **test-side** couplings to pi internals, not rendering regressions: `bash-command-collapse.ts`'s own `bashOutput` override guards on `typeof fgColors?.set === "function"` and falls through to the plain render when the field is gone, so on 0.99.x that one cosmetic token is simply inert (bash output uses `toolOutput`) instead of broken. Fixing the assertions means finding 0.99.x's public surface for "the color table the renderer reads" and for the preview budget; that belongs upstream in `clients/pi/`, which keeps these files byte-identical. Until then a sync must reproduce the same set the snapshot shows rather than chase it.
 
 The pure-logic modules are written so this works: they do not import `@earendil-works/pi-*` at all, take injected dependencies instead (a `widthOf` function, an `exec` function, a minimal theme interface), and are duck-typed against structural interfaces. That is why `thinking-collapse/window.ts`, `statusline/line.ts`, `tool-diff/title-row.ts`, `rewind/checkpoints.ts`, `prompt-editor/bash-prompt.ts`, `background-tasks/status.ts`, `worktree.ts`, `render.ts`, `memory/render.ts`, `plan-mode/render.ts`, `plan-mode/consent.ts`, `bash-command-collapse/sandbox.ts`, `allowlist.ts` and the rest can run under plain `node --test`. `background-tasks/worktree.test.ts` goes one step further and drives **real git** in a tmpdir fixture (`git init`, a commit, then create and clean up a worktree), because the three cleanup outcomes are the whole point of the feature and a fake `runGit` would only assert the arguments.
 
@@ -72,9 +82,9 @@ Isolate the run instead — a scratch agent directory has no global extensions, 
 PI_CODING_AGENT_DIR=$(mktemp -d) pi -e /absolute/path/to/pi-coder
 ```
 
-Then check that all 29 loaded. **Do not look for the startup resource list** — `startup-logo` prunes it in full (`[Context]`, `[Skills]`, `[Prompts]`, `[Extensions]`, `[Themes]`), so nothing of it is printed. The visible signals of a successful load are the logo header, the statusline footer and the `❯ ` prompt; for the extension list itself use `pi config`, or the loader check below.
+Then check that all 30 loaded. **Do not look for the startup resource list** — `startup-logo` prunes it in full (`[Context]`, `[Skills]`, `[Prompts]`, `[Extensions]`, `[Themes]`), so nothing of it is printed. The visible signals of a successful load are the logo header, the statusline footer and the `❯ ` prompt; for the extension list itself use `pi config`, or the loader check below.
 
-A headless start cannot show you any of that (`-p` exits after one turn and prints only the answer), so the fastest machine check is the same loader the `render.test.ts` files use — `discoverAndLoadExtensions` against the 29 entries (`extensions/*.ts` plus `extensions/*/index.ts`), asserting `errors: []`. It is also the cheapest way to catch a `ParseError` that `node --test` accepted, because it is pi's own loader and not node's. Point it at a real library entry the way those tests do (`PI_TEST_PI_ENTRY`). Measured on this sync, all 29 entries load with `errors: []` against pi 0.85.1, 0.87.1 and 0.99.1.
+A headless start cannot show you any of that (`-p` exits after one turn and prints only the answer), so the fastest machine check is the same loader the `render.test.ts` files use — `discoverAndLoadExtensions` against the 30 entries (`extensions/*.ts` plus `extensions/*/index.ts`), asserting `errors: []`. It is also the cheapest way to catch a `ParseError` that `node --test` accepted, because it is pi's own loader and not node's. Point it at a real library entry the way those tests do (`PI_TEST_PI_ENTRY`). Measured on this sync, all 30 entries load with `errors: []` against pi 0.99.1 and 0.99.2; against 0.85.1 and 0.87.1 it is 29 of 30, the one error being `codemode-tree/index.ts` (`createCodemodeExtension is not a function` — that export arrived in 0.99.1), which leaves the other 29 untouched.
 
 `/reload` re-reads the checkout, so the loop is: edit → `/reload` → look. That works for `pi -e` runs as well as for an installed package; you do not need to restart pi for extension edits. `settings.json` and `AGENTS.md` are read once at startup, so those do need a restart.
 

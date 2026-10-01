@@ -110,7 +110,7 @@ Classify an action before taking it. The class decides who may authorize it — 
 - Bash has a default timeout and a hard maximum. For a legitimately long build or test run, pass an explicit larger `timeout`, otherwise it gets killed mid-run. `timeout(1)` is not installed on macOS; do not reach for it.
 - Never chain commands with separator banners (`echo "===="`, `printf '---'`); they add noise to every call.
 - Treat command text as code: backticks and `$()` still execute — never let untrusted text reach the shell.
-- Do not block on `sleep` or any wait longer than 60 seconds — poll, or split the work.
+- Never wait by blocking: no `sleep`-poll loops, nothing over 60s in one call. For a long command, `run_in_background` is the answer — start it, end the turn; its terminal notification wakes you. `sleep`-ing on its log is the same bug, not diligence.
 
 ## Editing
 

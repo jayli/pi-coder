@@ -157,7 +157,7 @@ const fakeTheme = {
 	dim: (text: string) => text,
 };
 
-function createContext(tui: FakeTui): { ctx: unknown; setHeaderCalls: number } {
+function createContext(tui: FakeTui, overrides: { model?: { id?: string }; thinkingLevel?: string } = {}): { ctx: unknown; setHeaderCalls: number } {
 	const state = { setHeaderCalls: 0 };
 	const ui = {
 		theme: fakeTheme,
@@ -175,7 +175,18 @@ function createContext(tui: FakeTui): { ctx: unknown; setHeaderCalls: number } {
 		},
 		notify() {},
 	};
-	return { ctx: { mode: "tui", hasUI: true, cwd: "/Users/someone/proj", ui }, setHeaderCalls: state.setHeaderCalls };
+	return {
+		ctx: {
+			mode: "tui",
+			hasUI: true,
+			cwd: "/Users/someone/proj",
+			ui,
+			// 标题行现取的两截（真实 ctx 上是 live getter，可能抛，见 index.ts 里那个 try/catch）
+			model: overrides.model ?? { id: "deepseek-flash-qd" },
+			thinkingLevel: overrides.thinkingLevel ?? "max",
+		},
+		setHeaderCalls: state.setHeaderCalls,
+	};
 }
 
 interface LoadedExtension {
@@ -259,10 +270,20 @@ test("session_start：header 是 logo（每行缩进一格、没有 /logo 提示
 		for (const line of plain.slice(0, 4)) assert.ok(line.startsWith(" "), `印记行不能顶格：${JSON.stringify(line)}`);
 		assert.equal(plain[0]!.length, MARK_WIDTH, "没挂侧栏的印记行就是整行宽度");
 		assert.equal(plain[3]!.length, MARK_WIDTH, "没挂侧栏的印记行就是整行宽度");
+		// **每一行**都不顶格（用户 2026-10-01 定）：提示行与说明行跟印记同列
+		for (const line of plain) {
+			if (line === "") continue;
+			assert.ok(line.startsWith(" "), `header 的每一行都不能顶格：${JSON.stringify(line)}`);
+		}
 		// 挂侧栏的第 1/2 行：侧栏贴在同一列（MARK_WIDTH + 2），所以列对齐
-		assert.ok(plain[1]?.includes("pi v"), "侧栏应该带版本号");
-		assert.equal(plain[1]!.indexOf("pi v"), MARK_WIDTH + 2, "版本号应该贴在第 MARK_WIDTH + 2 列");
+		assert.match(plain[1] ?? "", /pi v\d+\.\d+\.\d+ \(deepseek-flash-qd with max effort\)/, "标题行应该是 `pi vX.Y.Z (模型 with 档位 effort)`");
+		assert.equal(plain[1]!.indexOf("pi v"), MARK_WIDTH + 2, "标题行应该贴在第 MARK_WIDTH + 2 列");
 		assert.ok(plain.some((line) => line.includes("/Users/someone/proj")), "侧栏应该带 cwd");
+		// 提示行在测试环境里可能整段缺席（`keyHint` / `keyText` 走的是 pi 的另一份模块单例，
+		// 在 `node --test` 里会抛，见 index.ts 的注释）；真出现时它也必须缩进一格 ——
+		// 分段缩进的确定性由 logo.test.ts 的 composeHeaderLines 用例钉住。
+		const hintLine = plain.find((line) => line.includes("commands"));
+		if (hintLine) assert.ok(hintLine.startsWith(" interrupt"), `提示行应该缩进一格：${JSON.stringify(hintLine)}`);
 		assert.ok(plain.some((line) => line.includes("Pi can explain its own features")), "说明行应该保留");
 		assert.equal(plain.some((line) => line.includes("/logo")), false, "`/logo toggles this header.` 提示已删掉");
 
@@ -275,6 +296,34 @@ test("session_start：header 是 logo（每行缩进一格、没有 /logo 提示
 		}
 		assert.deepEqual(sectionTitlesIn(loaded), []);
 		assert.equal(loaded.children.length, 0, "连开头那个额外空行也收掉，不留多余留白");
+	} finally {
+		workspace.cleanup();
+	}
+});
+
+test("窄终端 / 超长模型 id：每一帧都不超过终端宽度（pi-tui 对超宽行直接抛错）", { skip, timeout: 30_000 }, async () => {
+	const workspace = makeWorkspace();
+	try {
+		const extension = await loadExtension(workspace.agentDir, workspace.projectDir);
+		const sessionStart = extension.handlers.get("session_start")?.[0];
+		assert.ok(sessionStart);
+		// 模型 id 是外部输入：路由名、组织 BYOK 的 `mode-…` 都可能是很长一串
+		const tui = createFakeTui();
+		const { ctx } = createContext(tui, { model: { id: `mode-${ "a".repeat(160) }` }, thinkingLevel: "max" });
+		await sessionStart({}, ctx);
+		const component = tui.headerComponent as { render(w: number): string[] };
+		// 宽终端（侧栏有位置）与窄终端（退化单行）两种形态都过；
+		// `clamp` 把提示行 / 说明行（本体 53 列）也截了，所以从 1 列起就该全部合规 ——
+		// 只有**行本身装不下 `MARK_INDENT` 那一格**的极端宽度才会让缩进被吃掉，见下面单独一条。
+		for (const width of [14, 20, 40, 53, 60, 80, 120, 200]) {
+			for (const line of component.render(width)) {
+				assert.ok(stripAnsi(line).length <= width, `宽度 ${width} 下这行超了：${JSON.stringify(stripAnsi(line))}`);
+			}
+		}
+		// 长模型 id 真的被截（而不是把整行撑爆）：48 列下侧栏只剩 33 列可用
+		const longLine = stripAnsi(component.render(48)[1] ?? "");
+		assert.ok(longLine.endsWith("…"), `长模型 id 应该被截断：${JSON.stringify(longLine)}`);
+		assert.equal(longLine.length, 48, "截断后应正好占满可用宽度");
 	} finally {
 		workspace.cleanup();
 	}

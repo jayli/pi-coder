@@ -1,7 +1,7 @@
 # Pi Coding Agent 全局配置模板
 
 pi（`@earendil-works/pi-coding-agent`）的全局配置与扩展脚本快照，作为本机 pi 环境的模板标准。
-本机装的是 pi **0.99.1** + `pi-web-access` **0.33.0** + `pi-subagents` **0.73.1**
+本机装的是 pi **0.99.1** + `pi-web-access` **0.34.0** + `pi-subagents` **0.73.1**
 + `superpowers` **6.4.2**（git 包，见下文）。
 
 pi 是接入本网关的第四个客户端：它走 `/v1/messages`（Anthropic Messages API），因此和 Claude Code
@@ -45,7 +45,7 @@ cp -R clients/pi/extensions/recap              ~/.pi/agent/extensions/   # 依�
 cp -R clients/pi/extensions/rewind             ~/.pi/agent/extensions/
 cp -R clients/pi/extensions/statusline         ~/.pi/agent/extensions/
 cp -R clients/pi/extensions/auto-default-model ~/.pi/agent/extensions/
-cp -R clients/pi/extensions/startup-logo       ~/.pi/agent/extensions/   # 顶部静态 pi 印记 logo + 剪掉启动清单全部五段（只留诊断段）
+cp -R clients/pi/extensions/startup-logo       ~/.pi/agent/extensions/   # 顶部静态 pi 印记 logo + 标题行带模型/推理档位（每行缩进一格、不顶格）+ 剪掉启动清单全部五段（只留诊断段）
 cp -R clients/pi/extensions/ask-user-question  ~/.pi/agent/extensions/
 cp -R clients/pi/extensions/subagent-log-guard ~/.pi/agent/extensions/
 cp -R clients/pi/extensions/fenceless-code-block ~/.pi/agent/extensions/   # 子目录形式：纯逻辑在 render.ts（不 import pi，可单测）
@@ -57,6 +57,7 @@ cp -R clients/pi/extensions/sandbox-boundary   ~/.pi/agent/extensions/   # 删�
 cp -R clients/pi/extensions/core-rules         ~/.pi/agent/extensions/   # 全局 AGENTS.md 蒸馏版的中途重注入（纯判定在 decision.ts）
 cp -R clients/pi/extensions/verify-loop        ~/.pi/agent/extensions/   # 验证闭环 + /goal 评估器（CC Stop hook / goal 同构；import ../recap/subagents.ts，依赖上一行已装 recap/）
 cp -R clients/pi/extensions/memory             ~/.pi/agent/extensions/   # 类 CC auto-memory（索引+正文，索引机械派生；见下文）
+cp -R clients/pi/extensions/codemode-tree      ~/.pi/agent/extensions/   # codemode 工具块的树形展示（捕获内置定义换渲染器；settings 需配 `-builtin:codemode`，见下文）
 # destructive-guard 已于 2026-09-24 从 live 退役（被 seatbelt 能力边界取代）、2026-09-27 从仓库删除（完整实现在 git 历史里）
 mkdir -p ~/.pi/agent/themes && cp clients/pi/themes/*.json ~/.pi/agent/themes/
 
@@ -141,8 +142,13 @@ LAN IP）；`settings.json` 的 `defaultModel`（会被 `auto-default-model/` �
 - `doubleEscapeAction: "none"` 是**把内置的双击 Esc 动作关掉**，交给 `rewind/` 接管。
   该扩展会**吃掉第二次 Esc**，所以即使写回 `tree` 也不会弹 pi 的 tree；写成 `none` 只是把意图写明。
   要恢复内置行为：删掉 `rewind/` 再改回 `"tree"`。
-- `tuiMode: "regular"`（也是 pi 默认值）、`steeringMode`、`markdown.mermaid` 三项写的都是 pi 的默认值，
+- `tuiMode: "regular"`、`steeringMode`、`markdown.mermaid` 三项写的都是 pi 的默认值，
   本机只是显式写了出来。
+- `followUpMode: "all"` 是**刻意的非默认值**（pi 默认 `one-at-a-time`）：排队中的 follow-up 消息
+  一次性投递成**一轮**，而不是每条各起一轮。动机是后台任务通知：当主 agent 忙于别的事时，
+  多条终态通知会被 `deliverAs: "followUp"` 推进队列（`background-tasks/index.ts`），默认模式下
+  每条都要单独唤醒一轮模型（2026-09-30 实测：9 条通知连发 38 秒、各起一轮）。代价同源——它也
+  批量化**人类**用 `alt+enter` 排队的 follow-up 消息；想要逐条投递就删掉这一项。
 
 ### `litellm-any` provider 的两个 compat flag
 
@@ -612,6 +618,7 @@ server 接进 pi 工具表，写了 12 个文件的零依赖实现（三种传�
 | `user-message-bar/` | 用户消息框**每一行**（含上下两条空白内边距行）行首加一条竖线 `▎`（U+258E，左侧四分之一块），**竖线跟着消息底色**（不抠底 —— 它直接坐在 Box 的 `userMessageBg` 里，与底色块连成一片），竖线后空一格（正文共缩进两格），颜色取 **皮肤的强调色 `accent`**（`PI_USER_MESSAGE_BAR_COLOR` 可换槽位，显式指定 `toolDiffAdded` 则拿回原来的 diff 新增行行号色；兜底顺序 `accent` → `selectedBg` → `toolDiffAdded` → `text`）；`UserMessageComponent.prototype.render` 补丁 —— 竖线占原本那一格左内边距，多空的那一格（`BAR_INDENT`）则从**行尾补白**里等量吃回来，所以底色 / 行宽 / 折行位置全不变（pi-tui 对超宽行直接抛错，多一格都不行；`outputPad = 1` 时 Box 只给孩子 `width - 2` 列，所以正文总能留得下那一格，已在 `index.test.ts` 用长正文折行逐行验宽度）。**别再改成「竖线格无底色」**：那需要在竖线前插 `49m`、画完再还原 `48;…m`，而结果是底色块左边缘被抠出一个缺角，实测观感更差（曾这么做过，已回退）；`bar.ts` 是纯逻辑，入口只接线；取色源在 `session_shutdown` 时摘掉、读皮肤再兜一层 try/catch —— 会话替换（`/clear`、`/new`、`/resume`、`/fork`、`/reload`）时 pi 会作废旧 ctx，而旧消息这时还挂在聊天区里，渲染 tick 里抛出的 stale-ctx 异常没人接得住，会直达 pi 的 `uncaughtException` 把进程带走。`PI_USER_MESSAGE_BAR=off` 关闭，`PI_USER_MESSAGE_BAR_COLOR=<槽位名>` 换色（背景槽如 `selectedBg` 会 48→38 转前景） |
 | `bash-command-collapse.ts` | bash 工具块的命令 + 树形输出（**用户 2026-09-21 定的形状**）：命令**首行**行首是一颗状态圆点 `•` **加一个空格**（执行中 `dim` / 成功 `toolDiffAdded` / 失败 `toolDiffRemoved`，**只有首行有**，续行、折叠标记与整棵结果树前面没有；这一列与结果侧的缩进共用同一个 `INDENT_WIDTH`，所以 `Run` / `│` / `└` 同在列 2、正文同在列 4），命令以 `Run ` 起头（pi 内置是 `$ `）、最多 **2 个视觉行**，第 2 行溢出多少都只把行尾换成 `…`，命令更长时再补一行 `… +N lines`；两类续行（折行续行、折叠标记）的正文都对齐 `Run ` 的 `n` 列 —— 执行中是两格缩进，命令一执行完就换成 `│ `。结果挂在同一棵树下：`└ ` **整块只出现一次**、在第一行实质输出上（截断提示行挂 `│ `，`└ ` 之下的输出 / warnings / `Took Xs` 只缩进两格不再画竖线），没有输出时补一行 `(no output)`（`└ ` 挂它前面）；`│ ` / `└ ` 取 `muted`（结构符，`Run ` 取 `toolTitle`；两者**各自是一段独立的前景 SGR**，前缀绝不继承后面 token 的颜色 —— 曾经路径那行的 `│` 跟着 path 色飘过）。只有 `Run` **这一个词**加粗（`bold("Run") + " "`，包住整个前缀会把行尾那格间距也变粗），命令正文一律不加粗（原先是命令名加粗）。**命令失败时** pi 把状态当普通输出拼在结果末尾（`appendStatus` 的 `\n\n` + `Command exited with code N` / `timed out after N seconds` / `aborted`，无输出时正文已被 pi 换成了 `(no output)`）—— 那句 `\n\n` 原本渲染成两行**没有前导符**的空行（用户说的“中间断层两层”），现在 `trimPreviewLines` 把状态与其前的空行一起摘下来、空行不画、状态当作预览必占的一行（否则它会被预览裁掉，只剩一条 `│ … (N earlier lines)`），`└ ` **之上**的空行补 `│ `（用户 2026-09-21 定的：栅栏不能断在空行上；来源是 pi 预览窗口开头的空行与失败状态前面的分隔空行），`└ ` **之下**的空行保持空行（树在那里就落地了，下面那截是缩进对齐的续行 —— 更多输出、`[Full output: …]` 之类的 warnings、`Took`，各自成段；挂竖线反而像还没完），最后按 `error` 槽染红（`isError` + `isFailureStatusLine` 两道判定：只看形态会把 `echo "Command exited with code 2"` 这种正常输出也染红）并放回尾部，展开态（ctrl+o）同样染色（不裁行、不挂树）。整块**既不带底色也不留边界空行**（`Box` 不带 bgFn、`paddingY: 0`：命令就是块的第 1 行、结果就是最后一行；左边距由组件自己画 —— 首行是 `• `、其余行两格空格，结果侧挂同宽的那一列。**只去 bash 的**底色，其他工具照旧）。同时保留：非流式（`onUpdate` 摘掉）、break-all 硬折行 + 行首 `Run ` 语法高亮（`syntax*` 槽）、`/bash-preview` 输出预览行数、`/bash-timeout`、短命令（<2s）不画 `Took` 页脚、`bashOutput` 独立输出色。详见文件头与 `bash-command-collapse/render.test.ts` |
 | `read-path-collapse.ts` | read 工具块的标题 + 结果（**用户 2026-09-21 定，与 bash 块同一套观感**）：`renderShell: "self"` 让 pi 不再套默认壳，于是整块**没有底色**（pending / 成功 / 失败三色底都不画）、**没有上下边界空行**（默认壳 `Box(1, 1)` 的那两条），只有内容本身；标题行 `• Read <路径>` —— 状态圆点 `•` 在**列 0**、`Read` 的 `R` 在**列 2**（正文整体右移一格），圆点颜色三态：**读的时候（pending / partial）`dim` 灰、成功 `toolDiffAdded` 绿、失败 `toolDiffRemoved` 红**（与 `bash-command-collapse.ts` 的 `stateBarAnsi` 同源，字形也一样）；结果正文每行两格缩进（与 `Read` 同列），pi 那个前导 `\n` 空行被剥掉，所以正文紧贴标题。左边距由孩子自己画（`withHeadBar`），`Box(0, 0)` 的孩子按 `width - MARGIN_WIDTH - RIGHT_PAD` 渲染。**只影响 read**：其他工具仍走 pi 的默认壳（有底色、有边界空行），有专门的对照断言。原有能力一字未动：长路径压缩成一行（`…` 前缀，装得下的短路径走 pi 原生渲染只换 `accent`→`text` 一个色）、工具名首字母大写（`Read`）、`[skill]` / `read docs` / `read resource` 紧凑形态、OSC 8 超链接、`(ctrl+o to expand)` 提示、`app.tools.expand` 从 keybindings.json 读。12 个端到端断言见 `read-path-collapse/render.test.ts`（含一条回归：cwd 之外的资源文件压缩后标签必须是路径而不是 `.`） |
+| `codemode-tree/` | **codemode 工具块的树形展示**（用户 2026-10-01 定，与 bash / read 块同一张列位表）：`• codemode` 顶格 → 代码（语法高亮，`… (N more lines, ctrl+o to expand)` 保留 10 视觉行预算）→ 结果树。列位与 bash 块**逐列对齐**：圆点列 0、`codemode` 与 `│` `└` 列 2、正文列 4；因此**所有子组件都按 `width - 4` 渲染**（命令侧也一样 —— 它在结果没到之前只挂 2 列缩进，那两列刻意空着；预算按最宽前缀算，折行宽度才不会在结果到达那一刻跳变）。`└ ` **整块只出现一次**，挂在结果的第一个实质内容行（嵌套调用清单的第一条）上，其下（后续调用、成本汇总、输出正文、截断提示）全部四格缩进；“执行中 → 结果到达”那一刻续行前缀从两格缩进换成 `│ `（判定看 `state.innerResult` 是否已存在，命令侧与结果侧因此**同帧**切换）。**圆点三态**（用户 2026-10-01 定，与 bash / read 同源，见 `stateDotSlot`）：**执行中白 `text`**、**成功绿 `toolDiffAdded`**（与 bash 成功圆点**逐字节同色**，测试是拿两份扩展同时渲染做对照的）、**失败红 `toolDiffRemoved`** —— 绿槽用的是 `toolDiffAdded` 而非 `success`，因为 bash / read 的绿圆点走的就是前者，两者当前主题里恰好同值、换皮会分叉。底色去掉后圆点是**唯一的结局灯**（pi 默认壳的 `toolErrorBg` 红底那层信号没了），所以它必须携带结局；缓存键里带上了状态，否则执行中的白点会被钉死到结果到达之后。`│` `└` 取 `muted`（结构符，自成一段 SGR）。整块无底色、无上下边界空行（`renderShell: "self"`，同上）。**它怎么拿到 codemode 的执行逻辑**：`codemode` 是 pi 的内置**扩展**（`builtin:codemode`）而不是内置工具，没有 `createCodemodeToolDefinition()` 这种“只给定义”的导出口径，所以这里用 `createCodemodeExtension()` 同一个工厂**捕获**它注册的定义（传一个只拦截 `registerTool` 的 Proxy，其余 `pi.*` 全部转发给真 API —— `getSettings` / `appendEntry` / `getAllTools` 都是工厂闭包里用到的，且要在调用时读实时值），然后展开 + 只覆盖两个渲染器与 `renderShell`。实测（真 CLI，2026-10-01）捕获到的 `parameters` 与 pi 自己那份**是同一个对象引用**，所以 MCP 扩展靠 schema 引用相等认「这是本包的 codemode」的那条 `isCodemodeTool()` 判定照常成立（换成自己写一份 schema 会让 MCP 的 codemode 自动激活静默失效）；A/B 同会话对比也确认**描述与参数 schema 逐字节相同**（5674 字节）。**settings 里配了 `extensions: ["-builtin:codemode"]`（用户 2026-10-01 决定）**：`codemode` 是 pi 声明了 `replaceable: true` 的内置扩展，另一个扩展注册同名工具时 pi 会把内置**整个不加载**并打一条 “built-in extension \`codemode\` was not loaded” 的 warning —— 那是预期的让位行为、不是错误，但 pi 启动时会把它渲染在**两处**（`[Extension issues]` 块 + `Warning: Extension package …` 行）且没有任何开关能压掉（`quietStartup` 只影响资源清单，不影响 diagnostics；扩展 API 也碰不到这两条的渲染）。用户选择显式禁用内置来消掉提示（SDK 实测：warnings 清零、codemode 仍由本扩展提供）。**代价**：`PI_CODEMODE_TREE=off` 的回退不再成立 —— off 时本扩展不注册、内置又被 settings 禁掉，codemode 工具会**整个消失**（此前 off 意味着“内置顶上”）；想恢复内置观感得先把 settings 里那条删掉。**折叠提示行有两种名词**（用户 2026-10-01 在大例子里看出来）：代码 / 输出预览是 `… (N more lines, …)` / `… (N earlier lines, …)`，而**嵌套调用清单**的折叠提示是 `... (N earlier calls, …)` —— 只认 `lines` 会让 `calls` 那行不被识别成提示行，`└ ` 就错挂在它头上（小例子调用数不过 8 条、根本不折叠，所以测不出来；回归断言用了内置渲染器的真实输出串）。`PI_CODEMODE_TREE=off` 关闭（注册期读一次；注意 settings 已禁内置，off 后 codemode 工具整个消失，不再是“恢复内置观感”）。23 个 `node --test` 用例：`render.test.ts`（11，纯逻辑：列位 / 宽度预算 / 连接态 / **圆点三态槽位**（含「执行中优先于 isError」）/ `└ ` 只一次 / 提示行挂 `│ ` / 提示行**两种名词**（`lines` 与 `calls`）全覆盖 / 全空返回空数组）+ `index.test.ts`（12，走 pi 真加载器 + `ToolExecutionComponent`：形状、**圆点三态**（含「成功态与 bash 成功圆点逐字节相同」与「结果到达后换色」）、**无底色**（三态、真彩色背景 SGR 判定）、无上下边界空行、`└ ` 只一次、`│` 列位、结果到达前后切换、截断提示行、语义继承（名字 / exposure / defaultActive / execute / prepareLoadout / parameters / renderShell）、展开态与多宽度不超宽）。**颜色断言刻意不硬编码色值**（bash / read 那 10 个长期失败用例就是写死了 `#666666`、主题一漂就误报），只断「与 bash 相同」这个关系与「三者互不相同」 |
 | `prompt-editor.ts` | 输入框 `❯ ` gutter（`!` bash 模式下换成 `!`、正文里输入的 `!` 不再显示）+ 补全列表与 statusline 之间补一行空行；纯逻辑在 `prompt-editor/bash-prompt.ts` |
 | `cwd-statusline.ts` | 用 `setStatus` 在 statusline 第二行显示完整 pwd（不经任何路径压缩） |
 | `folder-history.ts` | 按工作目录持久化命令历史，注入编辑器原生 ↑/↓（**不注册快捷键** —— 上游的 ctrl+↑/↓ 在 macOS 上被 Mission Control 抢走） |
@@ -1081,15 +1088,46 @@ modifyOtherKeys。而 pi **启动时会主动启用 Kitty 协议**（`pi-tui` �
   换机器照着改 `command`。）
 - **换机器 / 重装** → 按前面的 `cp` 装回去，再 `pi install npm:pi-web-access`、
   `pi install npm:pi-subagents` 与 `pi install git:github.com/jayli/superpowers`。
+- **外部包升级** → `pi update --extension npm:<pkg>` 在 `~/.pi/agent/npm` 里跑的是
+  `pnpm install <pkg>@latest`。pnpm 11 的**发布年龄策略**（`minimumReleaseAge`；实测把发布约 50 分钟
+  的版本判为「未成熟」而跳过）会让它静默不升级：锁文件里仍留旧版，输出只有
+  `pi-web-access 0.33.0 (0.34.0 is available)` 和一句 `Updated …`——**看起来成功，其实没动**。
+  旁证是本机 `pnpm-workspace.yaml` 里的 `minimumReleaseAgeExclude` 清单：每落后一次就多一条手工补的
+  `pkg@version`（现有 `pi-subagents@0.73.1` / `pi-subagents@0.74.0` / `pi-web-access@0.33.0` /
+  `pi-web-access@0.34.0` / `pi-web-access@0.35.0`）。
+  正确做法是把目标版本加进该清单，再指定版本安装：
+  `pnpm install pi-web-access@0.35.0 --prefix ~/.pi/agent/npm --config.minimumReleaseAge=0 --config.auto-install-peers=false`
+  （`--prefix` 与各 `--config.*` 是 pi 自己用的同一组参数；它会把版本写进 `package.json` 与锁文件。
+  只给 `@latest` 不行：旧 range 仍满足时 pnpm 会原地不动）。
+  **2026-10-01 补两条实测坑**：① **exclude 清单必须把 `package.json` 里声明的每一个新版本都列上**，
+  漏一个（当时漏了 `pi-subagents@0.74.0`）会让下一次 `pnpm install --frozen-lockfile` 直接
+  `ERR_PNPM_MINIMUM_RELEASE_AGE_VIOLATION` 失败：pnpm 11 的锁文件校验会拿**锁文件里已有的每一版**
+  去撞 24h 发布年龄，而校验阶段**不认** `minimumReleaseAgeExclude`；
+  ② 因此本地升级一律显式带 `--config.minimumReleaseAge=0`，别指望 exclude 清单。
+  另一条独立现象：`--prefix` 必须与 `--config.auto-install-peers=false` 搭配，否则 `--frozen-lockfile`
+  会报 `ERR_PNPM_LOCKFILE_CONFIG_MISMATCH`（锁文件里记着 `autoInstallPeers: false`）。
+  升级失败时 pnpm 会把旧目录挪进 `node_modules/.ignored/`（约 29MB 死数据，之后再没被引用），
+  重跑一次成功的 install 不会删它；该目录受内核 deny 保护，要清理只能走 dangerous 模式或
+  `PI_SANDBOX=off` 的裸终端。
+  验证：`node -p "require('$HOME/.pi/agent/npm/node_modules/pi-web-access/package.json').version"`，
+  然后**新起一个 pi 进程**才算数——当前会话里扩展不会热重载。
+
+- **pi 自身升级** → `pi update --self`，它跑的是
+  `pnpm install -g --ignore-scripts --config.minimumReleaseAge=0 @earendil-works/pi-coding-agent@<ver>`
+  （自带 `minimumReleaseAge=0`，所以不受上面那条坑影响）。**该命令在 pi 会话里会被沙箱拦死**：
+  pnpm 写全局 bin 目录要用 `_tmp_*` + rename，而 `~/Library/pnpm/bin` 在可删边界之外，
+  报 `[ERROR] The CLI has no write access to the global bin directory`（文案误导，实际是 EPERM）。
+  `~/Library` 属**危险档**，`/sandbox-boundary allow` 会拒，所以本地升级只能由用户自己
+  切 shift+tab dangerous 模式（或直接在裸终端跑）。装完 `pi --version` 在沙箱内即可验证。
 - **改完扩展的最低验证**是真起一次 pi（见上文「pi 平台的坑」——`node --test` 不校验语法）。
 - **面向本机 pi 的写法约定**：纯逻辑模块刻意**不 import pi / pi-tui**（鸭子类型 + 结构化最小接口），
   这样 `node --test` 能直接跑；`tool-diff/`、`statusline/`、`recap/`、`rewind/`、`simple-task/`、
-  `working-indicator/`、`startup-logo/`、`thinking-collapse/`、`fenceless-code-block/`、`prompt-editor/`、`user-message-bar/`
+  `working-indicator/`、`startup-logo/`、`thinking-collapse/`、`fenceless-code-block/`、`prompt-editor/`、`user-message-bar/`、`codemode-tree/`
   都按这个约定拆出了可单测的伴生模块
   （`thinking-collapse/window.ts` 只注入一个 `widthOf`，`node --test clients/pi/extensions/thinking-collapse/window.test.ts`）。
   `mcp/` 更进一步：`protocol.ts` / `config.ts` / `client.ts` / `tools.ts` / `headers-command.ts` **全部不 import pi**，
   只有 `index.ts` 接线 —— 所以整条 MCP 链路（含真实 spawn 子进程）都能 `node --test` 覆盖。
-- **`AGENTS.md` 自设 19000 字符预算**（当前 **19952 字符** ≈ 4988 tokens，**已超预算 952 字符**）：
+- **`AGENTS.md` 自设 19000 字符预算**（当前 **28017 字符** ≈ 7004 tokens，**已超预算 9017 字符**）：
   pi 本身没有上限 —— 0.87.1 的 `system-prompt.js` 是原样拼接 context files、无截断，实测把标记放在
   9500 字符处仍被模型逐字读回；这条上限是自设的每请求固定开销预算，一路放宽：7400 → 8000（skill 优先级
   与 shell 卫生）→ 9600（issue #8 的 `## Uncertainty` 节）→ 18000（2026-09-23 删除安全 / 爆炸半径重写）
@@ -1100,6 +1138,16 @@ modifyOtherKeys。而 pi **启动时会主动启用 Kitty 协议**（`pi-tui` �
   委派仍守全部纪律）；`## Verification` 加两条（写文档前逐条对权威来源核事实、报告须写明跑了哪些验证）。
   同一次改动里压缩了现有节腾空间（Git↔Shell 的交互式禁令去重、secrets/staging 三条合并、Destructive
   actions 措辞瘦身），所以抬上限是买新规则而非灌水。下次再加规则前仍须先压缩或再抬上限。
+  **2026-09-30 修掉一条自相矛盾的等待规则**（mc-heavy 会话 `01a0f113` 归因）：`## Shell commands`
+  原写「Do not block on `sleep` or any wait longer than 60 seconds — **poll**, or split the work」——
+  全文唯一提到等待的地方，说的却是「轮询」，而该文件与 `AGENTS.core.md` **一处都没提**
+  `run_in_background` 的通知唤醒机制，于是模型照着写下的规则一遍遍 `sleep` 轮询后台任务日志
+  （那次会话实测：崩坏窗口 08:52:37→08:59:00 内零通知到达，只有 `sleep 150 / 120 / 90`；全会话 38 次
+  sleep 共 56.6 分钟，直到用户插话才停）。工具描述里明写「never sleep or poll」但拗不过全局规则。
+  现改为「Never wait by blocking: no `sleep`-poll loops, nothing over 60s in one call. For a long
+  command, `run_in_background` is the answer — start it, end the turn; its terminal notification wakes
+  you」，`AGENTS.core.md` 同步加一条（否则会被 `core-rules` 中途重注入压过）。字符账：+162。
+  同一次归因还定下 `settings.json` 的 `followUpMode: "all"`（见上文 settings 一节）。
   **2026-09-24 把 plan 门控回摆了一档**（上面那档「默认准入」的修正，不改写历史记录）：实测本机
   23 个 session / 97 条用户指令里模型主动进了 **15 次** plan（15.5% 的指令、61% 的 session），且误报
   集中在两类——纯调研/写报告（CC 明列 “Pure research/exploration tasks” 不进 plan）和用户已给具体

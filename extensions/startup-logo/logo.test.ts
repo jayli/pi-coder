@@ -10,6 +10,7 @@ import {
 	MARK_WIDTH,
 	attachSideText,
 	composeHeaderLines,
+	formatTitleLine,
 	markCellFilled,
 	markLines,
 	shortenPath,
@@ -17,6 +18,12 @@ import {
 
 /** 去掉 ANSI，只看几何。 */
 const plain = (line: string): string => line.replace(/\u001b\[[0-9;]*m/g, "");
+
+/** 恒等主题：剥掉 ANSI 后就是纯文本。 */
+const identityTheme = {
+	fg: (_color: string, text: string) => text,
+	bold: (text: string) => text,
+};
 
 test("印记是 4×4 格子，本体宽 12、左侧留白一格所以整行 13", () => {
 	assert.equal(MARK_CELL, "███");
@@ -106,12 +113,48 @@ test("每行可见宽度恒等于 MARK_WIDTH（挂不挂侧栏的行都等宽，
 	}
 });
 
-test("composeHeaderLines：段之间恰好一个空行，缺段不留空行", () => {
-	assert.deepEqual(composeHeaderLines({ logo: ["a", "b"], hints: "h", onboarding: "o" }), ["a", "b", "", "h", "", "o"]);
-	assert.deepEqual(composeHeaderLines({ logo: ["a"], hints: "h" }), ["a", "", "h"]);
-	assert.deepEqual(composeHeaderLines({ logo: [], hints: "h", onboarding: "o" }), ["h", "", "o"]);
+test("composeHeaderLines：段之间恰好一个空行，缺段不留空行（提示行与说明行都缩进一格）", () => {
+	assert.deepEqual(composeHeaderLines({ logo: ["a", "b"], hints: "h", onboarding: "o" }), ["a", "b", "", " h", "", " o"]);
+	assert.deepEqual(composeHeaderLines({ logo: ["a"], hints: "h" }), ["a", "", " h"]);
+	assert.deepEqual(composeHeaderLines({ logo: [], hints: "h", onboarding: "o" }), [" h", "", " o"]);
 	assert.deepEqual(composeHeaderLines({ logo: [] }), []);
-	assert.deepEqual(composeHeaderLines({ logo: [], onboarding: "o" }), ["o"]);
+	assert.deepEqual(composeHeaderLines({ logo: [], onboarding: "o" }), [" o"]);
+	// 每一行都不顶格（空行不算）：印记行自带缩进，文字行由这里补上
+	for (const line of composeHeaderLines({ logo: markLines(), hints: "h", onboarding: "o" })) {
+		if (line === "") continue;
+		assert.ok(line.startsWith(MARK_INDENT), `每一行都不能顶格：${JSON.stringify(line)}`);
+	}
+});
+
+test("formatTitleLine：版本号后面跟模型与推理档位", () => {
+	assert.equal(
+		formatTitleLine(identityTheme, "0.99.2", "deepseek-flash-qd", "max"),
+		"pi v0.99.2 (deepseek-flash-qd with max effort)",
+	);
+	// 档位读不到（非推理模型 / stale ctx）时只剩模型
+	assert.equal(formatTitleLine(identityTheme, "0.99.2", "deepseek-flash-qd", undefined), "pi v0.99.2 (deepseek-flash-qd)");
+	// 模型读不到时整个括号都不出现
+	assert.equal(formatTitleLine(identityTheme, "0.99.2", undefined, "max"), "pi v0.99.2");
+	assert.equal(formatTitleLine(identityTheme, "0.99.2", undefined, undefined), "pi v0.99.2");
+});
+
+test("formatTitleLine：painted 主题下模型 / 档位各走自己的色槽（与 statusline 的模型段同色）", () => {
+	const slots: string[] = [];
+	const painted = {
+		fg: (color: string, text: string) => {
+			slots.push(color);
+			return `\u001b[38;5;1m${text}\u001b[39m`;
+		},
+		bold: (text: string) => text,
+	};
+	const line = formatTitleLine(painted, "0.99.2", "qwen3.8-max", "xhigh");
+	assert.ok(slots.includes("accent"), "模型 id 用 accent");
+	assert.ok(slots.includes("syntaxFunction"), "档位用 syntaxFunction");
+	// 剥掉 ANSI 后坐标不变：每一截都仍按顺序拼在一起
+	assert.equal(
+		plain(line),
+		"pi v0.99.2 (qwen3.8-max with xhigh effort)",
+	);
 });
 
 test("shortenPath：家目录内缩写，外面原样", () => {

@@ -3,8 +3,14 @@
  *
  * pi 的内置 header（`interactive-mode.js`）只有 `pi vX.Y.Z` 一行加几条快捷键提示，没有图形。
  * 本扩展用 `ctx.ui.setHeader()` 换掉它：顶部一只静态的 pi.dev 印记（形 `npm:pi-claude-code-tui`
- * 的字形数据，但**不装那个包**，理由见 `logo.ts` 与 README），右侧挂版本号与当前目录
+ * 的字形数据，但**不装那个包**，理由见 `logo.ts` 与 README），右侧挂标题行与当前目录
  * （家目录内显示成 `~/...`），下面仍是内置那套紧凑快捷键提示，所以换掉 header 不丢信息。
+ * 标题行是 `pi vX.Y.Z (deepseek-flash-qd with max effort)`：**版本号后面跟当前模型与推理档位**
+ * （用户 2026-10-01 定），模型 id 从 `ctx.model?.id`、档位从 `ctx.thinkingLevel` 现取，
+ * 两条都是 live getter，所以 `/model` 换模型、shift+tab 换档位之后下一帧即跟随。
+ *
+ * **每一行都不顶格**（用户 2026-10-01 定）：印记行、提示行、说明行统一缩进一格（`MARK_INDENT`），
+ * 与印记左边对齐。缩进在 `composeHeaderLines` 里统一补，`index.ts` 这边不需要另管。
  *
  * logo **常开**：没有 `/logo` 开关命令（也不再在说明行里提它），`PI_LOGO=off` 是唯一的口子。
  *
@@ -42,6 +48,7 @@ import {
 	MARK_WIDTH,
 	attachSideText,
 	composeHeaderLines,
+	formatTitleLine,
 	markLines,
 	shortenPath,
 } from "./logo.ts";
@@ -106,29 +113,47 @@ export default function startupLogo(pi: ExtensionAPI) {
 	};
 
 	/** 一帧的完整行：印记 → 提示行 → 说明行。 */
-	const buildLines = (theme: Theme, cwd: string, width: number): string[] => {
-		const wordmark = theme.bold(theme.fg("accent", "pi")) + theme.fg("dim", ` v${VERSION}`);
-		const where = theme.fg("muted", shortenPath(cwd, homeDir()));
+	const buildLines = (theme: Theme, ctx: ExtensionContext, width: number): string[] => {
+		// 模型 id 与档位是 live getter，会话被换掉后旧 ctx 上读它们会抛（同 statusline）；
+		// 读不到就省掉标题行里那一截，不能因此把整个 header 弄挂。
+		let model: string | undefined;
+		let level: string | undefined;
+		try {
+			model = ctx.model?.id;
+			level = ctx.thinkingLevel;
+		} catch {
+			// stale ctx：标题退回只显示版本号
+		}
+		const wordmark = formatTitleLine(theme, VERSION, model, level);
+		const where = theme.fg("muted", shortenPath(ctx.cwd, homeDir()));
 		const hints = buildHints(theme);
 		const onboarding = theme.fg("dim", "Pi can explain its own features and look up its docs.");
+
+		// 提示行 / 说明行也过一遍截断：它们本身就有 53 列，加上 `MARK_INDENT` 那一格后在 53 列的
+		// 终端上会刚好超宽 —— 而 pi-tui 对超宽的行是直接抛错（整个 TUI 挂掉）。口径按**含缩进**的
+		// 整行算（先扣掉那一格再裁），所以「每一帧都不超宽」不依赖终端多宽。
+		const clamp = (line: string | undefined): string | undefined =>
+			line === undefined ? undefined : truncateToWidth(line, Math.max(1, width - MARK_INDENT.length), ELLIPSIS);
 
 		// 窄终端：不画印记，退化成单行 wordmark（同样缩进一格，跟印记左边对齐）。
 		if (width < MARK_WIDTH + MIN_SIDE_COLUMNS) {
 			const room = Math.max(1, width - MARK_INDENT.length);
 			return composeHeaderLines({
 				logo: [`${MARK_INDENT}${truncateToWidth(wordmark, room, ELLIPSIS)}`],
-				hints,
-				onboarding,
+				hints: clamp(hints),
+				onboarding: clamp(onboarding),
 			});
 		}
 		const sideRoom = Math.max(0, width - MARK_WIDTH - SIDE_GAP);
 		// 逐格上色（整行包一层会让行尾的 trimEnd 失效，见 logo.ts 的 markLines）
+		// 标题行必须跟 cwd 一样裁：pi-tui 对超出终端宽度的行是**直接抛错**
+		// （`Rendered line N exceeds terminal width`），而模型 id 是外部输入、长度无上限。
 		const logo = attachSideText(
 			markLines((filled) => (filled ? theme.fg("accent", MARK_CELL) : " ".repeat(MARK_CELL.length))),
-			[wordmark, truncateToWidth(where, sideRoom, ELLIPSIS)],
+			[truncateToWidth(wordmark, sideRoom, ELLIPSIS), truncateToWidth(where, sideRoom, ELLIPSIS)],
 			SIDE_GAP,
 		);
-		return composeHeaderLines({ logo, hints, onboarding });
+		return composeHeaderLines({ logo, hints: clamp(hints), onboarding: clamp(onboarding) });
 	};
 
 	const installHeader = (ctx: ExtensionContext) => {
@@ -143,7 +168,7 @@ export default function startupLogo(pi: ExtensionAPI) {
 			const own: HeaderComponent = {
 				invalidate() {},
 				render(width: number): string[] {
-					const lines = buildLines(theme, ctx.cwd, Math.max(1, width));
+					const lines = buildLines(theme, ctx, Math.max(1, width));
 					// 换会话时按身份比对我们是否还在容器里，不在就拿这份行重放（见 header-guard.ts）。
 					lastLines = lines;
 					return lines;
