@@ -15,7 +15,10 @@
   "defaultTools": ["+codemode"],
   "tuiMode": "regular",
   "packages": [
-    "npm:pi-web-access",
+    {
+      "source": "npm:pi-web-access",
+      "extensions": []
+    },
     "npm:pi-subagents",
     "git:github.com/jayli/superpowers"
   ],

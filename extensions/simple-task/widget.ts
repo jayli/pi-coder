@@ -7,7 +7,8 @@
  *   - 已完成：success 色符号 + dim 且带删除线的正文
  *   - 进行中：accent 色星形 spinner 帧 + accent 色正文 + 省略号（表示仍在跑）
  *   - 待办：无色符号（◻）+ 普通正文
- *   - 溢出：`    … and N more`，dim
+ *   - 溢出：下方 `    … and N more`、上方 `    … N more`，dim
+ *   - 视口大小 8（超过就开始折叠）；窗口跟随进度滚动（上面隐藏了更早的项时就出现上行折叠提示）：见 viewport.ts
  *   - 整行按终端宽度截断，截断标记用 "..."（三个 ASCII 点）而非 "…" ——
  *     这是 pi-tasks 的 `truncation` 默认值，注释里说明它是 pi-tui 自己的默认。
  *
@@ -21,6 +22,7 @@
 import { truncateToWidth } from "@earendil-works/pi-tui";
 import type { Theme } from "@earendil-works/pi-coding-agent";
 import { countByStatus, type State } from "./types.ts";
+import { computeViewport, MAX_VISIBLE as MAX_VISIBLE_TASKS } from "./viewport.ts";
 
 export const GLYPHS = {
 	header: "●",
@@ -37,8 +39,8 @@ export const GLYPHS = {
 // 换成了静态的 “▣”
 export const SPINNER = ["▣","▣"] as const;
 
-/** pi-tasks 的 DEFAULT_MAX_VISIBLE_TASKS。超出部分折叠成 "… and N more"。 */
-export const MAX_VISIBLE = 10;
+/** 视口大小（现为 8，见 viewport.ts）。超出部分在两端折叠成 `… N more` / `… and N more`。 */
+export const MAX_VISIBLE = MAX_VISIBLE_TASKS;
 
 export function buildWidgetLines(state: State, frame: number, theme: Theme, width: number): string[] {
 	const tasks = state.tasks;
@@ -59,8 +61,14 @@ export function buildWidgetLines(state: State, frame: number, theme: Theme, widt
 	// 不画头部，那套镜像已随 plan-mode 的 execute 态一起删除。）
 	const lines: string[] = [truncate(`${theme.fg("accent", GLYPHS.header)} ${theme.fg("accent", statusText)}`)];
 
-	const visible = tasks.slice(0, MAX_VISIBLE);
-	const hidden = tasks.length - visible.length;
+	const { start, end, head, tail } = computeViewport(tasks, MAX_VISIBLE);
+	const visible = tasks.slice(start, end);
+
+	// 上方折叠提示：更早的项被滚出视口时才出现。文案刻意不带 "and" ——
+	// 它是 "… N more"，读作「上面还有 N 条」，与下方 "… and N more" 区分开。
+	if (head > 0) {
+		lines.push(truncate(theme.fg("dim", `    ${GLYPHS.overflow} ${head} more`)));
+	}
 
 	for (const task of visible) {
 		const dimId = theme.fg("dim", `#${task.id}`);
@@ -82,8 +90,8 @@ export function buildWidgetLines(state: State, frame: number, theme: Theme, widt
 		lines.push(truncate(`  ${GLYPHS.pending} ${dimId} ${task.text}`));
 	}
 
-	if (hidden > 0) {
-		lines.push(truncate(theme.fg("dim", `    ${GLYPHS.overflow} and ${hidden} more`)));
+	if (tail > 0) {
+		lines.push(truncate(theme.fg("dim", `    ${GLYPHS.overflow} and ${tail} more`)));
 	}
 
 	return lines;

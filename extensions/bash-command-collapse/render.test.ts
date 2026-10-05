@@ -297,6 +297,17 @@ const text = (command: string, options: RenderOptions = {}): string[] => renderB
 const SLOW = { elapsedMs: 3000 } as const;
 
 const LONG_COMMAND =
+	"cp /Users/bachi/Library/pnpm/store/v11/links/@earendil-works/pi-coding-agent/0.86.0/5813aee6dbf81477902199f3db54e13ab115c8902b3ab00a8b290b3e44dcb3c8/node_modules/@earendil-works/pi-coding-agent /tmp/pi-baseline";
+
+/**
+ * 同上，只是把命令名换成 `cd` —— **缩略用例专用**（新功能一期只对 `cat`/`cd`/`ls`/`ln` 动手）。
+ *
+ * 为什么几何类用例用 `cp` 而不用 `cd`：用户 2026-10-03 定的缩略一期把 `cd <长地址>` 缩成
+ * `cd /Users/bachi…/pi-coding-agent`，于是它只占一行、不再产生续行与 `… +N lines` 标记 ——
+ * 折行 / 列位 / 高亮那几条用例的观察对象（续行的列位、`│ ` 的颜色）就全没了。它们要的是
+ * 「一条会折行的长命令」，命令名本身不重要，`cp` 与 `cd` 等宽、折行偏移一模一样。
+ */
+const LONG_COMMAND_FOR_ABBREV =
 	"cd /Users/bachi/Library/pnpm/store/v11/links/@earendil-works/pi-coding-agent/0.86.0/5813aee6dbf81477902199f3db54e13ab115c8902b3ab00a8b290b3e44dcb3c8/node_modules/@earendil-works/pi-coding-agent";
 
 /**
@@ -313,7 +324,7 @@ test("命令行：`•Run ` 开头，最多两行，第二行溢出换 `…`", {
 	const lines = raw.map(body);
 	// 结构固定：命令首行 + 1 个续行 + `… +N lines` 标记，然后才是结果
 	assert.equal(raw[0], "", "第 0 行是 pi self 模式的固定留白（不算在染色块里）");
-	assert.equal(raw[1]!.startsWith("• Run cd "), true, `块的第 1 行应当是圆点 + 空格 + Run 开头的命令：${raw[1]}`);
+	assert.equal(raw[1]!.startsWith("• Run cp "), true, `块的第 1 行应当是圆点 + 空格 + Run 开头的命令：${raw[1]}`);
 	assert.equal(lines[2]!.startsWith("│ gent/"), true, `第 2 行应当是续行：${lines[2]}`);
 	assert.equal(lines[2]!.endsWith(ELLIPSIS_PLAIN), true, `溢出的行尾必须换成 …：${lines[2]}`);
 	assert.equal(lines[3], "│ … +1 lines", `第 3 行应当是折叠标记：${lines[3]}`);
@@ -587,7 +598,7 @@ test("着色：命令续行的 `│` 是 muted，不跟着后面 token 的颜色
 	// 命令第 2 行的正文是路径（`syntaxString`），第 1 行末尾也是路径 —— 两行的 `│` 与
 	// `Run ` 必须各是各的色：结构符一头一尾都不能继承正文的颜色（实测踩过：`│` 跟着 path 色）。
 	const lines = renderBlock(LONG_COMMAND, { output: "ok\n" });
-	const run = lines.find((line) => plain(line).includes("Run cd "))!;
+	const run = lines.find((line) => plain(line).includes("Run cp "))!;
 	const continuation = lines.find((line) => plain(line).includes("ent/0.86.0"))!;
 	assert.ok(run && continuation, "两行命令行都该在");
 
@@ -604,9 +615,56 @@ test("着色：命令续行的 `│` 是 muted，不跟着后面 token 的颜色
 	assert.ok(pathIndex > chainIndex, "path 色必须排在 │ 前缀之后");
 });
 
+test("地址缩略：折叠态只对点名命令的地址动手，未点名的命令一字不动", { skip }, () => {
+	// 用户 2026-10-03 定的一期范围：`cat` / `cd` / `ls` / `ln` 的地址参数 + `NAME=<路径>` 赋值。
+	// 纯函数测试盖不到「接没接进 renderCall / 阈值用的是哪一档」，所以这里断言屏幕上的行。
+	const LNS =
+		"/Users/bachi/Library/pnpm/store/v11/links/@earendil-works/pi-coding-agent/1.0.0/37d1cb5c3be3707b62fbfebebda5cf0a1317c413c77cb67cb1b35b90714d5e01/node_modules/@earendil-works/pi-coding-agent";
+	// 80 列终端：正文可用 79 − 3 − 4 = 72 列 → 阈值 28
+	const shown = text(`cd ${LNS}`, { output: "ok\n", width: 80 });
+	const line = shown.find((l) => l.includes("Run cd"))!;
+	assert.ok(line.includes(ELLIPSIS_PLAIN), `长地址该被缩略：${line}`);
+	assert.equal(line.includes("pnpm/store"), false, `中间那些层该被吞掉：${line}`);
+	assert.ok(line.includes("pi-coding-agent"), `尾部目录要留着：${line}`);
+
+	// 未点名的命令（`import … from \"/Users/…\"`，用户明确要求不缩）：命令文本必须原封不动。
+	// 断言口径要注意：命令会被**硬折行**，行首还挂着树形前缀（`│ `），所以要把空白与
+	// 树符都剥掉再拼成一条串来比 —— 直接 `includes(路径)` 永远失败（路径跨行、中间描着 `│`）。
+	const flat = (lines: string[]): string => lines.join("\n").replace(/[\s│└]/g, "");
+	const untouched = `import { discoverAndLoadExtensions } from "${LNS}/dist/index.js"`;
+	const folded = text(untouched, { output: "ok\n", width: 80 });
+	assert.equal(flat(folded).includes("…/"), false, `未点名的命令不该出现缩略标记：${folded.join("\n")}`);
+	const whole = text(untouched, { output: "ok\n", width: 80, expanded: true });
+	assert.equal(flat(whole).includes(`${LNS}/dist/index.js`), true, `未点名的命令要原样（展开态）：${whole.join("\n")}`);
+
+	// 几何用例的 fixture 换成了 `cp`（不是点名命令）—— 那条路径在**点名命令**下确实会缩
+	assert.equal(flat(text(LONG_COMMAND_FOR_ABBREV, { output: "ok\n", width: 79 })).includes("pnpm/store"), false, "`cd <长地址>` 该缩掉中间层");
+});
+
+test("地址缩略：展开态（ctrl+o）保留完整命令，一个字不缩", { skip }, () => {
+	const LNS =
+		"/Users/bachi/Library/pnpm/store/v11/links/@earendil-works/pi-coding-agent/1.0.0/37d1cb5c3be3707b62fbfebebda5cf0a1317c413c77cb67cb1b35b90714d5e01/node_modules/@earendil-works/pi-coding-agent";
+	const expanded = text(`cd ${LNS}`, { output: "ok\n", expanded: true, width: 80 });
+	// 展开态是唯一能看到命令全貌的地方：中间层必须原样在（同样剥掉硬折行的空白与树符）
+	const flat = expanded.join("\n").replace(/[\s│└]/g, "");
+	assert.equal(flat.includes("pnpm/store/v11/links"), true, `展开态不该缩略：${expanded.join("\n")}`);
+	assert.equal(flat.includes("node_modules/@earendil-works/pi-coding-agent"), true, `展开态要完整路径：${expanded.join("\n")}`);
+});
+
+test("地址缩略：缩略后每行仍然不超终端宽（含多地址与管道）", { skip }, () => {
+	const LNS =
+		"/Users/bachi/Library/pnpm/store/v11/links/@earendil-works/pi-coding-agent/1.0.0/37d1cb5c3be3707b62fbfebebda5cf0a1317c413c77cb67cb1b35b90714d5e01/node_modules/@earendil-works/pi-coding-agent";
+	for (const width of [120, 80, 60, 40, 30]) {
+		for (const command of [`cd ${LNS}`, `cat ${LNS}/a.ts ${LNS}/b.ts`, `P=${LNS}; ls -la ${LNS}/dist | cat`]) {
+			for (const line of renderBlock(command, { output: "ok\n", width })) {
+				assert.ok(widthOf(line) <= width, `宽度 ${width} 下超宽：${JSON.stringify(plain(line))}`);
+			}
+		}
+	}
+});
+
 test("着色：只有 `Run` 那个词加粗，命令正文不加粗", { skip }, () => {
-	const lines = renderBlock("echo hi", { output: "ok\n", ...SLOW });
-	const run = lines.find((line) => plain(line).includes("Run echo hi"))!;
+	const lines = renderBlock("echo hi", { output: "ok\n", ...SLOW });	const run = lines.find((line) => plain(line).includes("Run echo hi"))!;
 	assert.ok(run, "命令行该在");
 	// `Run` 外面套着粗体开/关，**行尾那个空格在粗体之外**（包住前缀会让间距看着变宽）
 	assert.match(run, /\u001b\[1mRun\u001b\[22m /, `Run 该加粗且空格不加粗：${JSON.stringify(run)}`);
@@ -1096,7 +1154,7 @@ test("沙箱：dangerous 模式（plan-mode 三态）运行时关掉包裹，越
 	// 而在 pi 会话里跑测试时，外层沙箱恰好只放行仓库目录与 temp 根 —— temp 根两边都在
 	// 边界内，区分不出东西。只有仓库目录能同时满足「扩展看来越界」+「外层沙箱可删」，
 	// 于是本用例在普通终端与 pi 沙箱里跑出的结果一致。
-	// 仓库根不能写死层数：上游快照里本文件在 `clients/pi/extensions/bash-command-collapse/`，
+	// 仓库根不能写死层数：上游快照里本文件在 `clients/pi/extensions/bash-command-collapse/`,
 	// 独立仓库里只有 `extensions/bash-command-collapse/` —— 差两级，写死 `..` 会让探针落到 $HOME。
 	// 改成往上找第一个含 `.git` 的目录，找不到就退回 process.cwd()（`npm test` 时即仓库根）。
 	let repoRoot = path.dirname(fileURLToPath(import.meta.url));

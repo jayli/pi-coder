@@ -10,6 +10,9 @@
 // 与 line.test.ts 里 plan-mode 的 `STATUS_KEY` 同一套取舍：两份字面量一旦漂移，
 // dock 行会静默退回拼接的第二行，没有任何报错 —— import 常量就永不发生。
 import { STATUS_KEY as BACKGROUND_DOCK_STATUS_KEY } from "../background-tasks/status.ts";
+// 口播流程的保留 status key 住在 voice 那边：主行末段的 `reporting`（用户 2026-10-04 加）
+// 由 voice 发布、这里渲染；同一个键也要从第二行的扩展 status 列表里跳过。
+import { REPORTING_LABEL, REPORTING_STATUS_KEY } from "../voice/status.ts";
 
 /** pi 的 Theme.fg 子集（方法声明双变，真实 Theme 可直接赋值）。 */
 export interface StatuslineTheme {
@@ -107,7 +110,7 @@ export function formatMainLine(
 		formatContextSegment(theme, source),
 		formatBranchSegment(theme, branch),
 		formatDiffSegment(theme, branch, state.diffStat),
-		formatStateSegment(theme, state),
+		formatStateSegment(theme, git, state),
 	].filter((segment): segment is string => Boolean(segment));
 	return segments.join(dim(theme, SEPARATOR));
 }
@@ -155,14 +158,16 @@ export function composeFooterLines(
  *
  * 顺序：先按 `STATUS_PRIORITY`（模式指示排行首），其余按注册顺序。
  *
- * 后台任务 dock 的保留键在这里被**跳过**（它由 `composeFooterLines` 单独渲染成最后一行），
- * 所以既不占下面的 5 条预算，也不会与长 cwd 同行被截断。
+ * 两个保留键在这里被**跳过**：后台任务 dock 由 `composeFooterLines` 单独渲染成最后一行
+ * （所以既不占下面的 5 条预算，也不与长 cwd 同行被截断），口播的 `reporting` 则由主行
+ * 末段渲染（`formatStateSegment`）—— 不跳过它们就会同一件事显示两遍。
  */
 export function formatExtensionStatuses(theme: StatuslineTheme, git: StatuslineGitSource): string {
 	const entries = [...git.getExtensionStatuses().entries()].filter(
 		([key, value]) =>
 			key !== STATUSLINE_KEY &&
 			key !== BACKGROUND_DOCK_STATUS_KEY &&
+			key !== REPORTING_STATUS_KEY &&
 			value.trim().length > 0,
 	);
 
@@ -210,8 +215,27 @@ function formatDiffSegment(
 	return `${dim(theme, "(")}${theme.fg("success", `+${diffStat?.added ?? 0}`)}${dim(theme, ",")}${theme.fg("error", `-${diffStat?.deleted ?? 0}`)}${dim(theme, ")")}`;
 }
 
-/** 末段状态：有工具在跑 → 工具名（并发带计数），否则流式中 → thinking，空闲 → 整段不出现；整段用 warning 着色。 */
-function formatStateSegment(theme: StatuslineTheme, state: StatuslineState): string | undefined {
+/**
+ * 末段状态（主行最后一段）：下面四档按优先级从高到低，只显示第一个命中的。
+ *
+ *   1. **口播流程中 → `reporting`**（voice 扩展发的保留 status）—— 用户 2026-10-04 要求
+ *      显示在「thinking 和 bash 等字样显示的位置」。它**排在最前**：摘要阶段 `streaming`
+ *      仍为真（回合还没 settle），排后面就会被 `thinking` 盖掉，而那正是最需要解释的
+ *      「沉默几秒」窗口。
+ *   2. 有工具在跑 → 工具名（并发带计数）
+ *   3. 流式中 → `thinking`
+ *   4. 空闲 → 整段不出现
+ *
+ * 四种文案都是小写状态词，同一档视觉重量，用同一个色槽（warning）。
+ */
+function formatStateSegment(
+	theme: StatuslineTheme,
+	git: StatuslineGitSource,
+	state: StatuslineState,
+): string | undefined {
+	// 空串也当「没发布」：`formatExtensionStatuses` 对空值的判定是同一个口径。
+	const reporting = git.getExtensionStatuses().get(REPORTING_STATUS_KEY);
+	if (reporting && reporting.trim().length > 0) return theme.fg("warning", REPORTING_LABEL);
 	const active = [...state.activeTools.entries()];
 	if (active.length > 0) {
 		const [name, count] = active[0] ?? ["tool", 1];

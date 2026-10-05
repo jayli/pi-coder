@@ -40,6 +40,13 @@ import {
 	formatBackgroundStatus,
 } from "../background-tasks/status.ts";
 
+// 口播流程的保留键住在 voice 那边（与 dock 键同一套跨目录 import 取舍）：两份字面量一旦
+// 漂移，主行末段的 `reporting` 会静默不显示、或者同一件事在第二行重复显示。
+import {
+	REPORTING_LABEL,
+	REPORTING_STATUS_KEY,
+} from "../voice/status.ts";
+
 const plain: StatuslineTheme = { fg: (_color, text) => text };
 const painted: StatuslineTheme = { fg: (color, text) => `${color}(${text})` };
 
@@ -245,6 +252,64 @@ describe("formatMainLine", () => {
 		);
 		assert.equal(formatMainLine(painted, sourceOf(), gitOf("main"), stateOf()).includes("thinking"), false);
 	});
+
+	// 用户 2026-10-04：口播流程进行中，在「thinking 和 bash 等字样显示的位置」显示 reporting。
+	describe("reporting (语音播报)", () => {
+		const reporting = (value = REPORTING_LABEL) => new Map([[REPORTING_STATUS_KEY, value]]);
+
+		it("shows reporting in the state segment while the voice pipeline runs", () => {
+			assert.equal(
+				formatMainLine(plain, sourceOf(), gitOf("main", reporting()), stateOf()),
+				`${DOC} | \u15cc main | (+0,-0) | ${REPORTING_LABEL}`,
+			);
+		});
+
+		it("is gone once the voice extension clears it", () => {
+			assert.equal(
+				formatMainLine(plain, sourceOf(), gitOf("main"), stateOf({ streaming: true })),
+				`${DOC} | \u15cc main | (+0,-0) | thinking`,
+			);
+		});
+
+		it("outranks the tool name and thinking, because the summary runs before the turn settles", () => {
+			// 摘要是在结论那一条 turn_end 之后、`agent_settled` 之前跑的 —— 那段时间 streaming 仍为真，
+			// 还会带着末轮工具的状态；排后面就会被 thinking / 工具名盖掉，而那正是最需要解释的窗口。
+			assert.ok(
+				formatMainLine(
+					plain,
+					sourceOf(),
+					gitOf("main", reporting()),
+					stateOf({ streaming: true, activeTools: new Map([["bash", 1]]) }),
+				).endsWith(`| ${REPORTING_LABEL}`),
+			);
+		});
+
+		it("paints it with the same warning slot as the other state words", () => {
+			assert.ok(
+				formatMainLine(painted, sourceOf(), gitOf("main", reporting()), stateOf()).endsWith(
+					`warning(${REPORTING_LABEL})`,
+				),
+			);
+		});
+
+		it("does not render on the second line as well", () => {
+			const statuses = new Map([
+				[REPORTING_STATUS_KEY, REPORTING_LABEL],
+				["cwd", " 📁 /tmp/repo"],
+			]);
+			const lines = composeFooterLines(
+				plain,
+				sourceOf(),
+				gitOf("main", statuses),
+				stateOf(),
+				200,
+				(text) => text,
+			);
+			assert.ok(lines[0]?.endsWith(`| ${REPORTING_LABEL}`), lines[0]);
+			assert.equal(lines[1]?.includes(REPORTING_LABEL), false, `第二行不该重复：${lines[1]}`);
+			assert.ok(lines[1]?.includes("/tmp/repo"), lines[1]);
+		});
+	});
 });
 
 describe("STATUS_PRIORITY", () => {
@@ -282,10 +347,11 @@ describe("formatExtensionStatuses", () => {
 		assert.ok(rendered.endsWith("muted(📁 /tmp/repo)"), rendered);
 	});
 
-	it("skips blank values and its own statusline key", () => {
+	it("skips blank values, its own statusline key, and the reporting key", () => {
 		const statuses = new Map([
 			["statusline", "stale"],
 			["retry", "   "],
+			[REPORTING_STATUS_KEY, REPORTING_LABEL],
 			["cwd", " 📁 /tmp/repo"],
 		]);
 		assert.equal(formatExtensionStatuses(plain, gitOf("main", statuses)), "📁 /tmp/repo");

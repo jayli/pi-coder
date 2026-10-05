@@ -51,23 +51,58 @@ export const MARK_GLYPH_WIDTH = MARK_COLS * MARK_CELL.length;
 /** 每行可见宽度（含左侧留白）= 13。 */
 export const MARK_WIDTH = MARK_INDENT.length + MARK_GLYPH_WIDTH;
 
+/**
+ * 说明行的句子：`This pi harness is powered by latest @bachi/pi-coder.`
+ *
+ * 宽终端下尾部的 `pi-coder.` 会被 `POWERED_BY_ART` 的三行字形取代，只留下 `POWERED_BY_PREFIX`；
+ * 装不下时整行退回这个句子（见 `poweredByLines`）。两句都导出，是为了让「字形块到底替掉了
+ * 哪一截」在测试里可断言，而不是各处再抄一遍字符串。
+ */
+export const POWERED_BY_PREFIX = "This pi harness is powered by latest @bachi/";
+export const POWERED_BY_SENTENCE = `${POWERED_BY_PREFIX}pi-coder.`;
+
+/**
+ * `pi-coder` 的字形块（3 行 × 15 列，用户 2026-10-05 给的稿）。
+ *
+ * 三行等宽靠**行尾补空格**：原稿第 3 行只有 14 列，这里补到 15 —— 与印记行拿 `MARK_BLANK`
+ * 占位同一个道理，行尾空白在终端里不可见，但少了它第三行就比前两行短一列，字形会歪。
+ * 接缝处**不补空格**：`POWERED_BY_PREFIX` 末尾的 `/` 直接顶住字形第一列，读起来就是用户
+ * 给的 `@bachi/┃┃┓…` 那个形状。
+ *
+ * 这一块不参与入场动画那条对角线（动画只扫 4×4 印记格），也不随会话重来，与提示行一样是静态文字。
+ */
+export const POWERED_BY_ART: readonly string[] = ["┏┓•  ┏┓   ┓    ", "┃┃┓━━┃ ┏┓┏┫┏┓┏┓", "┣┛┗  ┗┛┗┛┗┻┗ ┛ "];
+
+/** 字形块宽度（列）。补过空格后三行等宽，取第一行即可 —— 等宽本身由测试钉住。 */
+export const POWERED_BY_ART_WIDTH = POWERED_BY_ART[0]!.length;
+
+/** 字形块 + 前缀的总列宽（不含 `composeHeaderLines` 补的那一格缩进）。 */
+export const POWERED_BY_WIDTH = POWERED_BY_PREFIX.length + POWERED_BY_ART_WIDTH;
+
 /** 单格查询（越界当作空格），给单测和调试用。 */
 export function markCellFilled(row: number, col: number): boolean {
 	return MARK_GRID[row]?.[col] === 1;
 }
 
 /**
- * 印记行的画笔：收「这一格实不实心」，返回**可见宽度为 3** 的字符串。
+ * 印记行的画笔：收「这一格实不实心」+ **格子的行列坐标**，返回**可见宽度为 3** 的字符串。
+ *
+ * 坐标入参是 2026-10-05 加入场动画时加的：动画要按**格子**算相位（对角波自右向左扫），
+ * 而 `markLines` 是唯一知道行列的地方。不影响旧调用方：TS 里参数少的函数可以直接当参数多的
+ * 用（`(filled) => …` 仍然是合法的 `MarkCellPainter`），所以静态路径一字未改。
  *
  * 刻意做成逐格而不是「整行交给一个 paint」：整行包色会把行尾那几个占位空格也吃进色块里，
  * 于是「每行可见宽度 == MARK_WIDTH」这个不变量在带色版本上就不成立了（侧栏列会歪）。
  *
  * 默认画笔返回未着色的 `███` / 空格，方便单测。
  */
-export type MarkCellPainter = (filled: boolean) => string;
+export type MarkCellPainter = (filled: boolean, row: number, col: number) => string;
 
 export function markLines(paintCell: MarkCellPainter = (filled) => (filled ? MARK_CELL : MARK_BLANK)): string[] {
-	return MARK_GRID.map((row) => MARK_INDENT + row.map((filled) => paintCell(filled === 1)).join(""));
+	return MARK_GRID.map(
+		(row, rowIndex) =>
+			MARK_INDENT + row.map((filled, colIndex) => paintCell(filled === 1, rowIndex, colIndex)).join(""),
+	);
 }
 
 /**
@@ -81,9 +116,19 @@ export function markLines(paintCell: MarkCellPainter = (filled) => (filled ? MAR
  * 在这里也不成立（行尾是 ANSI 重置符而不是空白，`trimEnd` 会静默变成空操作），所以统一不裁，
  * 让行为与调用方怎么上色无关。这些空格没有底色，终端里不可见，pi 也照样按宽度截断。
  */
+/**
+ * 侧栏从第几行开始贴（垂直居中）：`attachSideText` 与本扩展的逐行淡化共用这一条。
+ *
+ * 抽出来是因为入场动画要按**行**算淡化量（波头到达本行右端时文字跟着亮），而「文字到底贴
+ * 在哪几行」的算法必须和 `attachSideText` 完全一致 —— 各写一份迟早会错开一帧。
+ */
+export function sideTextStartRow(lineCount: number, rowCount: number = MARK_ROWS): number {
+	return Math.max(0, Math.floor((rowCount - lineCount) / 2));
+}
+
 export function attachSideText(lines: readonly string[], side: readonly string[], gap = 2): string[] {
 	if (lines.length === 0) return [];
-	const start = Math.max(0, Math.floor((lines.length - side.length) / 2));
+	const start = sideTextStartRow(side.length, lines.length);
 	return lines.map((line, i) => {
 		const text = side[i - start];
 		return i >= start && text ? `${line}${" ".repeat(gap)}${text}` : line;
@@ -95,27 +140,30 @@ export interface HeaderSections {
 	logo: readonly string[];
 	/** 已着色的快捷键提示行（内置 header 那一行紧凑版）。 */
 	hints?: string;
-	/** 已着色的说明行。 */
-	onboarding?: string;
+	/** 已着色的说明行：宽终端是「前缀 + 字形」三行，窄终端退回一整句（见 `poweredByLines`）。 */
+	onboarding?: readonly string[];
 }
 
 /**
- * 完整 header 行序：logo → 空行 → 提示 → 空行 → 说明。
- * 缺某段就不留多余空行（窄终端回退时 logo 段为空）。
+ * 完整 header 行序：logo（含侧栏文字）→ **空行** → 提示行 → 说明段。
+ *
+ * 印记下方那一条空行**保留**（用户 2026-10-05 定）：大 logo 与下面的文字之间要留一口气。
+ * 去掉的只是**提示行与说明段之间**那一条 —— 快捷键提示与 `@bachi/pi-coder` 字形贴成一块。
+ * 两处空行不是同一条规则：一次改两处就是这两件事曾经被混为一谈的原因。
+ *
+ * 缺段时的处理：没有印记段就没有那条空行；提示行与说明段各自能单独出现（窄终端回退时
+ * 印记段仍在，所以空行也在）。
  *
  * 提示行与说明行在这里补上 `MARK_INDENT` —— header 的每一行都不顶格，且与印记左边对齐；
  * logo 段自己已经带缩进，所以不重复补。空行保持空行。
  */
 export function composeHeaderLines(sections: HeaderSections): string[] {
 	const lines = [...sections.logo];
-	if (sections.hints) {
-		if (lines.length > 0) lines.push("");
-		lines.push(MARK_INDENT + sections.hints);
-	}
-	if (sections.onboarding) {
-		if (lines.length > 0) lines.push("");
-		lines.push(MARK_INDENT + sections.onboarding);
-	}
+	// 印记下面的文字段：提示行先，说明段（可能是一整块字形）紧跟其后，两者之间不隔空行。
+	const text = [...(sections.hints ? [MARK_INDENT + sections.hints] : []), ...(sections.onboarding ?? []).map((line) => MARK_INDENT + line)];
+	// 空行只属于「印记段 → 文字段」这一条缝：两边都有内容时才补。
+	if (lines.length > 0 && text.length > 0) lines.push("");
+	lines.push(...text);
 	return lines;
 }
 
@@ -123,6 +171,31 @@ export function composeHeaderLines(sections: HeaderSections): string[] {
 export interface HeaderTheme {
 	fg(color: string, text: string): string;
 	bold(text: string): string;
+}
+
+/**
+ * 说明行的两种形态：宽终端是「整句前缀 + 三行字形」，装不下时退回一整句。
+ *
+ * 返回的行**不带** `composeHeaderLines` 补的那一格缩进，也不做截断 —— 宽度不够就整块退回句子，
+ * 所以这里不需要 `truncateToWidth`（`logo.ts` 也不 import pi-tui，见文件头）。
+ *
+ * 为什么是「整块退回」而不是把字形截一半：字形是 3 行联动的方块，截到右侧会变成一个读不出
+ * 形状的残片，不如退成一句干净的说明；用户给的字形块本身就带 44 列引导空白，装不下就没有
+ * 中间状态。阈值按**含缩进**的整行宽度算（`width` 入参是终端总宽，与 `index.ts` 里其它 clamp
+ * 的口径一致），判据是 `POWERED_BY_ART_WIDTH + 1 > width - POWERED_BY_PREFIX.length`：
+ * 恰好等于「`POWERED_BY_WIDTH + MARK_INDENT` 装不装得下」，写成减法是为了让这个比较直接
+ * 落在可用的剩余列上。
+ */
+export function poweredByLines(theme: HeaderTheme, width: number): string[] {
+	const sentence = theme.fg("dim", POWERED_BY_SENTENCE);
+	if (width < POWERED_BY_WIDTH + MARK_INDENT.length) return [sentence];
+	const prefix = theme.fg("dim", POWERED_BY_PREFIX);
+	// 引导空格不上色：它不可见，包进 `fg` 只会多几个转义；字形本身走 accent，与顶部印记同色。
+	const lead = " ".repeat(POWERED_BY_PREFIX.length);
+	return POWERED_BY_ART.map((art, row) => {
+		const painted = theme.fg("accent", art);
+		return row === 1 ? `${prefix}${painted}` : `${lead}${painted}`;
+	});
 }
 
 /**

@@ -1,6 +1,6 @@
 # Themes
 
-Three themes ship with this package: `pi-coder-1337` (the one `config/settings.json` selects), `pi-coder-catppuccin` and `pi-coder-ayu`. All three carry the `pi-coder-` prefix, so their names cannot collide with themes from another installed package. Before 2.0.0 they shipped as `summer-night`, `catppuccin` and `ayu`; `pi-coder-summer-night` (an iceberg.vim palette) existed through 2.0.5 and was replaced by `pi-coder-1337`.
+Five themes ship with this package: `pi-coder-1337` (the one `config/settings.json` selects), `pi-coder-catppuccin`, `pi-coder-ayu`, `pi-coder-coffee` and `pi-coder-nightfox`. All five carry the `pi-coder-` prefix, so their names cannot collide with themes from another installed package. Before 2.0.0 they shipped as `summer-night`, `catppuccin` and `ayu`; `pi-coder-summer-night` (an iceberg.vim palette) existed through 2.0.5 and was replaced by `pi-coder-1337`. The last two were added in 2.4.0, both produced by the [`pi-theme-from-palette`](../skills/pi-theme-from-palette/) skill that ships with this package.
 
 ## Switching themes
 
@@ -14,16 +14,16 @@ pi loads themes from three places:
 ```
 ~/.pi/agent/themes/*.json      # global
 .pi/themes/*.json              # project, after the project is trusted
-<package>/themes/*.json        # packages — this is how these three arrive
+<package>/themes/*.json        # packages — this is how these five arrive
 ```
 
 The copy commands in [installation.md](installation.md#apply-the-global-config-files) put them in the global directory as well; that is optional, since the package already provides them.
 
-## The three themes
+## The five themes
 
 ### `pi-coder-1337`
 
-The current default and the thinnest port of the three: it takes Codex CLI's built-in syntax theme `1337` (Mark Herpich's Sublime palette, one of the 32 themes two-face bundles into the Codex binary; `[tui] theme = "1337"` in `~/.codex/config.toml` selects it). It was re-derived from the theme blob embedded in the local codex executable (a zlib-compressed scope→color table) and reconciled scope by scope against upstream's `1337.tmTheme`: all 48 named scopes matched, 37 of them byte-identical, and the remaining 11 are Codex merging a scope into `None` — neither side ever held two different values for one scope.
+The current default and the thinnest port: it takes Codex CLI's built-in syntax theme `1337` (Mark Herpich's Sublime palette, one of the 32 themes two-face bundles into the Codex binary; `[tui] theme = "1337"` in `~/.codex/config.toml` selects it). It was re-derived from the theme blob embedded in the local codex executable (a zlib-compressed scope→color table) and reconciled scope by scope against upstream's `1337.tmTheme`: all 48 named scopes matched, 37 of them byte-identical, and the remaining 11 are Codex merging a scope into `None` — neither side ever held two different values for one scope. **It is also the reference all the other themes are built against**: the skill copies the 37 secondary slots from this file byte-for-byte.
 
 1337 defines **code syntax only** — `background` `#191919`, `foreground` `#f8f8f2`, `caret`, `selection` `#515151`, `lineHighlight`, `invisibles` `#3b3a32`, plus those 48 named scope entries in 28 distinct foreground colors. It has no UI slots at all, so of pi's 59 colors the syntax slots translate directly and the UI slots are picked from the same 28 values:
 
@@ -52,7 +52,7 @@ The file has 35 `vars` and 59 colors, with no `#` literal in `colors` and no emp
 
 ### `pi-coder-catppuccin`
 
-A port of Catppuccin Mocha from [bacnh85/pi-extensions](https://github.com/bacnh85/pi-extensions). The palette lives in `vars` (31 of them, of which 20 are upstream Mocha) and `colors` only references it. Two entries are empty strings meaning "terminal default": `text` and `syntaxVariable`. `toolPendingBg` used to be the third (upstream's single 256-color index `toolPendingBg: 233` was converted to hex `#140e1e` and then blanked); it now points at `vars.successPanel` like `toolSuccessBg` does. No color in any of the three themes is an integer — `bgAnsi()` emits `48;5;N` for one, which mixes poorly with a truecolor palette.
+A port of Catppuccin Mocha from [bacnh85/pi-extensions](https://github.com/bacnh85/pi-extensions). The palette lives in `vars` (31 of them, of which 20 are upstream Mocha) and `colors` only references it. Two entries are empty strings meaning "terminal default": `text` and `syntaxVariable`. `toolPendingBg` used to be the third (upstream's single 256-color index `toolPendingBg: 233` was converted to hex `#140e1e` and then blanked); it now points at `vars.successPanel` like `toolSuccessBg` does. No color in any of the five themes is an integer — `bgAnsi()` emits `48;5;N` for one, which mixes poorly with a truecolor palette. It is still the only theme without `bashOutput`.
 
 One deliberate deviation from upstream beyond the layout: `thinkingXhigh` and `thinkingMax` leave the palette's `blue` for a neutral grey (`vars.thinkingGrey`, `#626262`), for the reason under `pi-coder-ayu` below. The top two levels are no longer one color across the package: `pi-coder-1337` locks them to `#696969`.
 
@@ -69,7 +69,7 @@ Four deliberate deviations from upstream:
 
 ### Pending and success share a background
 
-All three themes point `toolPendingBg` at the same variable as `toolSuccessBg` (`successCard` `#202020`, `toolSuccessBg` `#10151F`, `successPanel` `#151515`), so a tool card does not change color when it finishes. Until 2026-09-28 it was the empty string in all three, which meant "terminal default" — the same visual result (nothing changes at the moment the card finishes) reached from the other side. The change came with the tree-shaped tool blocks: `bash-command-collapse`, `read-path-collapse`, `tool-diff`, `simple-task`, `plan-mode`, `memory`, `background-tasks` and `ask-user-question` all declare `renderShell: "self"`, which bypasses pi's `contentBox` entirely, so **no background is painted for those blocks in any state** and the pending/success question does not arise for them. What is left using pi's default shell is every other tool (`grep`, `glob`, MCP tools, …), and for those a card that keeps one background across the pending→success transition is the calmer of the two options. `pi-coder-catppuccin` still carries the unused `vars.pendingPanel` (`#0b151f`) as a ready value if a distinct pending background ever comes back.
+All five themes point `toolPendingBg` at the same variable as `toolSuccessBg` (`successCard` `#202020`, `toolSuccessBg` `#10151F`, `successPanel` `#151515`; the two new themes reuse `successCard`), so a tool card does not change color when it finishes. Until 2026-09-28 it was the empty string in all three, which meant "terminal default" — the same visual result (nothing changes at the moment the card finishes) reached from the other side. The change came with the tree-shaped tool blocks: `bash-command-collapse`, `read-path-collapse`, `tool-diff`, `simple-task`, `plan-mode`, `memory`, `background-tasks` and `ask-user-question` all declare `renderShell: "self"`, which bypasses pi's `contentBox` entirely, so **no background is painted for those blocks in any state** and the pending/success question does not arise for them. What is left using pi's default shell is every other tool (`grep`, `glob`, MCP tools, …), and for those a card that keeps one background across the pending→success transition is the calmer of the two options. `pi-coder-catppuccin` still carries the unused `vars.pendingPanel` (`#0b151f`) as a ready value if a distinct pending background ever comes back.
 
 ## Anatomy of a theme file
 
@@ -86,7 +86,7 @@ All three themes point `toolPendingBg` at the same variable as `toolSuccessBg` (
 - Every non-`#` value in `colors` is looked up in `vars`. A missing reference throws `Variable reference not found`, **the whole theme fails to load**, and pi falls back to the built-in `dark` theme without an error message. This is the single most common way to break a theme.
 - An empty string means "terminal default foreground" — used by `text` and, in pi-coder-catppuccin, `syntaxVariable`.
 - `export` only affects HTML produced by `/export`; when it is missing, pi derives those colors from `userMessageBg`. In these files it is set explicitly, and through `vars` references like every other color.
-- **`vars` holds only variables a slot still uses**: blanking a color to `""` leaves the variable it pointed at referenced by nothing, and those entries are deleted rather than kept as spares (they cannot break loading either way, but they do read as if something used them). The single exception is `pi-coder-catppuccin`'s `pendingPanel` (`#0b151f`), kept whole as a ready value should the pending background ever come back. So the three files carry 35 / 31 / 27 `vars` for 59 / 54 / 55 colors.
+- **`vars` holds only variables a slot still uses**: blanking a color to `""` leaves the variable it pointed at referenced by nothing, and those entries are deleted rather than kept as spares (they cannot break loading either way, but they do read as if something used them). The single exception is `pi-coder-catppuccin`'s `pendingPanel` (`#0b151f`), kept whole as a ready value should the pending background ever come back. So the five files carry 35 / 31 / 27 / 45 / 45 `vars` for 59 / 54 / 55 / 59 / 59 colors.
 
 ## Custom tokens
 
@@ -98,7 +98,7 @@ Three tokens in these files are **not** part of pi's official theme schema:
 | `toolDiffRemovedBg` | `tool-diff.ts` | Full-line background of removed diff lines. |
 | `bashOutput` | `bash-command-collapse.ts` | Foreground of bash output text only. |
 
-All three themes define the two diff backgrounds. `pi-coder-ayu` and `pi-coder-1337` also define `bashOutput`.
+All five themes define the two diff backgrounds. All but `pi-coder-catppuccin` also define `bashOutput`.
 
 ### Why they work at all
 
@@ -136,3 +136,12 @@ for (const key of Object.keys(colors)) {
 ```
 
 If you are porting an upstream theme, parse both files and compare `getFgAnsi()` / `getBgAnsi()` per token name. Identical values mean a faithful port; a difference is either an oversight or a deviation that belongs in a comment.
+
+## Adding a theme
+
+The [`pi-theme-from-palette`](../skills/pi-theme-from-palette/) skill ships with this package and automates exactly the above: it takes a foreign palette (a vim colorscheme, a tmTheme plist, a Codex theme export, or a bare hex list), re-derives the **22 primary slots** from it, copies the other 37 from `pi-coder-1337`, and then runs pi's own loader over both files in `truecolor` **and** `256color`, asserting that the secondary slots did not move (`LEAK` must be `none`) and that no `vars` reference dangles. Two rules it enforces, both learned the hard way:
+
+- A new value gets a **new variable name**. Editing a value on an existing `vars` entry silently repaints every other slot that references it — and the shared variables are not obvious ones (`selection`, `comment`, `funcBlue`, `number`, `softFg`).
+- Primary-versus-secondary is judged on the **resolved value**, never on the variable name. Identical names do not prove identical output.
+
+Both `pi-coder-coffee` and `pi-coder-nightfox` were produced this way and verified to differ from `1337` in exactly the 22 primary slots, with zero secondary drift and unchanged `export` and key order.

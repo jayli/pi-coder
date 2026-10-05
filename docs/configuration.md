@@ -8,6 +8,7 @@
 | `config/AGENTS.core.md` | `~/.pi/agent/AGENTS.core.md` | The ~7 KB distilled core (`core-rules` re-injects it into the context mid-session). The extension **does nothing, silently**, when this file is missing. |
 | `config/settings.json` | `~/.pi/agent/settings.json` | Everything in the key table below. |
 | `config/web-search.json` | `~/.pi/agent/web-search.json` | `pi-web-access` configuration; one required key (see below). |
+| `config/voice.json` | `~/.pi/agent/voice.json` | Speech configuration for `voice/`: voice name, speech rate, character cap, whether questions are read aloud, and the summary window. Entirely portable — the Aliyun key is **not** here, but in `~/.config/litellm-any/apikey.json` (see below). |
 | `config/pi-statusline.json` | `~/.pi/agent/pi-statusline.json` | Legacy. See [pi-statusline.json](#pi-statuslinejson-is-legacy). |
 
 Copy commands are in [installation.md](installation.md#apply-the-global-config-files).
@@ -48,7 +49,7 @@ pi's default is `"tree"` (the built-in session-tree navigator). The `rewind` ext
 | `extensions` | `["-builtin:codemode"]` | Disables pi's built-in `codemode` extension so [`codemode-tree/`](extensions.md#codemode-tree--the-codemode-tool) can own the tool without pi printing a "built-in extension `codemode` was not loaded" warning at startup (the warning is expected first-registration-wins behaviour, but pi renders it in two places and nothing can suppress it). **Cost**: `PI_CODEMODE_TREE=off` no longer falls back to the built-in — with both off the `codemode` tool disappears entirely. Remove this entry to get the built-in look back. No explicit extension *paths* are listed; auto-discovery of `~/.pi/agent/extensions/` and package resources covers them. |
 | `defaultTools` | `["+codemode"]` | Activates the `codemode` tool at startup. It is registered **inactive** (`defaultActive: false`, `exposure: "model-only"`) — pi's built-in leaves it for `tool_search` or an MCP server with `codemode` exposure to switch on — so without this line the model cannot reach it directly. `+name` adds to pi's defaults (`read`, `bash`, `edit`, `write`) instead of replacing them. |
 | `tuiMode` | `"regular"` | pi's default, written out explicitly. |
-| `packages` | `["npm:pi-web-access", "npm:pi-subagents", "git:github.com/jayli/superpowers"]` | The three companion packages. This array is exactly what `pi install` writes. `git:` means pi clones the repository itself into `~/.pi/agent/git/`, and that package brings both an extension and its 15 skills — see [installation.md](installation.md#companion-packages). |
+| `packages` | `[{"source": "npm:pi-web-access", "extensions": []}, "npm:pi-subagents", "git:github.com/jayli/superpowers"]` | The three companion packages. `git:` means pi clones the repository itself into `~/.pi/agent/git/`, and that package brings both an extension and its 15 skills — see [installation.md](installation.md#companion-packages). **`pi-web-access` is written in object form with `"extensions": []`** rather than as a bare string, which is a deliberate coupling: [`web-search-tree/`](extensions.md#web-search-tree--pi-web-accesss-tool-blocks) takes over the rendering of three of that package's tools, and the package registering the same names itself makes pi log five conflicts. The object form loads none of the package's extensions while keeping it **registered**, so `pi update` still upgrades it — the same technique as `extensions: ["-builtin:codemode"]`. Removing the filter without removing `web-search-tree/` brings the conflicts back; removing the extension without removing the filter makes `pi_web_search` / `fetch_content` / `get_search_content` disappear entirely. |
 | `steeringMode` | `"one-at-a-time"` | pi's default, explicit. |
 | `followUpMode` | `"all"` | **A deliberate non-default** (pi's default is `one-at-a-time`): queued follow-up messages are delivered as **one turn** instead of one turn each. The motivation is background-task notifications — when the main agent is busy, several terminal notifications queue up as follow-ups, and under the default each one wakes its own model turn (measured 2026-09-30: nine notifications, 38 s, nine turns). The same batching applies to follow-ups a human queues with `alt+enter`; delete the key to get per-message delivery back. |
 | `markdown.mermaid` | `"streaming"` | pi's default, explicit. |
@@ -129,6 +130,25 @@ So three snapshot config files are deliberately left out of this package: `model
 This file configures `npm:@narumitw/pi-statusline`, a package this environment no longer uses — `extensions/statusline/` replaced it. The local statusline reads **no config file at all**: colors come from `theme.fg(...)`, so it follows whatever theme is active, and the second line comes from other extensions calling `ctx.ui.setStatus()`.
 
 The file is kept only so you can switch back to the npm package without re-deriving the palette (it holds a Tokyo Night palette, segment order and per-extension status icons). Nothing in this package reads it.
+
+### `voice.json`
+
+`config/voice.json` is a copy of the author's speech settings and is **fully portable** — nothing in it names a provider, a machine or a path:
+
+| Key | Shipped value | Meaning |
+| --- | --- | --- |
+| `enabled` | `true` | Master switch, same as `/voice on` / `/voice off`; `PI_VOICE=off` outranks it. |
+| `voice` | `"Tingting"` | The `say` voice — **only** for the local engine. |
+| `aliyunVoice` | `"longanhuan_v3.1"` | Voice for the Aliyun engine; belongs to the `qwen-audio-3.1-tts-flash` model, and the old TTS model rejects it. |
+| `aliyunInstruction` | `"请用重庆话口音播报。"` | Free-text instruction sent as `input.instruction` — how an accent or tone is requested. An empty string omits the field. |
+| `maxChars` | `500` | Cap on the locally trimmed text before it is spoken. |
+| `speakQuestions` | `true` | Read rhetorical closing questions aloud (silently skipping them makes a working setup look broken). |
+| `summarize` | `true` | Rewrite the text into a spoken summary instead of reading the trimmed original. |
+| `summaryThreshold` | `6` | Only summarize above this many characters. At the default — the minimum speakable length — **every** utterance is summarized, so the voice stays consistent instead of sometimes speaking the raw text. |
+| `summaryMaxChars` | `100` | Hard cap on the spoken summary. The effective budget is `min(this, source length)`, so a summary can never be longer than what it summarizes. |
+| `summaryTimeoutMs` | `15000` | Give up and speak the local fallback text after this long. |
+
+The one thing **not** in this file is the Aliyun key. It lives at `~/.config/litellm-any/apikey.json` under `aliyunKey` — outside the agent directory and shared with the gateway's own keystore, which is why that file's `normalize()` explicitly preserves and reserves the field. `/voice key sk-xxx` writes it, `/voice key` shows it masked, `/voice key clear` removes it. With no key everything above still works through the system `say`, with no network at all.
 
 ## `web-search.json` — one key, and it is required
 

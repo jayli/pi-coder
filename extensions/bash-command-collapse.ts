@@ -73,6 +73,25 @@
  * 源行里的起点偏移（`WrappedRow.start`，前缀不参与折行、所以不用换算），两边同坐标直接
  * 比对就对上号 —— 少了这个偏移，续行的颜色会整体错位。
  *
+ * ## 长地址缩略：一期点名命令的地址参数（用户 2026-10-03 定）
+ *
+ * 折叠态只有 2 个视觉行，而模型发出来的命令里常常夹着整条 pnpm store 路径
+ *（`/Users/…/pnpm/store/v11/links/@earendil-works/pi-coding-agent/1.0.0/<64 位 hash>/
+ * node_modules/@earendil-works/pi-coding-agent`）—— 它一出现就把预算吃光，屏幕上是「一堆
+ * 目录名」而不是「这条命令在干什么」。用户的方向：**重点呈现命令本身，地址只留起点和终点的
+ * 目录**；缩略逻辑（阈值 40%、只缩中间、保头保尾）与不动清单全在 `abbrev-path.ts` 的文件头
+ * 里，这里只记**接线口径**：
+ *
+ *   - **只作用于折叠态**。展开态（ctrl+o）是唯一能看到命令全貌的地方，一个字不缩 ——
+ *     两态都缩就等于「原始命令在屏幕上彻底消失」。两态各自调用点见 `renderCall`。
+ *   - 阈值用 `wrapWidth`（**命令正文可用列** = 终端宽 − 左边距 − `Run ` 前缀），不是终端宽，
+ *     所以缩略判定与实际折行用的是同一把尺子。
+ *   - 宽度函数传 pi-tui 的 `visibleWidth`（不是模块自带的兜底实现），两边算口才会一致。
+ *   - 缩略是**就地替换词**，不改命令的其余字符；发给模型的参数与 session 原文一律不动
+ *   （本模块只被渲染层调用）。
+ *
+ * 语法高亮的 token 偏移由现有 `tokenizeShellLine` 在**缩略后的文本**上重算，不用额外适配。
+ *
  * ## 输出预览行数（pi 写死 5 行，这里改成 3 行）
  *
  * pi 把 bash 输出的预览行数写死在 `core/tools/renderers/bash.js` 的
@@ -381,6 +400,7 @@ import {
 } from "./bash-command-collapse/sandbox.ts";
 import { getAllowlistStore, getSessionScopes, type AllowlistStore } from "./bash-command-collapse/allowlist.ts";
 import { getSandboxMode } from "./bash-command-collapse/sandbox-mode.ts";
+import { abbreviateCommandPaths, pathAbbrevThreshold } from "./bash-command-collapse/abbrev-path.ts";
 
 /**
  * 命令行**折叠态**保留的**视觉行**数（硬折行后一条超长单行命令也最多占这么多行）。
@@ -2044,7 +2064,12 @@ export default function (pi: ExtensionAPI) {
 						// 详见文件头「命令行：2 行 + `Run ` 前缀」一节。
 						// 先把行尾 `…` 放在**纯文本**上，再整行上色 —— 反过来会把 SGR
 						// 序列从中间切断。
-						const commandLines = (command || "...").split("\n");
+						//
+						// **长地址缩略**（用户 2026-10-03 定）只在这一支做：折叠态的主角是命令本身，
+						// 而展开态（ctrl+o）要的就是完整命令，一个字都不缩（见下面那条注释）。
+						// 阈值按**命令正文可用列**（`wrapWidth`）算，与终端宽同源。
+						const shownCommand = abbreviateCommandPaths(command, pathAbbrevThreshold(wrapWidth), visibleWidth);
+						const commandLines = (shownCommand || "...").split("\n");
 						const suffixWidth = visibleWidth(timeoutSuffix);
 						// 首行（且仅首行）要给 timeout 后缀留位置，否则长命令会把后缀挤掉
 						const firstRowBudget = suffixWidth > 0 ? Math.max(4, wrapWidth - suffixWidth) : wrapWidth;
@@ -2077,6 +2102,8 @@ export default function (pi: ExtensionAPI) {
 						// 展开态（ctrl+o）：要的就是完整命令，**同样用 break-all 硬折行** —— 贪心词折行
 						// 在这里一样会把长路径整块挪到下一行再从中间断开（就是用户看到的 `Run ` 后面直接
 						// 折行），展开态只是不限行数，折行规则必须一致。
+						// **地址不缩略**：展开态是用户唯一能看到命令全貌的地方（缩略后的形态随时可
+						// 从折叠态看），两态缩略会让「原始命令长什么样」在屏幕上彻底消失。
 						const commandLines = command.split("\n");
 						const suffixWidth = visibleWidth(timeoutSuffix);
 						const firstRowBudget = suffixWidth > 0 ? Math.max(4, wrapWidth - suffixWidth) : wrapWidth;

@@ -26,37 +26,39 @@ Two consequences worth remembering:
 ## Tests
 
 ```bash
-npm test        # node --test — 1334 tests, ~45 s
+npm test        # node --test — 1662 tests, ~49 s
 ```
 
 Test files run in parallel (`os.availableParallelism()` — 15 on the machine this was written on). The whole suite is more stable with reduced parallelism at about the same wall time:
 
 ```bash
-node --test --test-concurrency=4      # 1334 tests, ~45 s
+node --test --test-concurrency=4      # 1662 tests, ~49 s
 ```
 
-**23 of the 1334 are skipped on purpose.** They are the real-sandbox cases in `bash-command-collapse/render.test.ts`. The skip condition is *nested* seatbelt: they skip exactly when the test process's own shell is already inside `sandbox-exec` (in a pi session with the delete boundary on, the inner `sandbox_apply` fails with `Operation not permitted`, exit 71). They are the ones that prove the boundary is enforced by the **kernel** rather than by a pattern match, so run them when you touch `sandbox.ts` — from a plain terminal, or from a background task, which bypasses the boundary. Either way all 23 execute (measured: 1334 tests, 1323 pass, 11 fail, **0 skipped**). The table below is the in-boundary measurement, which is why it shows 23 skipped.
+**23 of the 1662 are skipped on purpose when you run inside a pi session** — they are the real-sandbox cases in `bash-command-collapse/render.test.ts`. The skip condition is *nested* seatbelt: they skip exactly when the test process's own shell is already inside `sandbox-exec` (in a pi session with the delete boundary on, the inner `sandbox_apply` fails with `Operation not permitted`, exit 71). They are the ones that prove the boundary is enforced by the **kernel** rather than by a pattern match, so run them when you touch `sandbox.ts` — from a plain terminal, or from a background task, which bypasses the boundary. **The run recorded for 2.4.0 was a background task, i.e. outside the boundary, so all 23 executed and the suite reported 0 skipped** — which is why the table below has no `skipped` column. Inside a session the same command reports 23 skipped and 23 fewer passes; the totals are otherwise identical.
 
-**Eleven fail against pi 0.99.2** — they are a pi-version condition, not a regression from a sync: every failing file is byte-identical to the snapshot except `render.test.ts`'s standing delta below, and each failure is a coupling to a pi internal. Seven are color assertions in `bash-command-collapse/render.test.ts` (5) and `read-path-collapse/render.test.ts` (2): they mutate `theme.fgColors` to prove the dot color is read from the theme at render time rather than hardcoded, and **pi 0.99.1 made that field private** — the singleton now carries `fgAnsi` / `resolvedColors` instead (0.87.1 still exposed a public `fgColors` map). The other four are all in `bash-command-collapse/render.test.ts` and all read pi's output preview: two assert the truncation hint's `…` where 0.99.2 renders ASCII `...` (the extension's own `isTruncationHint` already accepts both, so the tree is still shaped correctly), one expects the preview window's `└ ` one line later than 0.99.2 places it, and one reads a blank line pi now leaves between the `(no output)` placeholder and the appended `Command exited with code N` status as a break in the fence. Point the loader at a 0.87.1 entry and all eleven pass:
+**Eleven fail against the current pi (1.0.3), and the same eleven against 0.99.2** — they are a pi-version condition, not a regression from a sync: every failing file is byte-identical to the snapshot except `render.test.ts`'s standing delta below, and each failure is a coupling to a pi internal. Seven are color assertions in `bash-command-collapse/render.test.ts` (5) and `read-path-collapse/render.test.ts` (2): they mutate `theme.fgColors` to prove the dot color is read from the theme at render time rather than hardcoded, and **pi 0.99.1 made that field private** — the singleton now carries `fgAnsi` / `resolvedColors` instead (0.87.1 still exposed a public `fgColors` map). The other four are all in `bash-command-collapse/render.test.ts` and all read pi's output preview: two assert the truncation hint's `…` where current pi renders ASCII `...` (the extension's own `isTruncationHint` already accepts both, so the tree is still shaped correctly), one expects the preview window's `└ ` one line later than pi places it, and one reads a blank line pi now leaves between the `(no output)` placeholder and the appended `Command exited with code N` status as a break in the fence. Point the loader at a 0.87.1 entry and all eleven pass:
 
 ```bash
 PI_TEST_PI_ENTRY=~/.pi/agent/npm/node_modules/@earendil-works/pi-coding-agent/dist/bundle/index.js \
-  node --test --test-concurrency=4     # 1323 tests, 1299 pass, 1 fail, 23 skipped
+  node --test --test-concurrency=4     # fewer tests, 1 fail, 23 skipped
 ```
 
-That one remaining failure is `codemode-tree/index.test.ts` itself: it needs `createCodemodeExtension()`, which pi only exports from **0.99.1** on, so on 0.85.1 / 0.87.1 the file throws at load and its 12 cases never register (1334 − 12 + 1 file-level failure = 1323). `codemode-tree/render.test.ts`'s 11 pure-logic cases are unaffected.
+That one remaining failure is `codemode-tree/index.test.ts` itself: it needs `createCodemodeExtension()`, which pi only exports from **0.99.1** on, so on 0.85.1 / 0.87.1 the file throws at load and its 12 cases never register. `codemode-tree/render.test.ts`'s 11 pure-logic cases are unaffected.
 
-**pi 0.99.1 is one failure better than 0.99.2**: the same seven color assertions plus nothing else, because the four preview-window assertions above are stable there — it renders the truncation hint with `…`, places the `└ ` where the test expects it and leaves no blank line before the status. **The `dangerous`-mode case used to fail here too and this sync fixed it**: its `bypass` control group expected the wrapped command to throw, which 0.99.1 stopped doing when built-in bash moved from `throw` to `return { isError: true }` — and the sync's own work on that same change (see [`bash-command-collapse/sandbox.ts`](extensions.md#bash-command-collapsesandboxts--the-seatbelt-delete-boundary)) is what makes it pass now. Measured on this sync:
+**pi 0.99.1 is four failures better than 0.99.2 and 1.0.3**: the same seven color assertions plus nothing else, because the preview-window assertions above are stable there — it renders the truncation hint with `…`, places the `└ ` where the test expects it and leaves no blank line before the status. **The `dangerous`-mode case used to fail here too and the previous sync fixed it**: its `bypass` control group expected the wrapped command to throw, which 0.99.1 stopped doing when built-in bash moved from `throw` to `return { isError: true }` — and that sync's own work on the same change (see [`bash-command-collapse/sandbox.ts`](extensions.md#bash-command-collapsesandboxts--the-seatbelt-delete-boundary)) is what makes it pass.
+
+Measured on 2.4.0, against the pi the `pi` shim resolves — **1.0.3** on this machine — from outside the seatbelt boundary (a background task), so nothing is skipped:
 
 | pi entry | tests | pass | fail | skipped |
 | --- | --- | --- | --- | --- |
-| 0.85.1 / 0.87.1 | 1323 | 1299 | 1 | 23 |
-| 0.99.1 | 1334 | 1304 | 7 | 23 |
-| 0.99.2 (this machine's default) | 1334 | 1300 | 11 | 23 |
+| 1.0.3 (the pi the shim resolves) | 1662 | 1651 | 11 | 0 |
 
-Run **outside** the seatbelt boundary (a background task here bypasses it) the probe succeeds, so nothing is skipped: **1334 tests, 1323 pass, 11 fail, 0 skipped** — the same eleven failures, and the 23 skip-marked cases all pass. That is the check to run when you touch `sandbox.ts`.
+Run inside a pi session instead, the same suite reports **1628 pass / 11 fail / 23 skipped** — the identical eleven failures, with the 23 sandbox cases declared skipped rather than executed. That is the measurement every release before this one recorded, and it is not comparable test-for-test to the row above; the total is unchanged and the pass count moves by exactly the skip count (1662 − 11 − 23 = 1628).
 
 All of these are **test-side** couplings to pi internals, not rendering regressions: `bash-command-collapse.ts`'s own `bashOutput` override guards on `typeof fgColors?.set === "function"` and falls through to the plain render when the field is gone, so on 0.99.x that one cosmetic token is simply inert (bash output uses `toolOutput`) instead of broken. Fixing the assertions means finding 0.99.x's public surface for "the color table the renderer reads" and for the preview budget; that belongs upstream in `clients/pi/`, which keeps these files byte-identical. Until then a sync must reproduce the same set rather than chase it — and because those files are byte-identical apart from the delta below, the snapshot cannot be showing a different one. The snapshot has no `package.json`, so its own suite cannot be run from here; the counts above are all measured in this repository.
+
+**The 11 failures are the check, not noise.** A sync that changes this number in either direction has changed something real: the +52 tests in 2.3.0 and the +328 in 2.4.0 both reconcile file by file against the files the sync added, and the failure set stayed at the same eleven throughout.
 
 The pure-logic modules are written so this works: they do not import `@earendil-works/pi-*` at all, take injected dependencies instead (a `widthOf` function, an `exec` function, a minimal theme interface), and are duck-typed against structural interfaces. That is why `thinking-collapse/window.ts`, `statusline/line.ts`, `tool-diff/title-row.ts`, `rewind/checkpoints.ts`, `prompt-editor/bash-prompt.ts`, `background-tasks/status.ts`, `worktree.ts`, `render.ts`, `memory/render.ts`, `plan-mode/render.ts`, `plan-mode/consent.ts`, `bash-command-collapse/sandbox.ts`, `allowlist.ts` and the rest can run under plain `node --test`. `background-tasks/worktree.test.ts` goes one step further and drives **real git** in a tmpdir fixture (`git init`, a commit, then create and clean up a worktree), because the three cleanup outcomes are the whole point of the feature and a fake `runGit` would only assert the arguments.
 
@@ -84,9 +86,9 @@ Isolate the run instead — a scratch agent directory has no global extensions, 
 PI_CODING_AGENT_DIR=$(mktemp -d) pi -e /absolute/path/to/pi-coder
 ```
 
-Then check that all 30 loaded. **Do not look for the startup resource list** — `startup-logo` prunes it in full (`[Context]`, `[Skills]`, `[Prompts]`, `[Extensions]`, `[Themes]`), so nothing of it is printed. The visible signals of a successful load are the logo header, the statusline footer and the `❯ ` prompt; for the extension list itself use `pi config`, or the loader check below.
+Then check that all 32 loaded. **Do not look for the startup resource list** — `startup-logo` prunes it in full (`[Context]`, `[Skills]`, `[Prompts]`, `[Extensions]`, `[Themes]`), so nothing of it is printed. The visible signals of a successful load are the logo header, the statusline footer and the `❯ ` prompt; for the extension list itself use `pi config`, or the loader check below.
 
-A headless start cannot show you any of that (`-p` exits after one turn and prints only the answer), so the fastest machine check is the same loader the `render.test.ts` files use — `discoverAndLoadExtensions` against the 30 entries (`extensions/*.ts` plus `extensions/*/index.ts`), asserting `errors: []`. It is also the cheapest way to catch a `ParseError` that `node --test` accepted, because it is pi's own loader and not node's. Point it at a real library entry the way those tests do (`PI_TEST_PI_ENTRY`). Measured on this sync, all 30 entries load with `errors: []` against pi 0.99.1 and 0.99.2; against 0.85.1 and 0.87.1 it is 29 of 30, the one error being `codemode-tree/index.ts` (`createCodemodeExtension is not a function` — that export arrived in 0.99.1), which leaves the other 29 untouched.
+A headless start cannot show you any of that (`-p` exits after one turn and prints only the answer), so the fastest machine check is the same loader the `render.test.ts` files use — `discoverAndLoadExtensions` against the 32 entries (`extensions/*.ts` plus `extensions/*/index.ts`), asserting `errors: []`. It is also the cheapest way to catch a `ParseError` that `node --test` accepted, because it is pi's own loader and not node's. Point it at a real library entry the way those tests do (`PI_TEST_PI_ENTRY`). Note that the entry count is exactly `discoverAndLoadExtensions`'s input list: a `*.ts` **inside** a directory without an `index.ts` never becomes an entry (see the table at the top), so the five helper-only directories add tests but no entries. Measured on 2.4.0 against pi 1.0.3: all 32 entries load with `errors: []` **and `warnings: []`**, and the capture confirms the two new extensions actually registered — `web-search-tree` adds `pi_web_search` / `fetch_content` / `get_search_content` / `source_check` / `web_enable` and `voice` adds the `/voice` command, neither of which would be there if the `Proxy` capture had missed. Against pi 0.85.1 and 0.87.1 it is 31 of 32, the one error being `codemode-tree/index.ts` (`createCodemodeExtension is not a function` — that export arrived in 0.99.1), which leaves the other 31 untouched.
 
 `/reload` re-reads the checkout, so the loop is: edit → `/reload` → look. That works for `pi -e` runs as well as for an installed package; you do not need to restart pi for extension edits. `settings.json` and `AGENTS.md` are read once at startup, so those do need a restart.
 
@@ -127,13 +129,16 @@ A new tool name and a new command name must not collide with any other extension
 
 ## Keeping this package in sync
 
-This package is a distribution copy, not the master copy. The author's live environment is `~/.pi/agent/`, snapshotted into a separate repository under `clients/pi/`; this package was produced by copying that snapshot verbatim (extensions, themes, and the config files) with four deliberate deltas:
+This package is a distribution copy, not the master copy. The author's live environment is `~/.pi/agent/`, snapshotted into a separate repository under `clients/pi/`; this package was produced by copying that snapshot verbatim (extensions, themes, skills, and the config files) with six deliberate deltas:
 
 1. `config/models.json` and `config/mcp.json` are not shipped, and the machine-local model selections were removed from `config/settings.json`: `defaultProvider`, `defaultModel`, `modelThinkingLevels`, `subagents.watchdog.main.model`, and the `litellm-any/deepseek-flash-qd` entry inside `subagents.modelScope.allow` (the key itself is kept, with `allow: ["inherit"]`). Both excluded files hold machine-local values — gateway registrations and absolute paths of local MCP server executables. `config/settings.json` otherwise matches the snapshot, including the `theme` key, which is kept even though the packager's own copy points at a gateway-specific default, `subagents.watchdog.enabled`, which is kept on with the reviewer model left to inherit the session model, and the whole `packages` array — `npm:pi-web-access`, `npm:pi-subagents` and `git:github.com/jayli/superpowers` are all public. See [configuration.md](configuration.md#what-is-not-shipped).
 2. `config/subagent/config.json` (pi-subagents' own `timeoutMs` / `checkpointBeforeDeadlineMs` tuning, added to the snapshot on 2026-09-30) is not shipped either. It is not machine-local, but it configures a companion package rather than any extension here, and `pi-subagents` works zero-config without it.
 3. `docs/handbook.zh.md` is the snapshot's README, kept verbatim as the Chinese handbook.
 4. Everything else under `docs/`, plus `README.md` and `CHANGELOG.md`, is written for this package: extension count, test count and the switch tables have to be updated by hand.
 5. `extensions/bash-command-collapse/render.test.ts` resolves the repository root by walking up to the first `.git` directory instead of the snapshot's hard-coded four `..` segments. The snapshot nests two levels deeper (`clients/pi/extensions/…` vs `extensions/…`), so the hard-coded form resolves the dangerous-mode probe into `$HOME` here and the test fails; the walk-up form works in both layouts. **`rsync` overwrites this file on every sync** — re-apply the delta afterwards, and expect it to be the one line `diff -r` reports.
+6. `skills/pi-theme-from-palette/SKILL.md` points at this repository's paths instead of the snapshot's: the reference theme is `<package>/themes/pi-coder-1337.json` and the slot table is `<package>/assets/pi-coder-palettes.html` (the snapshot says `<repo>/clients/pi/themes/…` and `<repo>/docs/pi-coder-palettes.html`). The snapshot keeps the palette HTML in its `docs/`, this package keeps its own copy in `assets/` — the two files are byte-identical, so delta 6 is the path line only. **`cp` overwrites it on every sync**; re-apply the delta (it is 2 lines).
+
+**A sync copies the snapshot; it does not redesign it.** Work that belongs upstream — fixing a pi-version coupling, adding a switch, changing a render — goes into `clients/pi/` first and arrives here on the next sync, which is what keeps `diff -r` meaningful (it is the only signal that nothing was silently dropped). Two things this rules out in practice: never "fix" a test here to make it pass (the standing eleven failures are recorded, not repaired — see [Tests](#tests)), and never edit a file here without checking whether the change belongs in the snapshot instead.
 
 So when the snapshot changes upstream:
 
@@ -141,10 +146,11 @@ So when the snapshot changes upstream:
 SRC=/Users/bachi/jaylli/litellm-any/clients/pi   # the snapshot the extension lives in
 DST=/Users/bachi/jaylli/pi-coder                 # this package
 rsync -a --delete "$SRC/extensions/" "$DST/extensions/"
-rsync -a --include='*.json' --exclude='*' "$SRC/themes/" "$DST/themes/"
+rsync -a --delete --include='*.json' --exclude='*' "$SRC/themes/" "$DST/themes/"
 cp "$SRC/AGENTS.md" "$DST/config/AGENTS.md"
 cp "$SRC/AGENTS.core.md" "$DST/config/AGENTS.core.md"   # the distilled core `core-rules` re-injects
 cp "$SRC/README.md" "$DST/docs/handbook.zh.md"   # the handbook is the snapshot README, verbatim
+cp "$SRC/skills/"*/SKILL.md "$DST/skills/"        # then re-apply delta 6
 cp /path/to/litellm-any/docs/pi-coder-palettes.html "$DST/assets/pi-coder-palettes.html"
 diff -r "$SRC/extensions" "$DST/extensions"     # expect: only render.test.ts (delta 5 above)
 diff -r "$SRC/themes" "$DST/themes"              # expect: only ayu1.png / ayu2.png, which live in assets/ here
@@ -153,6 +159,8 @@ diff "$DST/config/settings.json" "$SRC/config/settings.json"   # expect: only th
 npm test
 # bump "version" in package.json, add a CHANGELOG entry, update the counts in README.md and docs/
 ```
+
+**Run `rsync --dry-run` first and read its deletions.** Those two commands each carry `--delete`, and it is the deletions rather than the copies that cannot be undone. Before the transfer, `rsync -an --delete --out-format='%o %n' "$SRC/extensions/" "$DST/extensions/" | grep '^del'` lists exactly what will be removed; the file names should match the upstream removals you already know about from `git log` in the snapshot repository, and anything else is a size or path mistake worth stopping for. The 2.4.0 sync deleted nothing — every change was an addition — which is why its `diff -r` was clean apart from delta 5.
 
 `config/settings.json` is **not** in that list of copies: it is hand-reconciled, because a blind `cp` would ship the gateway's model ids. Read delta 1, apply the snapshot's new keys by hand, and leave the model selections out.
 
@@ -163,6 +171,8 @@ The two `rsync --delete` runs are deliberate: a snapshot sync must remove what u
 Nothing else is copied. `config/settings.json` is the only file in the package that may differ from the snapshot in content, and `diff` on it is expected to show exactly the removed model selections of delta 1 and nothing else; everything under `docs/`, plus `README.md`, `CHANGELOG.md` and `assets/`, is written for this package and is not touched by a sync.
 
 Two things under `extensions/` are newer than the sync procedure above and belong in the checklist: `bash-command-collapse/sandbox.ts`, `allowlist.ts` and `sandbox-mode.ts` are **live code** (imported by `sandbox-boundary/`, and `sandbox-mode.ts` also by `plan-mode/`), not test helpers, so deleting that directory breaks two more extensions; `recap/subagents.ts` is likewise live code imported by `verify-loop/`; and the persistent allowlist at `~/.pi/agent/sandbox-allowlist.json` is **machine-local state**, deliberately absent from `clients/pi/` — a sync must never copy it in either direction.
+
+Three more cross-directory imports arrived with 2.4.0 and carry the same warning: `statusline/line.ts` imports `STATUS_KEY` from `background-tasks/status.ts` **and** `REPORTING_STATUS_KEY` / `REPORTING_LABEL` from `voice/status.ts`, so the statusline is no longer droppable on its own; `voice/` and `web-search-tree/` both depend on nothing else here but both fail soft when their external counterpart is missing (`pi-web-access` absent, no Aliyun key). The pattern behind all of these: a constant or a pure helper that two extensions must agree on lives in one file and is **imported**, never duplicated as a literal — a drifted literal produces no error at all, just a silently missing feature.
 
 ## Publishing
 

@@ -13,6 +13,7 @@ import {
 	formatTitleLine,
 	markCellFilled,
 	markLines,
+	poweredByLines,
 	shortenPath,
 } from "./logo.ts";
 
@@ -113,17 +114,51 @@ test("每行可见宽度恒等于 MARK_WIDTH（挂不挂侧栏的行都等宽，
 	}
 });
 
-test("composeHeaderLines：段之间恰好一个空行，缺段不留空行（提示行与说明行都缩进一格）", () => {
-	assert.deepEqual(composeHeaderLines({ logo: ["a", "b"], hints: "h", onboarding: "o" }), ["a", "b", "", " h", "", " o"]);
+test("composeHeaderLines：印记下方留一个空行，提示行与说明段之间不留空行（两段都缩进一格）", () => {
+	// 印记段是「大 logo」，它下面那条空行必须保留（用户 2026-10-05 定）；要去掉的只是
+	// 提示行与说明段之间那一条 —— 两处空行不是同一条规则。
+	assert.deepEqual(composeHeaderLines({ logo: ["a", "b"], hints: "h", onboarding: ["o"] }), ["a", "b", "", " h", " o"]);
 	assert.deepEqual(composeHeaderLines({ logo: ["a"], hints: "h" }), ["a", "", " h"]);
-	assert.deepEqual(composeHeaderLines({ logo: [], hints: "h", onboarding: "o" }), [" h", "", " o"]);
+	assert.deepEqual(composeHeaderLines({ logo: ["a"], onboarding: ["o"] }), ["a", "", " o"]);
+	// 没有印记段就没有那条空行（窄终端回退时印记段仍在，这条钉的是「不凭空留行」）
+	assert.deepEqual(composeHeaderLines({ logo: [], hints: "h", onboarding: ["o"] }), [" h", " o"]);
 	assert.deepEqual(composeHeaderLines({ logo: [] }), []);
-	assert.deepEqual(composeHeaderLines({ logo: [], onboarding: "o" }), [" o"]);
-	// 每一行都不顶格（空行不算）：印记行自带缩进，文字行由这里补上
-	for (const line of composeHeaderLines({ logo: markLines(), hints: "h", onboarding: "o" })) {
-		if (line === "") continue;
-		assert.ok(line.startsWith(MARK_INDENT), `每一行都不能顶格：${JSON.stringify(line)}`);
+	assert.deepEqual(composeHeaderLines({ logo: [], onboarding: ["o"] }), [" o"]);
+	// 一句话说清：整份 header 里恰好一个空行，且紧跟在印记段最后一行之后
+	const all = composeHeaderLines({ logo: markLines(), hints: "h", onboarding: ["o"] });
+	assert.equal(all.filter((line) => line === "").length, 1, "空行只该有印记下方那一个");
+	assert.equal(all[MARK_ROWS], "", "空行紧跟在印记最后一行之后");
+	for (const line of all) {
+		if (line === "") continue; // 空行本身就是空的，不适用「不顶格」
+		assert.ok(line.startsWith(MARK_INDENT), `除了那条空行，每一行都不能顶格：${JSON.stringify(line)}`);
 	}
+});
+
+test("poweredByLines：宽终端画三行 `@bachi/` + Pi-Coder 字形，窄终端退回整句", () => {
+	// 三行字形的原始字节。原稿第 3 行是 14 列，这里补一个行尾空格让三行等宽 ——
+	// 与印记行的 `MARK_BLANK` 同一个约定，行尾空白在终端里不可见。
+	const ART = ["┏┓•  ┏┓   ┓    ", "┃┃┓━━┃ ┏┓┏┫┏┓┏┓", "┣┛┗  ┗┛┗┛┗┻┗ ┛ "];
+	const PREFIX = "This pi harness is powered by latest @bachi/";
+	const wide = poweredByLines(identityTheme, 200).map(plain);
+	// 中间行是「整句 + 字形」，接缝处不补空格：`@bachi/` 的斜杠直接顶住字形的第一列
+	assert.deepEqual(wide, [
+		" ".repeat(PREFIX.length) + ART[0],
+		PREFIX + ART[1],
+		" ".repeat(PREFIX.length) + ART[2],
+	]);
+	for (const line of wide) assert.equal(line.length, PREFIX.length + 15, "三行必须等宽，否则字形会歪");
+	// 窄终端：整块（含 `composeHeaderLines` 补的那一格缩进）装不下就退回整句
+	assert.deepEqual(poweredByLines(identityTheme, 59).map(plain), [`${PREFIX}pi-coder.`]);
+	assert.deepEqual(poweredByLines(identityTheme, 60).map(plain), wide);
+});
+
+test("poweredByLines：句子走 dim，字形走 accent", () => {
+	const marked = { fg: (color: string, text: string) => `<${color}>${text}</>`, bold: (text: string) => text };
+	const lead = " ".repeat("This pi harness is powered by latest @bachi/".length);
+	const lines = poweredByLines(marked, 200);
+	assert.equal(lines[1], `<dim>This pi harness is powered by latest @bachi/</><accent>┃┃┓━━┃ ┏┓┏┫┏┓┏┓</>`);
+	assert.equal(lines[0], `${lead}<accent>┏┓•  ┏┓   ┓    </>`, "首行的引导空格不上色（不可见，且省几个转义）");
+	assert.deepEqual(poweredByLines(marked, 59), [`<dim>This pi harness is powered by latest @bachi/pi-coder.</>`]);
 });
 
 test("formatTitleLine：版本号后面跟模型与推理档位", () => {

@@ -2,7 +2,7 @@
 
 ## Requirements
 
-- pi **0.85.1** or newer. The extensions hook into pi internals (extension UI containers, renderer signatures, `SettingsManager`), so a much older pi may load them and behave oddly. 29 of the 30 entries load with `errors: []` through pi's own loader on 0.85.1 and 0.87.1; all 30 do on 0.99.1 and 0.99.2. The one that needs 0.99.1 is `codemode-tree/` (it captures the built-in `codemode` tool through `createCodemodeExtension()`, which only exists from 0.99.1 on); on an older pi that single entry fails to load and the other 29 are unaffected.
+- pi **0.85.1** or newer. The extensions hook into pi internals (extension UI containers, renderer signatures, `SettingsManager`), so a much older pi may load them and behave oddly. 31 of the 32 entries load with `errors: []` through pi's own loader on 0.85.1 and 0.87.1; all 32 do on 0.99.1 and newer. The one that needs 0.99.1 is `codemode-tree/` (it captures the built-in `codemode` tool through `createCodemodeExtension()`, which only exists from 0.99.1 on); on an older pi that single entry fails to load and the other 31 are unaffected.
 - pi **0.99.1** for MCP. `builtin:mcp` first shipped there, and this package no longer carries an MCP extension of its own — on an older pi there are simply no MCP tools.
 - Node **22.19+** (pi's own requirement).
 - macOS or Linux. The delete boundary (`bash-command-collapse/sandbox.ts`, `sandbox-boundary/`) needs macOS's `sandbox-exec`; elsewhere it turns itself off with `PI_SANDBOX=off` semantics and only the `AGENTS.md` discipline is left.
@@ -54,8 +54,8 @@ Expected visible results of a successful load:
 - The editor shows a `❯ ` prompt (`prompt-editor`).
 - A user message has a `▏ ` at the head of every line, including the blank lines above and below the text, in the theme's `accent` color (`user-message-bar`).
 - A bash run starts with a `• ` dot followed by `Run `, with **no background** behind the block (`bash-command-collapse`); pressing `shift+tab` cycles the permission mode and the statusline's second line shows `⏵ bypass` → `⏸ plan` → `☢ dangerous` (`plan-mode`).
-- `/theme`, `/tasks`, `/recap`, `/rewind`, `/init`, `/clear`, `/exit`, `/ask`, `/memory`, `/plan`, `/plan-status`, `/goal`, `/sandbox-boundary`, `/background` and the `/bash-*` family (`/bash-preview`, `/bash-timeout`) all exist. Type `/` and scroll the command list. `/mcp` also exists, but it comes from pi's own `builtin:mcp`, not from this package.
-- `/sandbox-boundary` prints the delete boundary (project directory, the temp roots `/tmp` / `/var/folders` / `/var/tmp`, the regenerable caches) and a `持久白名单` line, and `~/.pi/agent/AGENTS.core.md` exists — `core-rules` does nothing, silently, without it.
+- `/theme`, `/tasks`, `/recap`, `/rewind`, `/init`, `/clear`, `/exit`, `/ask`, `/memory`, `/plan`, `/plan-status`, `/goal`, `/sandbox-boundary`, `/background`, `/voice` and the `/bash-*` family (`/bash-preview`, `/bash-timeout`) all exist. Type `/` and scroll the command list. `/mcp` also exists, but it comes from pi's own `builtin:mcp`, not from this package.
+- The **skills** shipped by the package are listed at startup before the header prunes them: `pi-theme-from-palette` turns a foreign palette into a theme file. The 15 `superpowers` skills come from that companion package, not from here.
 
 If something is missing, start pi and search the screen for `Failed to load extension` — a parse error in one file does not stop the others.
 
@@ -81,9 +81,12 @@ PKG=~/.pi/agent/npm/node_modules/@bachi/pi-coder
 cp "$PKG/config/AGENTS.md"       ~/.pi/agent/AGENTS.md          # global working rules for the agent
 cp "$PKG/config/AGENTS.core.md"  ~/.pi/agent/AGENTS.core.md     # the distilled core `core-rules` re-injects; missing means the extension silently does nothing
 cp "$PKG/config/web-search.json" ~/.pi/agent/web-search.json    # required by pi-web-access
+cp "$PKG/config/voice.json"      ~/.pi/agent/voice.json         # optional: spoken conclusions; without it `voice/` uses its built-in defaults
 mkdir -p ~/.pi/agent/themes
 cp "$PKG/themes/"*.json          ~/.pi/agent/themes/            # optional: themes are already loaded from the package
 ```
+
+`config/voice.json` is entirely portable — voice name, speech rate, character cap, whether questions are read aloud, and the summary window. The Aliyun key is **not** in it: `/voice key sk-xxx` writes that to `~/.config/litellm-any/apikey.json`, outside the agent directory. Copying the file is optional; without it `voice/` runs on its defaults and stays silent until a conclusion is spoken through `say`.
 
 `config/mcp.json` is **not** shipped, for the same reason as `config/models.json`: its entries are absolute paths of local MCP server executables. To use MCP servers, run `pi mcp add …` (or write `~/.pi/agent/mcp.json` / a project `.pi/mcp.json` yourself) — pi's built-in `builtin:mcp` reads those and registers no tools until one exists. Three differences from the retired extension are worth knowing: `timeout` is in **seconds**, project config is only `.pi/mcp.json` (symlink an existing `.mcp.json` to it), and legacy SSE is not supported. See [configuration.md](configuration.md#mcpjson).
 

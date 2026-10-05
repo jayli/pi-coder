@@ -3,7 +3,7 @@
 
 # @bachi/pi-coder
 
-A complete [Pi](https://pi.dev) coding-agent environment packaged for npm: **30 extensions**, **3 themes**, and the global config files that make them work together.
+A complete [Pi](https://pi.dev) coding-agent environment packaged for npm: **32 extensions**, **5 themes**, a theme-authoring skill, and the global config files that make them work together.
 
 This is a working setup, not a collection of demos. Every extension is used daily, and each one documents the pi internals it depends on in its own file header — including the failure that motivated it and the things that look like they could be simplified but cannot be.
 
@@ -56,7 +56,7 @@ Without `pi-web-access` and `pi-subagents` two more degrade instead of failing: 
 
 | Extension | What it does |
 | --- | --- |
-| [`bash-command-collapse.ts`](extensions/bash-command-collapse.ts) | Overrides `bash`: a `• ` status dot (dim while running, green on success, red on failure), then the command behind a `Run ` prefix on at most 2 visual lines ending in `…`, with results hanging off the same tree and a single `└ ` on the first real output line (a failed command's `Command exited with code N` is detected by shape and painted `error`, expanded or not). No background and no boundary blank lines, hard-wrap at the column budget, shell syntax highlighting. The shape and its 25 render assertions are in [`bash-command-collapse/render.test.ts`](extensions/bash-command-collapse/render.test.ts). |
+| [`bash-command-collapse.ts`](extensions/bash-command-collapse.ts) | Overrides `bash`: a `• ` status dot (dim while running, green on success, red on failure), then the command behind a `Run ` prefix on at most 2 visual lines ending in `…`, with results hanging off the same tree and a single `└ ` on the first real output line (a failed command's `Command exited with code N` is detected by shape and painted `error`, expanded or not). No background and no boundary blank lines, hard-wrap at the column budget, shell syntax highlighting. **Long paths are abbreviated in the collapsed state only** — and only on `cat` / `cd` / `ls` / `ln` arguments and `NAME=<path>` assignments, never on a form that would need evaluation (variables, backticks, globs, quotes, `~`), so `import … from "/Users/…"` is left alone; the threshold is 40% of the command's usable columns and only the middle is elided (`<head>…/<tail>`, tail layers first). `ctrl+o` shows the command whole. The shape and its render assertions are in [`bash-command-collapse/render.test.ts`](extensions/bash-command-collapse/render.test.ts). |
 | [`read-path-collapse.ts`](extensions/read-path-collapse.ts) | Overrides `read`'s title row: the same `• ` dot and no-background shell as the bash block, results indented to the `Read` column, and long paths on one line with the ellipsis at the front and the file name kept whole. |
 | [`tool-diff.ts`](extensions/tool-diff.ts) | Overrides `edit`/`write`: Claude Code style full-line diff backgrounds, line-number gutter, inline and syntax highlighting. |
 | [`thinking-collapse.ts`](extensions/thinking-collapse.ts) | Thinking blocks render as one continuous horizontally scrolling line labelled `Think: `. |
@@ -64,10 +64,10 @@ Without `pi-web-access` and `pi-subagents` two more degrade instead of failing: 
 | [`prompt-editor.ts`](extensions/prompt-editor.ts) | A `❯ ` gutter in the editor, Claude Code style `!` bash mode, plus a blank line between the autocomplete list and the statusline. |
 | [`fenceless-code-block/`](extensions/fenceless-code-block/) | Markdown code blocks lose their fences (syntax colors kept, no background added). |
 | [`codemode-tree/`](extensions/codemode-tree/) | Renders the built-in `codemode` tool block as the same tree the bash and read blocks use: `• codemode` → syntax-highlighted script on `│ ` → result tree with one `└ `. The dot is three-state (white running, green success, red failure) and is the only outcome lamp now that the background is gone. It gets codemode's execution logic by running pi's own `createCodemodeExtension()` against a `Proxy` that captures the registered definition, so the schema stays the same object reference pi's MCP extension checks. Needs pi **0.99.1** and the shipped `settings.json`'s `-builtin:codemode` + `+codemode` pair. `PI_CODEMODE_TREE=off` removes the tool entirely rather than restoring the built-in. |
-| [`statusline/`](extensions/statusline/) | Replaces the footer: model/thinking level, context usage, git branch and diff stat, plus a second line for extension statuses and a reserved last line for the background-task dock. |
-| [`startup-logo/`](extensions/startup-logo/) | Static header logo whose title line carries the version, the **current model and thinking level** (`pi v0.99.2 (deepseek-flash-qd with max effort)`, read live so `/model` and `shift+tab` follow on the next frame) and the shortened cwd, every line indented one column and width-clamped because pi-tui throws on an over-wide line; prunes the **entire** startup resource list (`[Context]`/`[Skills]`/`[Prompts]`/`[Extensions]`/`[Themes]`). |
+| [`statusline/`](extensions/statusline/) | Replaces the footer: model/thinking level, context usage, git branch and diff stat, plus a second line for extension statuses and a reserved last line for the background-task dock. The main line's last segment has four priority-ordered states: the `reporting` lamp while a spoken summary is in flight ([`voice/`](extensions/voice/)) first, then the running tool name, then `thinking`, then nothing. |
+| [`startup-logo/`](extensions/startup-logo/) | Header logo whose title line carries the version, the **current model and thinking level** (`pi v0.99.2 (deepseek-flash-qd with max effort)`, read live so `/model` and `shift+tab` follow on the next frame) and the shortened cwd, every line indented one column and width-clamped because pi-tui throws on an over-wide line; prunes the **entire** startup resource list (`[Context]`/`[Skills]`/`[Prompts]`/`[Extensions]`/`[Themes]`). It fades in **silently after 500 ms with a 1 s diagonal wave** sweeping the 4×4 mark right-to-left, the title line and cwd fading in with it; the settled frame is byte-identical to the old static logo. Interpolation is in **OKLCH**, not sRGB — a plain sRGB ramp would pass through the theme's “added line” green on some palettes, which reads wrong on a startup screen. `PI_LOGO=off` skips all of it. |
 | [`working-indicator/`](extensions/working-indicator/) | Semantic working message (`Tools Calling`, `Editing`, `Writing`, `Reading`, `Thinking`) with per-segment token counts and elapsed time, plus a `Subagent watchdog reviewing` message for the window where `pi-subagents`' watchdog blocks after `agent_end` and the spinner would otherwise turn unexplained. |
-| [`simple-task/`](extensions/simple-task/) | Task list driven by `task_set` / `task_update` / `task_get` and `/tasks`; state rides the session log, never the repo. All three tools use `renderShell: "self"`, so their blocks carry no background and no boundary blank lines, with one leading space per line — the same shell as the bash and read blocks. |
+| [`simple-task/`](extensions/simple-task/) | Task list driven by `task_set` / `task_update` / `task_get` and `/tasks`; state rides the session log, never the repo. All three tools use `renderShell: "self"`, so their blocks carry no background and no boundary blank lines, with one leading space per line — the same shell as the bash and read blocks. The widget draws at most **8 rows and scrolls with progress**: the anchor is the first unfinished task, the window moves the minimum amount, and a fully finished list stays at its end. `… N more` appears above only when earlier rows scrolled off; `… and N more` below. |
 | [`recap/`](extensions/recap/) | `/recap` (idempotent: re-running it while the summary is on screen does nothing), plus an automatic summary above the editor after 10s of idling. |
 | [`rewind/`](extensions/rewind/) | Shadow-git checkpoints and `/rewind` (or Esc Esc) to restore code and/or conversation. |
 | [`ask-user-question/`](extensions/ask-user-question/) | An `ask_user_question` tool: up to 4 questions with 2–4 described options plus a free-text row, answered in the terminal. Its block uses `renderShell: "self"`, so it carries no background and no boundary blank lines. |
@@ -85,17 +85,21 @@ Without `pi-web-access` and `pi-subagents` two more degrade instead of failing: 
 | [`sandbox-boundary/`](extensions/sandbox-boundary/) | The non-shell half of the delete boundary: `bash` runs inside a seatbelt profile, but `write` / `edit` are direct `fs` calls, so `apply_patch`'s `*** Delete File:` lines are checked on the `tool_call` hook instead. Shares one whitelist and one persistent allowlist with the bash side. |
 | [`init-command.ts`](extensions/init-command.ts) | Claude Code style `/init`: update `CLAUDE.md`, else `AGENTS.md`, else create `AGENTS.md`. |
 | [`clear-command.ts`](extensions/clear-command.ts) | `/clear` as an alias of `/new`. |
+| [`web-search-tree/`](extensions/web-search-tree/) | Renders `pi-web-access`'s three self-rendering tool blocks (`pi_web_search`, `fetch_content`, `get_search_content`) as the same tree as the bash / read / codemode blocks — same column table, three-state dot, children rendered at `width - 4`. Unlike the others, `└ ` hangs on the **last** line, because that is where the `ctrl+o` hint to the full sources lives. It captures the package's own definitions through a `registerTool`-only `Proxy`, so routing, storage and the model-visible text are untouched; `source_check` and `web_enable` are deliberately left alone. Requires the shipped `settings.json`'s object-form `pi-web-access` entry with `"extensions": []` — the package also registers those three names, and pi resolves that as a conflict. `PI_WEB_SEARCH_TREE=off` disables it; with the package filtered, `pi_web_search` then disappears entirely. |
+| [`voice/`](extensions/voice/) | Speaks the final conclusion aloud on `turn_end` (with `agent_settled` as a fallback), so you can hear the answer instead of reading it. Markdown is flattened into speakable prose — code blocks, tables, URLs, file paths and emoji dropped, over-long text cut at a sentence boundary — then rewritten by a **fixed fast model** (`deepseek-flash-qd`, low effort) into a 1–3 sentence spoken script, because stripping markup cannot shorten the content itself. The summary caps are hard: **100 chars, and never longer than the source**. Uses macOS `say`; give it an Aliyun key (`/voice key sk-xxx`) and it switches to `qwen-audio-3.1-tts-flash`, where `aliyunInstruction` can ask for any accent (the shipped `config/voice.json` asks for Chongqing). Interruptible from four places (`agent_start`, interactive `input`, `session_shutdown`, and **Esc — swallowed**, so stopping the speech does not also interrupt the turn); single-slot background playback never blocks the turn; every failure falls back to `say` or to the locally trimmed text. `/voice` shows status and drives `on` / `off` / `summary` / `test` / `voices` / `stop`; `PI_VOICE=off` disables it. |
 | [`exit-command.ts`](extensions/exit-command.ts) | `exit`, `quit` or `bye` on an otherwise empty prompt quits pi; `/exit` too. |
 
 ### Themes
 
-`pi-coder-1337` (the default here, ported from Codex CLI's built-in `1337`), `pi-coder-catppuccin` and `pi-coder-ayu` — reference-only palettes whose `colors` entries point at `vars`, plus two custom diff-background tokens that [`tool-diff.ts`](extensions/tool-diff.ts) reads. `vars` keeps only what a slot still references (35 / 31 / 27 entries). Details in [docs/themes.md](docs/themes.md).
+Five themes ship with this package: `pi-coder-1337` (the default here, ported from Codex CLI's built-in `1337`), `pi-coder-catppuccin`, `pi-coder-ayu`, and the two newest — `pi-coder-coffee` (from `coffee.vim`) and `pi-coder-nightfox` (from `nightfox.nvim`). They are reference-only palettes whose `colors` entries point at `vars`, plus two custom diff-background tokens that [`tool-diff.ts`](extensions/tool-diff.ts) reads. `vars` keeps only what a slot still references. Details in [docs/themes.md](docs/themes.md).
 
-All three are laid out side by side in the [palette reference](https://raw.githack.com/jayli/pi-coder/main/assets/pi-coder-palettes.html): every variable and slot assignment, plus a terminal preview you can switch between the three themes.
+All five are laid out side by side in the [palette reference](https://raw.githack.com/jayli/pi-coder/main/assets/pi-coder-palettes.html): every variable and slot assignment, plus a terminal preview you can switch between the themes.
+
+**A sixth is one skill away.** [`skills/pi-theme-from-palette/`](skills/pi-theme-from-palette/) turns any existing palette — a vim colorscheme, a tmTheme plist, a Codex theme export, or a bare list of hex values — into a pi theme file: the 22 primary slots are re-derived from your colors, the other 37 are copied byte-for-byte from `pi-coder-1337`, and it carries the verification script (pi's own loader, both `truecolor` and `256color`, asserting the secondary slots did **not** move). It is a package resource, so installing the package brings it along. This is how `pi-coder-coffee` and `pi-coder-nightfox` were built.
 
 ### Commands
 
-`/ask` `/background` `/bash-preview` `/bash-timeout` `/clear` `/exit` `/goal` `/init` `/memory` `/plan` `/plan-status` `/recap` `/rewind` `/sandbox-boundary` `/tasks` `/theme`
+`/ask` `/background` `/bash-preview` `/bash-timeout` `/clear` `/exit` `/goal` `/init` `/memory` `/plan` `/plan-status` `/recap` `/rewind` `/sandbox-boundary` `/tasks` `/theme` `/voice`
 
 `/mcp` is **not** one of them: MCP is pi's own built-in extension (`builtin:mcp`) since pi 0.99.1, and this package no longer ships an MCP extension of its own — the retired implementation conflicted with the built-in over the `/mcp` registration. See [docs/extensions.md](docs/extensions.md#mcp-servers--pis-built-in-extension-not-this-packages).
 
@@ -112,6 +116,7 @@ Every switch is an environment variable, so it can be scoped per project or set 
 | `PI_BASH_STREAM=on` | off | Use pi's native streaming for bash instead of the collapse path. |
 | `PI_CODEMODE_TREE=off` | on | Do not register `codemode`; with the shipped `-builtin:codemode` setting this removes the tool entirely rather than restoring pi's built-in rendering. |
 | `PI_CORE_RULES=off` | on | Do not re-inject the distilled global rules into the context. |
+| `PI_VOICE=off` | on | Disable spoken conclusions entirely; `PI_VOICE_CONFIG` moves `voice.json`, and `PI_VOICE_TTS_ENDPOINT` / `PI_VOICE_AFPLAY_BIN` swap the TTS endpoint and player (used by the tests). |
 | `PI_DESTRUCTIVE_GUARD` | `on` | `block` rejects the confirm tier too, `notify` only reports what it would have caught, `off` disables the gate. |
 | `PI_FENCELESS_CODE=off` | on | Keep Markdown code fences. |
 | `PI_LOGO=off` | on | Do not install the startup header. |
@@ -121,6 +126,7 @@ Every switch is an environment variable, so it can be scoped per project or set 
 | `PI_SANDBOX=off` | on | Disable the delete boundary (both the bash seatbelt profile and the `apply_patch` gate); also off automatically off macOS. `PI_SANDBOX_EXTRA_WRITE` adds delete roots, `PI_SANDBOX_ALLOWLIST` moves the persistent allowlist file. |
 | `PI_SUBAGENT_LOG_GUARD=notify` | `drop` | Show `[pi-subagents]` diagnostics through `ctx.ui.notify` instead of dropping them. |
 | `PI_VERIFY_LOOP` | `block` | The verification gate's force: `off` disables it, `notify` reports without forcing a continuation. `PI_VERIFY_PATTERN=strict` narrows "verification" to test/build/lint shapes; `PI_VERIFY_EVALUATOR_MODEL` picks the `/goal` evaluator model. |
+| `PI_WEB_SEARCH_TREE=off` | on | Do not take over `pi-web-access`'s three tool blocks; with the shipped `packages` filter this removes `pi_web_search` rather than restoring the package's own rendering. |
 
 ## Global config files
 
@@ -148,7 +154,8 @@ cp "$PKG/themes/"*.json             ~/.pi/agent/themes/            # optional: a
 
 ## Requirements
 
-- pi **0.85.1** or newer (the extensions are written against this version's internals), Node **22.19+**. 29 of the 30 entries load with `errors: []` through pi's own loader on 0.85.1 and 0.87.1; all 30 do on 0.99.1 and 0.99.2. The one that needs 0.99.1 is `codemode-tree/`, which captures the built-in `codemode` tool through `createCodemodeExtension()` — a function that only exists from 0.99.1 on, so on an older pi that single entry fails to load and the rest are unaffected.
+- pi **0.85.1** or newer (the extensions are written against this version's internals), Node **22.19+**. 30 of the 32 entries load with `errors: []` through pi's own loader on 0.85.1 and 0.87.1; all 32 do on 0.99.1 and 0.99.2. The one that needs 0.99.1 is `codemode-tree/`, which captures the built-in `codemode` tool through `createCodemodeExtension()` — a function that only exists from 0.99.1 on, so on an older pi that single entry fails to load and the rest are unaffected.
+- `voice/` needs macOS for playback — the local engine shells out to `say` and the Aliyun path plays through `afplay`. Synthesis itself is plain HTTP, but with no player present it reports the failure once and stays silent rather than failing to load.
 - MCP needs pi **0.99.1**, which is where `builtin:mcp` arrived. This package no longer ships an MCP extension, so on an older pi there are simply no MCP tools.
 - macOS or Linux. Nothing is Windows-specific, but it is untested there.
 - Optional but assumed by a few extensions: `pi-web-access` (the web tools), `pi-subagents` (subagent events, fleet status line) and `superpowers` (the skills `plan-mode`'s `brainstorming` gate and `verify-loop`'s completion discipline refer to). All three are listed in the shipped `config/settings.json`'s `packages` array.
@@ -159,16 +166,16 @@ cp "$PKG/themes/"*.json             ~/.pi/agent/themes/            # optional: a
 | --- | --- |
 | [docs/installation.md](docs/installation.md) | Install, verify, upgrade, uninstall, and the local-checkout workflow. |
 | [docs/configuration.md](docs/configuration.md) | Every shipped config file, what was removed from the snapshot, and why. |
-| [docs/extensions.md](docs/extensions.md) | Reference for all 30 extensions: commands, switches, caveats, storage. |
+| [docs/extensions.md](docs/extensions.md) | Reference for all 32 extensions: commands, switches, caveats, storage. |
 | [docs/themes.md](docs/themes.md) | Theme files, the custom tokens, and the rules that make them load. |
-| [Palette reference](https://raw.githack.com/jayli/pi-coder/main/assets/pi-coder-palettes.html) | **Chinese.** Every variable and slot assignment for the three themes, with a terminal preview that switches between them. |
-| [docs/development.md](docs/development.md) | Running the 1334 unit tests, verifying against a real pi, publishing. |
+| [Palette reference](https://raw.githack.com/jayli/pi-coder/main/assets/pi-coder-palettes.html) | **Chinese.** Every variable and slot assignment for the themes, with a terminal preview that switches between them. |
+| [docs/development.md](docs/development.md) | Running the 1662 unit tests, verifying against a real pi, publishing. |
 | [docs/handbook.zh.md](docs/handbook.zh.md) | **Chinese.** The original handbook this package was extracted from: the author's machine, gateway setup, and the full rationale behind every design decision. |
 
 ## Development
 
 ```bash
-npm test        # node --test, 1334 tests
+npm test        # node --test, 1662 tests
 ```
 
 The pure-logic modules are deliberately free of `@earendil-works/pi-*` imports so they run under plain `node --test`; see [docs/development.md](docs/development.md) for the layout rules, the tmux verification procedure and the traps this codebase documents.
