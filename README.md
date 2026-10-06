@@ -10,7 +10,7 @@ This is a working setup, not a collection of demos. Every extension is used dail
 - Repository: <https://github.com/jayli/pi-coder>
 - Issues: <https://github.com/jayli/pi-coder/issues>
 
-**Watch it work** — [demo-server-https.gif](https://cdn.jsdelivr.net/gh/jayli/pi-coder@main/assets/demo-server-https.gif): a four-item task list worked end to end, with the thinking line, collapsed bash runs, inline diff and statusline progress. GitHub will not embed it (7.3 MB, over the 5 MiB limit of the image proxy it routes every off-domain image through), so the link opens it in the browser.
+**Watch it work** — [demo-server-https.gif](https://cdn.jsdelivr.net/gh/jayli/pi-coder@main/assets/demo-server-https.gif): a full session at **2× speed** — an HTTP→HTTPS server migration from the `brainstorming` skill's plan gate, through the `Explored` grouping that folds read-only exploration into one block, a three-item task list, inline diffs and bash verification (including a failing run), with the thinking line and statusline progress. GitHub will not embed it (13.3 MB, over the 5 MiB limit of the image proxy it routes every off-domain image through), so the link opens it in the browser.
 
 ## What it looks like
 
