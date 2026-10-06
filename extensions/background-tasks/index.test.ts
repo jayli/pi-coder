@@ -778,6 +778,20 @@ const paintedTheme = {
 	bold: (text: string) => text,
 };
 
+/**
+ * 带颜色槽定义的**真主题实例**：`bashOutput` 有定义时正文走它，没定义时回退 `toolOutput`。
+ * 用真 `Theme` 类而不是假对象，才能覆盖「未知槽位抛异常 → 回退」这条分支。
+ */
+function realTheme(slots: { bashOutput?: string } = {}) {
+	const fgColors: Record<string, string> = { text: "#111111", toolOutput: "#222222", muted: "#444444" };
+	if (slots.bashOutput !== undefined) fgColors.bashOutput = slots.bashOutput;
+	return { fg: (color: string, text: string) => {
+		const value = fgColors[color as keyof typeof fgColors];
+		if (value === undefined) throw new Error(`Unknown theme color: ${color}`);
+		return `${value}(${text})`;
+	}, bold: (text: string) => text };
+}
+
 /** 剥掉所有 ANSI / OSC 转义，只留可见文本。 */
 const plain = (line: string): string =>
 	line.replace(/\u001b\][^\u0007]*\u0007/g, "").replace(/\u001b\[[0-9;:?]*[a-zA-Z]/g, "");
@@ -1029,7 +1043,42 @@ test("终态通知：失败 / 被 kill 也是行末 ✔（只要结束就是 ✔
 	await h.shutdown();
 });
 
-test("终态通知：无底色，正文走 text 槽、结构符走 muted 槽", { skip }, async () => {
+test("正文颜色：工具块正文走 bash 输出色（bashOutput），不是 text 槽", { skip }, async () => {
+	const h = await loadHarness();
+	const definition = h.extension.tools.get("background_output")!.definition as any;
+	const result = { content: [{ type: "text", text: "line-1\nline-2" }], details: { ok: true } };
+	const lines = definition.renderResult(result, { expanded: false, isPartial: false }, paintedTheme, renderContext()).render(80);
+	// 正文与 bash 工具调用后的输出同色：bashOutput（本机皮肤里的 bash 输出正文槽）
+	assert.match(lines[0]!, /bashOutput\(line-1\)/, `首行正文走 bashOutput 槽：${JSON.stringify(lines[0])}`);
+	assert.match(lines[1]!, /bashOutput\(line-2\)/, `末行正文走 bashOutput 槽：${JSON.stringify(lines[1])}`);
+	// 不再走 text 槽（那是 fg —— 改成 bash 输出色前的旧行为，也是本条的回归点）
+	assert.ok(!lines.join("\n").includes("text(line-1)"), "正文不该再走 text 槽");
+	// 结构符仍是 muted，不受影响
+	assert.match(lines[0]!, /muted\(\u2502 \)/, "│ 仍单独取 muted 槽");
+	assert.match(lines[1]!, /muted\(\u2514 \)/, "└ 仍单独取 muted 槽");
+	await h.shutdown();
+});
+
+test("正文颜色：主题没定义 bashOutput 时回退 toolOutput（不抛异常、不留无色的裸文本）", { skip }, async () => {
+	const h = await loadHarness();
+	const definition = h.extension.tools.get("background_output")!.definition as any;
+	const result = { content: [{ type: "text", text: "line-1" }], details: { ok: true } };
+
+	// 有定义：bashOutput 赢
+	const withSlot = definition
+		.renderResult(result, { expanded: false, isPartial: false }, realTheme({ bashOutput: "#333333" }), renderContext())
+		.render(80);
+	assert.match(withSlot[0]!, /#333333\(line-1\)/, `有 bashOutput 时用它：${JSON.stringify(withSlot[0])}`);
+
+	// 无定义（抛 Unknown theme color）：回退 toolOutput —— pi 的官方皮肤就没这个 token
+	const withoutSlot = definition
+		.renderResult(result, { expanded: false, isPartial: false }, realTheme(), renderContext())
+		.render(80);
+	assert.match(withoutSlot[0]!, /#222222\(line-1\)/, `无 bashOutput 时回退 toolOutput：${JSON.stringify(withoutSlot[0])}`);
+	await h.shutdown();
+});
+
+test("终态通知：无底色，正文走 bash 输出色、结构符走 muted 槽", { skip }, async () => {
 	const h = await loadHarness();
 	const renderer = h.extension.messageRenderers.get("background-task") as any;
 	const lines = renderer(
@@ -1045,7 +1094,7 @@ test("终态通知：无底色，正文走 text 槽、结构符走 muted 槽", {
 	// 不再套 customMessageBg：整块不该出现任何背景槽
 	assert.ok(!lines.join("\n").includes("customMessageBg"), "不该再套 customMessageBg 底色");
 	assert.match(lines[1]!, /muted\(\u2514 \)/, "└ 单独取 muted 槽（树前缀含尾空格，与 plan 块同形）");
-	assert.match(lines[1]!, /text\(后台任务 bg_1/, "正文走 text 槽（与 exit_plan_mode 下方正文同色）");
+	assert.match(lines[1]!, /bashOutput\(后台任务 bg_1/, "正文走 bashOutput 槽（与 bash 输出正文同色）");
 	await h.shutdown();
 });
 

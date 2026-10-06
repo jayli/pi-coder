@@ -62,18 +62,20 @@ export const POWERED_BY_PREFIX = "This pi harness is powered by latest @bachi/";
 export const POWERED_BY_SENTENCE = `${POWERED_BY_PREFIX}pi-coder.`;
 
 /**
- * `pi-coder` 的字形块（3 行 × 15 列，用户 2026-10-05 给的稿）。
+ * `pi-coder` 的字形块（3 行 × 22 列，用户 2026-10-06 换的稿）。
  *
- * 三行等宽靠**行尾补空格**：原稿第 3 行只有 14 列，这里补到 15 —— 与印记行拿 `MARK_BLANK`
- * 占位同一个道理，行尾空白在终端里不可见，但少了它第三行就比前两行短一列，字形会歪。
+ * 上一稿是方块字（`┏┓•` 那一族），这一稿换成实边（`╭─╮` / `├─╯` / `╵`）；三行**天然等宽**
+ * （逐行都是 22 列），所以不需要上一稿那种行尾补空格 —— 但「三行等宽」仍是硬不变量，由测试钉住。
  * 接缝处**不补空格**：`POWERED_BY_PREFIX` 末尾的 `/` 直接顶住字形第一列，读起来就是用户
- * 给的 `@bachi/┃┃┓…` 那个形状。
+ * 给的 `@bachi/╭─╮…` 那个形状。
  *
- * 这一块不参与入场动画那条对角线（动画只扫 4×4 印记格），也不随会话重来，与提示行一样是静态文字。
+ * 上色与句子同一档（`dim`，用户 2026-10-06 定）：字形不再走 `accent`，与顶部印记脱钩，
+ * 整行就是一个颜色（见 `poweredByLines`）。这一块不参与入场动画那条对角线（动画只扫 4×4
+ * 印记格），也不随会话重来，与提示行一样是静态文字。
  */
-export const POWERED_BY_ART: readonly string[] = ["┏┓•  ┏┓   ┓    ", "┃┃┓━━┃ ┏┓┏┫┏┓┏┓", "┣┛┗  ┗┛┗┛┗┻┗ ┛ "];
+export const POWERED_BY_ART: readonly string[] = ["╭─╮╷   ╭─╴╭─╮╶┬╮╭─╴╭─╮", "├─╯│╶─╴│  │ │ ││├╴ ├┬╯", "╵  ╵   ╰─╴╰─╯╶┴╯╰─╴╵╰╴"];
 
-/** 字形块宽度（列）。补过空格后三行等宽，取第一行即可 —— 等宽本身由测试钉住。 */
+/** 字形块宽度（列）。三行等宽（这一稿天然 22 列），取第一行即可 —— 等宽本身由测试钉住。 */
 export const POWERED_BY_ART_WIDTH = POWERED_BY_ART[0]!.length;
 
 /** 字形块 + 前缀的总列宽（不含 `composeHeaderLines` 补的那一格缩进）。 */
@@ -189,13 +191,12 @@ export interface HeaderTheme {
 export function poweredByLines(theme: HeaderTheme, width: number): string[] {
 	const sentence = theme.fg("dim", POWERED_BY_SENTENCE);
 	if (width < POWERED_BY_WIDTH + MARK_INDENT.length) return [sentence];
-	const prefix = theme.fg("dim", POWERED_BY_PREFIX);
-	// 引导空格不上色：它不可见，包进 `fg` 只会多几个转义；字形本身走 accent，与顶部印记同色。
+	// 引导空格不上色：它不可见，包进 `fg` 只会多几个转义。字形与句子**同走 `dim`**
+	// （用户 2026-10-06 定），所以中间行整行一次上色，首末两行只给字形上色。
 	const lead = " ".repeat(POWERED_BY_PREFIX.length);
-	return POWERED_BY_ART.map((art, row) => {
-		const painted = theme.fg("accent", art);
-		return row === 1 ? `${prefix}${painted}` : `${lead}${painted}`;
-	});
+	return POWERED_BY_ART.map((art, row) =>
+		row === 1 ? theme.fg("dim", `${POWERED_BY_PREFIX}${art}`) : `${lead}${theme.fg("dim", art)}`,
+	);
 }
 
 /**

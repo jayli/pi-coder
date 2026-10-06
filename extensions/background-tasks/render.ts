@@ -49,7 +49,8 @@
  * 左边界块与块才分得开），正文树前面挂 **2 列**缩进（`BODY_INDENT`），于是 `•` 在列 0、
  * `│` / `└` 在列 2、正文在列 4 —— `│` 正好落在 `run_in_background` 首字母 `r` 正下方。
  * 结构符 `│` / `└` 走 `muted` 槽且**自成一段 SGR**（不让后面正文的颜色透上来），正文走
- * `text` 槽（与 `exit_plan_mode` 下方正文同色，用户 2026-09-30 定）。
+ * **结果正文色**（`BODY_TEXT_SLOTS[0]` = `bashOutput`，主题没定义时退回 `toolOutput`；
+ * 用户 2026-10-06 定：与 bash 工具调用后显示的输出结果同色，而不是 `text` 槽的 fg）。
  *
  * ## 预览截断（保留 pi 默认壳原有的行为）
  *
@@ -70,6 +71,24 @@ export const TREE_LAST = "└ ";
  */
 export const BODY_INDENT = "  ";
 export const GUTTER_WIDTH = 2;
+
+/**
+ * 正文正文用哪个颜色槽：**先 `bashOutput`，主题没定义时退回 `toolOutput`**。
+ *
+ * 用户 2026-10-06 定：后台任务（工具块与终态通知）的正文要**与 bash 工具调用后显示的
+ * 输出结果同色**。那个颜色是扩展 token `bashOutput`（`bash-command-collapse.ts` 在委托
+ * 内置 bash 渲染器的同步窗口里把 `toolOutput` 临时指向它）—— 本机两套皮肤下它都比 `text`
+ * 暗（pi-coder-1337 `#999999` vs `#f8f8f2`），是「输出」而非「要逐字读的正文」的语义。
+ *
+ * 回退的意义：pi 官方 schema 里没有 `bashOutput`（与 `toolDiffAddedBg` 那两个同一条路：
+ * TypeBox 校验对未知 key 放行、`createTheme()` 把它们收进前景表），内置 dark / light 与
+ * pi-coder-catppuccin 都没定义它，此时 pi 的 `theme.fg()`/`getFgAnsi()` 会抛
+ * `Unknown theme color: bashOutput`。所以取色 MUST 加 try/catch，落到所有工具输出共用的
+ * `toolOutput` —— 那些皮肤下 bash 输出本色也是 `toolOutput`，两边自动同色。
+ *
+ * 顺序即优先级；`pickBodyColor` 断言第一个能取到 ANSI 的槽。
+ */
+export const BODY_TEXT_SLOTS = ["bashOutput", "toolOutput"] as const;
 
 /**
  * 非展开态下正文最多渲染的**视觉行**数（与 pi 默认壳的 `FALLBACK_PREVIEW_LINES` 同值，

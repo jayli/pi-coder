@@ -113,6 +113,7 @@ import {
 } from "./worktree.ts";
 import {
 	BODY_INDENT,
+	BODY_TEXT_SLOTS,
 	GUTTER_WIDTH,
 	PREVIEW_MAX_LINES,
 	TREE_PIPE,
@@ -210,6 +211,34 @@ interface BgToolResultLike {
 	details?: unknown;
 }
 
+/**
+ * 正文用哪个色槽：按 `BODY_TEXT_SLOTS` 的顺序取**第一个主题里真实存在的** ——
+ * `bashOutput`（与 bash 工具调用后的输出同色，用户 2026-10-06 定），没定义时退回
+ * `toolOutput`（所有工具输出共用的槽；那些皮肤下 bash 输出本色也是它，两边自动同色）。
+ *
+ * 探测方式是**真调一次** `theme.fg(slot, "")`：pi 对未知槽位抛 `Unknown theme color: …`
+ * （官方 schema 里没有 `bashOutput`，内置 dark / light 与 pi-coder-catppuccin 都没定义），
+ * 而 `bash-command-collapse.ts` 的 `withBashOutputColor` 用的是同一条探测口径。每次
+ * 填缓存（即每个 width 一次）探测一次即可 —— 不逐行 try/catch，不把异常当控制流。
+ */
+function pickBodySlot(theme: Theme): string | undefined {
+	for (const slot of BODY_TEXT_SLOTS) {
+		try {
+			// 空串只是探测：抛 = 这套主题没这个槽
+			theme.fg(slot as Parameters<Theme["fg"]>[0], "");
+			return slot;
+		} catch {
+			// 试下一个
+		}
+	}
+	return undefined;
+}
+
+/** 把一行正文染成**结果正文色**（一个槽都取不到时原样返回，不抛）。 */
+function paintBodyRow(theme: Theme, row: string, slot: string | undefined): string {
+	return slot === undefined ? row : theme.fg(slot as Parameters<Theme["fg"]>[0], row);
+}
+
 /** 把结果里的所有 text 块拼成全文（按块顺序，块之间换行）。 */
 function bgResultText(result: BgToolResultLike): string {
 	const blocks = Array.isArray(result.content) ? result.content : [];
@@ -246,8 +275,9 @@ function bgResultText(result: BgToolResultLike): string {
  * 是模型自己下一步就能纠正的普通分支，正文里已写了原因）。正文是**结果全文**，前面挂
  * `BODY_INDENT` 那 2 列再折行挂树（于是
  * `│` 落在工具名首字母正下方）—— 除末行外 `│ `，**末行 `└ `**。结构符走 `muted` 槽且
- * **自成一段 SGR**，不让正文色透上来。正文走 `text` 槽（与 `exit_plan_mode` 下方正文
- * 同色，用户 2026-09-30 定）。
+ * **自成一段 SGR**，不让正文色透上来。正文走**结果正文色**：与 bash 工具调用后显示的
+ * 输出结果同色（`bashOutput`，主题没定义时退回 `toolOutput`，见 `pickBodySlot`；用户
+ * 2026-10-06 定，改成这条之前的旧行为是 `text` 槽 = fg）。
  *
  * ## 预览截断（保留 pi 默认壳原有的行为）
  *
@@ -312,10 +342,15 @@ function bgToolRenderers(toolName: string) {
 					}
 					// 前缀按**折行 + 截断之后**的视觉行数算：折行碎片与截断提示行各算独立行，
 					// 否则一个折成三行的长句会在第一片就画上 `└`，看着像树提前结束了。
+					// 正文颜色：与 bash 工具调用后的输出同色（bashOutput，没定义时 toolOutput）
+					const bodySlot = pickBodySlot(theme);
 					const lineCount = visible.length + (hidden > 0 ? 1 : 0);
 					const prefixes = bgResultTreePrefixes(lineCount);
 					const lines = visible.map(
-						(row, index) => BODY_INDENT + theme.fg("muted", prefixes[index] ?? TREE_PIPE) + theme.fg("text", row),
+						(row, index) =>
+							BODY_INDENT +
+							theme.fg("muted", prefixes[index] ?? TREE_PIPE) +
+							paintBodyRow(theme, row, bodySlot),
 					);
 					if (hidden > 0) {
 						lines.push(
@@ -762,7 +797,9 @@ export default function backgroundTasks(pi: ExtensionAPI): void {
 	 * 2026-09-30 定），且 `✔` 与圆点**同色**：exit 0 时两者都走 `success`（绿），失败 / 被 kill
 	 * 时两者都走 `error`（红）—— 结局分类在 `classifyBgNotificationOutcome`。所以「跑成了」与
 	 * 「没跑成」靠**圆点颜色 + 正文措辞**（`已成功结束` / `已失败结束（exit=1）`）区分，而不是
-	 * 靠把对号换成叉号。正文走 `text` 槽（与 `exit_plan_mode` 下方正文同色），结构符 `│` / `└`
+	 * 靠把对号换成叉号。正文走**结果正文色**（与 bash 工具调用后的输出同色：
+	 * `bashOutput`，主题没定义时退回 `toolOutput`，见 `pickBodySlot`；用户 2026-10-06 定），
+	 * 结构符 `│` / `└`
 	 * 走 `muted`。
 	 *
 	 * 不套 Box 也意味着不再用 `outputPad` 做水平内边距：圆点**顶格**（列 0），与 self 壳的
@@ -796,8 +833,14 @@ export default function backgroundTasks(pi: ExtensionAPI): void {
 				}
 				// 通知正文恒为四行量级，不做预览截断（它是要用户读的事实陈述）
 				const prefixes = bgResultTreePrefixes(rows.length);
+				// 正文颜色：与 bash 工具调用后的输出同色（bashOutput，没定义时 toolOutput）
+				const bodySlot = pickBodySlot(theme);
 				for (let index = 0; index < rows.length; index += 1) {
-					lines.push(BODY_INDENT + theme.fg("muted", prefixes[index] ?? TREE_PIPE) + theme.fg("text", rows[index]!));
+					lines.push(
+						BODY_INDENT +
+							theme.fg("muted", prefixes[index] ?? TREE_PIPE) +
+							paintBodyRow(theme, rows[index]!, bodySlot),
+					);
 				}
 				cache.set(width, lines);
 				return lines;

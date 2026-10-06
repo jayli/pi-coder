@@ -26,6 +26,7 @@ import {
 	SPINNER_FRAMES,
 	SPINNER_INTERVAL_MS,
 } from "./spinner-frames.ts";
+import { TURN_MARKER_VERBS, TURN_MARKER_WIDGET_KEY } from "./turn-marker.ts";
 
 /**
  * 摘要失败重试的延时（与下面写进 `PI_WORKING_SUMMARY_RETRY_MS` 的值一致）。用例靠它
@@ -149,6 +150,8 @@ interface ContextOptions {
 	themeFg?: (color: string, text: string) => string;
 	/** 每次 `setWorkingIndicator` 记一条（`undefined` = 无参调用，即恢复 pi 默认帧）。 */
 	onIndicator?: (options: { frames?: string[]; intervalMs?: number } | undefined) => void;
+	/** 每次 `setWidget` 记一条（`content === undefined` = 清掉这个 key）。 */
+	onWidget?: (key: string, content: unknown) => void;
 }
 
 /** 取请求上下文里的 user 文本（请求体形状由 `summary-request.ts` 决定）。 */
@@ -184,8 +187,22 @@ function createContext(recorder: Recorder, options: ContextOptions = {}): unknow
 				if (message === undefined) recorder.resets += 1;
 				else recorder.workingMessages.push(message);
 			},
+			setWidget: (key: string, content?: unknown) => options.onWidget?.(key, content),
 		},
 	};
+}
+
+/**
+ * 把 widget 工厂渲染成行（假 TUI + 假主题）。结束符是工厂形式（要拿 theme 的 live proxy，
+ * 见 index.ts 的 `showTurnMarker`），所以断言得先把它调出来。
+ */
+function renderWidgetLines(content: unknown, themeFg?: (color: string, text: string) => string): string[] {
+	assert.equal(typeof content, "function", "应该是 widget 工厂（函数），不是字符串数组");
+	const factory = content as (tui: unknown, theme: { fg: (color: string, text: string) => string }) => {
+		render(width: number): string[];
+	};
+	const component = factory({}, { fg: themeFg ?? ((_color: string, text: string) => text) });
+	return component.render(120);
 }
 
 function makeWorkspace(): { agentDir: string; projectDir: string; cleanup: () => void } {
@@ -982,6 +999,104 @@ test("watchdog 提示显示中新回合开始：立刻复位，不残留到下�
 			"新回合开始后不该再有 watchdog 文案",
 		);
 		await shutdown({}, ctx);
+	} finally {
+		workspace.cleanup();
+	}
+});
+
+/**
+ * 回合结束符（`turn-marker.ts` + `agent_settled` 里的 `showTurnMarker`）。用户 2026-10-07 定：
+ * spinner 消失后原地留一行 `✻ <词> for <时长> · done <时刻>`，dim 色，只有正常完成的回合才画。
+ */
+test("正常完成：settle 画出结束符（✻ 词 + 时长 + 时刻，dim 色），agent_start 清掉", { skip, timeout: 30_000 }, async () => {
+	const workspace = makeWorkspace();
+	try {
+		const extension = await loadExtension(workspace);
+		const { agentStart, agentBeforeSettle, agentSettled, shutdown } = handlersOf(extension);
+		const recorder: Recorder = { completes: [], workingMessages: [], resets: 0 };
+		const widgets: Array<{ key: string; content: unknown }> = [];
+		const ctx = createContext(recorder, { onWidget: (key, content) => widgets.push({ key, content }) });
+
+		await agentStart({}, ctx);
+		await agentBeforeSettle({ outcome: "completed" }, ctx);
+		await agentSettled({}, ctx);
+
+		const drawn = widgets.filter((w) => w.key === TURN_MARKER_WIDGET_KEY && w.content !== undefined);
+		assert.equal(drawn.length, 1, "settle 时应画一次结束符");
+		const colors: string[] = [];
+		const rendered = renderWidgetLines(drawn[0]?.content, (color, text) => {
+			colors.push(color);
+			return text;
+		});
+		assert.equal(rendered.length, 2, "两行：结束符 + 行尾空行（spinner 下方原本就有一条）");
+		const line = rendered[0] as string;
+		assert.equal(rendered[1], "", "第二行必须是空行 —— 否则结束符会和编辑器贴在一起、整块上移一格");
+		assert.ok(
+			TURN_MARKER_VERBS.some((verb) => line.startsWith(` ✻ ${verb} for `)),
+			`词必须来自词表：${line}`,
+		);
+		assert.match(line, /^ ✻ \S+ for \d+s · done \d{1,2}:\d{2} (AM|PM)$/);
+		assert.deepEqual(colors, ["dim"], "整行（含 ✻）走 dim 色槽（与 recap 的 `Recap:` 标签同档）");
+
+		// 下一回合开始（agent_start）：结束符退场，让位给新的 spinner
+		widgets.length = 0;
+		await agentStart({}, ctx);
+		assert.deepEqual(
+			widgets.map((w) => [w.key, w.content]),
+			[[TURN_MARKER_WIDGET_KEY, undefined]],
+			"agent_start 应清掉结束符",
+		);
+		await shutdown({}, ctx);
+	} finally {
+		workspace.cleanup();
+	}
+});
+
+test("打断 / 报错收尾不画结束符（只有正常完成才画）", { skip, timeout: 30_000 }, async () => {
+	const workspace = makeWorkspace();
+	try {
+		const extension = await loadExtension(workspace);
+		const { agentStart, agentBeforeSettle, agentSettled, shutdown } = handlersOf(extension);
+		const recorder: Recorder = { completes: [], workingMessages: [], resets: 0 };
+		const widgets: Array<{ key: string; content: unknown }> = [];
+		const ctx = createContext(recorder, { onWidget: (key, content) => widgets.push({ key, content }) });
+
+		for (const outcome of ["aborted", "error"] as const) {
+			await agentStart({}, ctx);
+			await agentBeforeSettle({ outcome }, ctx);
+			await agentSettled({}, ctx);
+		}
+		// 连 agent_before_settle 都没到（拿不到结局）时同样不画
+		await agentStart({}, ctx);
+		await agentSettled({}, ctx);
+
+		assert.equal(
+			widgets.filter((w) => w.content !== undefined).length,
+			0,
+			"非 completed 的回合不该出现结束符",
+		);
+		await shutdown({}, ctx);
+	} finally {
+		workspace.cleanup();
+	}
+});
+
+test("无 UI（print / json 模式）不画结束符", { skip, timeout: 30_000 }, async () => {
+	const workspace = makeWorkspace();
+	try {
+		const extension = await loadExtension(workspace);
+		const { agentStart, agentBeforeSettle, agentSettled, shutdown } = handlersOf(extension);
+		const recorder: Recorder = { completes: [], workingMessages: [], resets: 0 };
+		const widgets: Array<{ key: string; content: unknown }> = [];
+		const ctx = createContext(recorder, { onWidget: (key, content) => widgets.push({ key, content }) });
+		const headless = { ...(ctx as Record<string, unknown>), hasUI: false };
+
+		await agentStart({}, headless);
+		await agentBeforeSettle({ outcome: "completed" }, headless);
+		await agentSettled({}, headless);
+
+		assert.equal(widgets.length, 0, "无 UI 时不该碰任何 widget");
+		await shutdown({}, headless);
 	} finally {
 		workspace.cleanup();
 	}

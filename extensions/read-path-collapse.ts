@@ -125,6 +125,8 @@ import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve as resolvePath, sep } from "node:path";
 import { pathToFileURL } from "node:url";
+import { ensureRegistered, isLeader, markReadyIfSettled, setLeaderInvalidate, shouldHideWhilePending } from "./explored-group/registry.ts";
+import { EMPTY_COMPONENT, createGroupTree } from "./explored-group/render.ts";
 
 /** 省略前缀的标记。1 列宽，`visibleWidth` 量出来就是 1。 */
 const ELLIPSIS = "…";
@@ -562,6 +564,27 @@ export default function (pi: ExtensionAPI) {
 		// （`withHeadBar`），与 bash 块同一套观感。**只影响 read**：其他工具仍走 pi 的默认壳。
 		renderShell: "self",
 		renderCall(args, theme, context) {
+			// 参数还在流（pi 构造时把 path 播种为 `{}` 或 `""`）：**一行都不画**。
+			// 不遮的话这一帧会走下面的内置渲染，先冒出 `• Read ...`（灰 `...`），
+			// args 齐了再跳成 `• Explored / └ Read …` —— 用户 2026-10-06 报的正是这个闪烁。
+			// `SKILL.md`（确实不可折叠）不受影响：它不 pending，走下面内置渲染拿到 `[skill]` 形态。
+			if (shouldHideWhilePending("read", args, context.isPartial === true)) return EMPTY_COMPONENT;
+			// 渲染时开闸兜底（主信号是 `message_end` / `tool_execution_end`，见 `markReadyIfSettled`）。
+			markReadyIfSettled(context.toolCallId, context.argsComplete === true, context.isPartial === true);
+			// 「只读探查」分组（explored-group）：read 是可折叠成员（永远），连续 read 会被
+			// 合并到一行 `└ Read a, b`。组长画树，其余成员投 0 行 —— 与 bash 侧同一手法，
+			// 判定/断组规则见 `explored-group/`。
+			const group = ensureRegistered(context.toolCallId, "read", args);
+			if (group) {
+				if (!isLeader(context.toolCallId)) return EMPTY_COMPONENT;
+				setLeaderInvalidate(context.toolCallId, () => context.invalidate());
+				return createGroupTree({
+					groupId: context.toolCallId,
+					theme,
+					cwd: context.cwd,
+					expanded: context.expanded === true,
+				});
+			}
 			const state = context.state;
 			// 关键：传给内置实现的 lastComponent 必须是**内层** Text 而不是我们的 wrapper，
 			// 否则内置 `setText()` 抛异常、pi 静默退回只剩 `read` 的 fallback（见文件头）。
@@ -584,6 +607,11 @@ export default function (pi: ExtensionAPI) {
 		// 结果侧同样进这个壳：``\n` + 正文` 的每一行补两格缩进，于是它与标题行的左边距一致；
 		// 底色 / 上下边界空行同样没有。`context.lastComponent` 也要传**内层** Text（同一处坑）。
 		renderResult(result, options, theme, context) {
+			// 折叠态下**整组（含组长）都不画输出**，与 bash 侧同一条规则（见那边的注释）。
+			// 展开态放行，让各成员各自展开内容。
+			if (!context.expanded && ensureRegistered(context.toolCallId, "read", context.args)) {
+				return EMPTY_COMPONENT;
+			}
 			const state = context.state;
 			const inner =
 				base.renderResult?.(result, options, theme, { ...context, lastComponent: state.innerResultText }) ??

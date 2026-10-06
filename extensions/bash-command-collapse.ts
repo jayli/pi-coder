@@ -401,6 +401,9 @@ import {
 import { getAllowlistStore, getSessionScopes, type AllowlistStore } from "./bash-command-collapse/allowlist.ts";
 import { getSandboxMode } from "./bash-command-collapse/sandbox-mode.ts";
 import { abbreviateCommandPaths, pathAbbrevThreshold } from "./bash-command-collapse/abbrev-path.ts";
+import { detectBashLookup, renderLookupRedirect } from "./bash-command-collapse/lookup-redirect.ts";
+import { ensureRegistered, isLeader, markReadyIfSettled, setLeaderInvalidate } from "./explored-group/registry.ts";
+import { EMPTY_COMPONENT, createGroupTree } from "./explored-group/render.ts";
 
 /**
  * 命令行**折叠态**保留的**视觉行**数（硬折行后一条超长单行命令也最多占这么多行）。
@@ -1619,8 +1622,19 @@ export default function (pi: ExtensionAPI) {
 		// （内置描述结尾本来只是 "Optionally provide a timeout in seconds."，没给数字。）
 		description: `${base.description} By default, your command will time out after ${defaultTimeoutSeconds()} seconds. You may specify an optional timeout in seconds (up to ${maxTimeoutSeconds()} seconds); larger values are clamped to that maximum.`,
 		parameters: base.parameters,
-		// prompt 元数据不会从内置工具继承，必须显式带上
-		promptSnippet: base.promptSnippet,
+		// prompt 元数据不会从内置工具继承，必须显式带上。
+		//
+		// 唯一要改的内置值是 `promptSnippet` —— 它进 system prompt 的 `<tools>` 段，也就是模型每轮
+		// 都读到的工具清单那一行。内置原文 `Execute bash commands (ls, grep, find, etc.)` 在清单里
+		// 替 bash 打了「文件操作」的广告，而紧随其后的 `grep` / `find` / `ls` 三行只有干巴巴一句，
+		// 且这三个内置工具的 `guidelines` 在 pi 里**全是空数组**（只有 `read` 带一条）。实测代价：
+		// 全库 303 个会话、≈20.4k 次 bash 里，原生 grep/find/ls 合计只被调用 4 次（grep 零次）。
+		// 换成下面这句后 headless 实测立刻改选原生工具（「哪几个文件含 X」→ `grep({pattern, path})`），
+		// 而复合探查仍走 bash（「一次给我三件事」→ 仍是 `;` 串联的单条 bash）。
+		// 注意它**只改描述措辞**：bash 照旧能跑 ls/grep/find，loop 与渲染都不受影响。
+		promptSnippet:
+			"Execute a shell command (pipelines, builds, scripts, anything writing or compounding several steps; prefer grep/find/ls/read for single lookups)",
+		// 内置 guideline 只有一条 PI_* 环境变量的提示，保留（不覆盖整组）。
 		promptGuidelines: base.promptGuidelines,
 		constrainedSampling: base.constrainedSampling,
 		executionMode: base.executionMode,
@@ -1645,6 +1659,16 @@ export default function (pi: ExtensionAPI) {
 		// BashResultRenderComponent()` 然后对它 clear() / addChild()，喂个 Box 进去会嵌套错乱。
 		// 所以内层组件存在 context.state 里跨次复用（state 本来就用来存 startedAt/endedAt/interval）。
 		renderResult(result, options, theme, context) {
+			// 折叠态下**整组（含组长）都不画输出** —— 分组的整个意义就是「不看内容」，
+			// 只留组头那一行短语。**但展开态除外**：`ctrl+o` 是唯一能看到内容的地方，
+			// 那时各成员（含组长）各自按原有渲染器展开。
+			//
+			// 曾经只在「非组长」时隐身，于是组长那块仍然把自己的输出全画出来 ——
+			// 用户看到的是一棵短语树下面跟着一大片 `grep` 命中行（2026-10-06 报）。
+			// 幂等：未参与分组的块 ensureRegistered 返回 null，照旧走原有渲染。
+			if (!context.expanded && ensureRegistered(context.toolCallId, "bash", context.args)) {
+				return EMPTY_COMPONENT;
+			}
 			const state = context.state;
 			// renderCall 靠这个标记决定要不要自己补下边界空行（结果还没到时才补）。
 			// 放在委托内置实现**之前**置位：万一内置实现抛异常，pi 会退回自己的
@@ -1969,6 +1993,35 @@ export default function (pi: ExtensionAPI) {
 		},
 
 		renderCall(args, theme, context) {
+			// 「只读探查」分组（explored-group）：本块是连续只读序列的一员时就合进一个
+			// `Explored` 树 —— 组长画整棵树，其余成员投 0 行。判定与断组规则全在
+			// `explored-group/` 里，这里只做三件事：确保登记、当组长就接管、当成员就隐身。
+			//
+			// 为什么登记在这里而不是 `tool_call` 事件：实测 `renderCall` 在流式期间就会跑
+			// （`updateArgs` → `updateDisplay`），早于 `tool_call` / `tool_execution_start`；
+			// 登记放这儿才不会「先按普通块渲染一帧再跳成分组」。`register` 是幂等的，
+			// 事件侧重放同一条消息时不会重复加成员。
+			const group = ensureRegistered(context.toolCallId, "bash", args);
+			if (group) {
+				// 渲染时开闸兜底（主信号是 `message_end` / `tool_execution_end`，见 `markReadyIfSettled`）。
+				// 与下面那段隐藏逻辑同源：`argsComplete` 或结果已回。
+				markReadyIfSettled(context.toolCallId, context.argsComplete === true, context.isPartial === true);
+				if (!isLeader(context.toolCallId)) {
+					// 成员：整块隐身。`renderShell: "self"` 下 render() 开头有
+					// `contentLines.length === 0 → return []` 守卫，所以真的一行都不出。
+					return EMPTY_COMPONENT;
+				}
+				// 组长：画 `Explored` 树。把 `invalidate` 登记给 registry，后续成员到达时
+				// 由 `index.ts` 叫醒它重渲（否则新行要等下一次交互才出现）。
+				setLeaderInvalidate(context.toolCallId, () => context.invalidate());
+				return createGroupTree({
+					groupId: context.toolCallId,
+					theme,
+					cwd: context.cwd,
+					expanded: context.expanded === true,
+				});
+			}
+
 			// 内置 renderCall 靠这里记时（"Took 1.2s"），覆盖后需要自己维护
 			const state = context.state;
 			if (context.executionStarted && state.startedAt === undefined) {
@@ -2197,5 +2250,35 @@ export default function (pi: ExtensionAPI) {
 				"info",
 			);
 		},
+	});
+
+	// ## 单一探查闸：把「本该用原生工具」的 bash 调用在 **loop 层**拦下
+	//
+	// 用户 2026-10-06 的要求是确定性的 —— 「该用原生 find/ls/grep 的时候就用」，不是
+	// 「多劝劝」。实测病根：内置 bash 的 `promptSnippet` 在模型每轮读到的工具清单里写着
+	// `Execute bash commands (ls, grep, find, etc.)`，而 `grep` / `find` / `ls` 三个内置
+	// 工具的 `guidelines` 全是空数组 —— 结果是全库 303 个会话、≈20.4k 次 bash 里，原生
+	// 三件套合计只被调用 4 次。提示词侧已经补过（见 `promptSnippet` 与 AGENTS.md 的
+	// `## Tool choice`），但提示词只是概率；这里是概率的**上限**。
+	//
+	// 拦截语（`renderLookupRedirect`）会告诉模型照抄哪一行原生调用、为什么、以及
+	// `.gitignore` 这条例外 —— 拦一次就够它改道，不必重跑整轮思考。
+	//
+	// 判定全在 `bash-command-collapse/lookup-redirect.ts`（纯函数、可单测）：只有整条命令
+	// 都是**纯粹的单一探查**才拦；带变换器（`awk` / `jq` / `wc` / `sort`）、执行（`node` /
+	// `npm` / `git`）、写重定向、`sed -i`、或原生 schema 表达不了的旗标（`grep -v` /
+	// `find -mtime` / `ls -R` …）一律放行。宁可少拦，不可拦错。
+	//
+	// `PI_BASH_LOOKUP_GATE=off` 关闭。dangerous 模式（shift+tab）同样不拦 —— 那是用户
+	// 明确要「什么都别管」的态，与沙箱开关同一口径。
+	const lookupGateOn = process.env.PI_BASH_LOOKUP_GATE?.trim().toLowerCase() !== "off";
+	pi.on("tool_call", (event) => {
+		if (!lookupGateOn || event.toolName !== "bash") return undefined;
+		if (getSandboxMode() === "dangerous") return undefined;
+		const command = (event.input as { command?: unknown } | undefined)?.command;
+		if (typeof command !== "string") return undefined;
+		const redirect = detectBashLookup(command);
+		if (!redirect) return undefined;
+		return { block: true, reason: renderLookupRedirect(redirect) };
 	});
 }

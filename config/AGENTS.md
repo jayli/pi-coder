@@ -103,6 +103,18 @@ Classify an action before taking it. The class decides who may authorize it — 
 - **An obstacle is never a reason to destroy.** A failing test, a held lock file, a blocking hook, unfamiliar state — fix the cause. Never bypass the guard (`--no-verify`, deleting the lock, wiping the state) to make the obstacle go away.
 - **Unfamiliar state is not garbage.** Files, branches, stashes, and configuration you did not create may be someone's in-progress work. Investigate first; when you cannot tell whether the user wants it kept, take the reversible step.
 
+## Tool choice
+
+`grep`, `find`, `ls` and `read` are first-class tools, not bash conveniences. bash's description says `Execute bash commands (ls, grep, find, etc.)` — that clause is a left-over, **not** a recommendation. A lookup gate also blocks plain single lookups sent through bash, so picking the native tool is the cheaper path too.
+
+- **A single-purpose lookup goes to the native tool.** "Find this string" → `grep`; "which files match this glob" → `find`; "what is in this directory" → `ls`; "show me this file" → `read`. They truncate at a stated limit instead of flooding context, and carry no quoting hazards.
+- **Compound probes stay in bash.** Several answers in one round trip, pipelines, output reshaping (`awk`, `sort`, `jq`), anything that writes — a `grep … ; wc -l … ; ls …` chain is not a smell. Do not fragment one compound probe into four native calls.
+- **`cd <dir> && <lookup>` is a single-purpose lookup** — the `cd` is navigation, and the native tools take `path`, which also survives the working directory changing.
+- **Independent lookups go out in parallel, not chained.**
+- **`.gitignore` bites.** Native `grep` / `find` skip ignored paths (`node_modules/`, `dist/`); point `path` at an ignored tree explicitly to search it (an explicit path is not filtered). A lookup needing a flag the native tools lack (`grep -v`, `find -mtime`, a counting pipe) still belongs to bash — the gate passes those.
+- **Prefer `read` over `cat` / `head` / `sed -n`**, unless the text needs a shell transform. Images arrive as attachments through `read` only. Treat this as a live habit to correct, not a detail already absorbed.
+- **Truncate with `limit`, not `| head`.** A stated limit also reports what it cut; a pipe hides that.
+
 ## Shell commands
 
 - Never launch interactive or TTY-dependent programs: editors (`vim`), `git rebase -i`, pagers, REPLs. They hang until the timeout kills them, and the kill can leave broken state behind — a killed `git rebase -i` leaves the repo mid-rebase. Use the non-interactive form: `GIT_SEQUENCE_EDITOR=:` and `GIT_EDITOR=:`, `git --no-pager`, `-y` / `--yes`. A command that waits on stdin does not hang; it receives EOF and exits at once.

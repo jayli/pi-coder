@@ -159,10 +159,32 @@
  *   - 标签口径顺带修了一处：`executingTool` 从单字符串改成 `toolCallId → 工具名` 的 Map ——
  *     并行批次里先结束的工具不再把还在跑的工具名清掉（否则长 bash 的 `●` 会挂在 `Working`
  *     而不是 `Tools Calling` 后面）。标签仍取最后启动的那个，优先级语义不变。
+ *
+ * ## 回合结束符 `✻ Churned for 3m 37s · done 11:52 PM`（turn-marker.ts）
+ *
+ * 用户 2026-10-07 定：一轮对话跑完 spinner 直接消失、不留痕迹，要求把它原地换成一条静态
+ * 结束符。文本 / 词表 / 时钟都在 `turn-marker.ts`（十个词随机取一个、12 小时制 `11:52 PM`、
+ * 整行 dim 色 —— 与 recap 行里 `Recap:` 标签同档；纯模块，单测在 `turn-marker.test.ts`）；
+ * 这里只管时机与落点：
+ *   - 落点是**编辑器上方的 widget 区**（recap 摘要 / 任务清单同一个区），而不是原来的
+ *     statusContainer：pi 在应用层 `agent_end` 就 `clearStatusIndicator("working")`，而
+ *     `setWorkingMessage` / `setWorkingVisible` 只在流式期间有效 —— 扩展没有让 statusContainer
+ *     在回合外继续渲染的接口。占的行数保持原样：spinner 在时编辑器上方是「空行 + 文案 +
+ *     空行」（它自带一条前导空行，下面那条是 widget 区的前导空行），结束符这一格也是三行
+ *     —— widget 区的前导空行 + 结束符 + **组件自己补的行尾空行**（用户 2026-10-07 要求：
+ *     结束符下面必须有空行，和 spinner 在时一样），所以编辑器不会上移一格。
+ *   - 时机：`agent_settled`（回合真正结束 —— `agent_end` 之后还可能自动重试 / 压缩 / 排队消息）。
+ *     时长 = `agent_start` → `agent_settled` 的墙钟，复用 spinner 读秒的同一个 `formatDuration`，
+ *     结束时长不会与 spinner 最后一帧对不上。
+ *   - 只认正常完成：结局在 `agent_before_settle` 记下（`agent_settled` 不带载荷），`aborted` /
+ *     `error` 不画 —— ESC 打断保持现状，spinner 直接消失。
+ *   - 清理：`agent_start`（下一回合把位置让回给 spinner）、`session_shutdown`；会话替换时
+ *     pi 的 `resetExtensionUI()` 也会清掉扩展 widget。
+ *   - 开关 `PI_TURN_MARKER=off`。
  */
 
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { visibleWidth } from "@earendil-works/pi-tui";
+import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import {
 	BASH_SPINNER_BLINK_MS,
 	BASH_SPINNER_COLOR,
@@ -188,6 +210,12 @@ import {
 	cleanSummaryText,
 	planSummaryRequest,
 } from "./summary-request.ts";
+import {
+	TURN_MARKER_WIDGET_KEY,
+	formatEndClock,
+	formatTurnMarker,
+	pickTurnVerb,
+} from "./turn-marker.ts";
 
 /** 工具名 → 文案。没列进来的工具一律回落到 Working（按需求「其他情况都显示 Working」）。 */
 const TOOL_LABELS: Record<string, string> = {
@@ -294,6 +322,16 @@ const BASH_SPINNER_ENABLED = (process.env.PI_BASH_SPINNER ?? "").toLowerCase() !
  * 幻彩 spinner 开关（`PI_SPINNER_RAINBOW=off` 回到 pi 默认的单色 accent 十帧）。
  */
 const SPINNER_RAINBOW_ENABLED = (process.env.PI_SPINNER_RAINBOW ?? "").toLowerCase() !== "off";
+/**
+ * 回合结束符开关（`PI_TURN_MARKER=off` 关闭，回到「回合结束 spinner 直接消失」）。
+ * 形状 / 词表 / 12 小时制时钟都在 `turn-marker.ts`。
+ */
+const TURN_MARKER_ENABLED = (process.env.PI_TURN_MARKER ?? "").toLowerCase() !== "off";
+/**
+ * 结束符的色槽：`dim`，与 recap 行里 `Recap:` 标签同档（用户 2026-10-07 定）。整行
+ * （含行首 `✻`）一个色段，所以只有一个槽位。
+ */
+const TURN_MARKER_COLOR = "dim";
 /**
  * watchdog 提示开关（`PI_WORKING_INDICATOR_WATCHDOG=off` 关闭）。关掉后 spinner 在
  * watchdog 审查期间仍显示普通 Working，不做特殊提示。
@@ -467,6 +505,11 @@ export function formatDuration(ms: number): string {
 export default function (pi: ExtensionAPI) {
 	/** 回合起始时刻；null 表示当前不在回合内（不渲染、不起定时器）。 */
 	let turnStartedAt: number | null = null;
+	/**
+	 * 本次 run 的结局（`agent_before_settle` 记录、`agent_settled` 消费一次就清）：
+	 * 结束符只在 `completed` 时画 —— ESC 打断 / 报错收尾保持现状（spinner 直接消失）。
+	 */
+	let turnOutcome: "completed" | "aborted" | "error" | null = null;
 
 	/**
 	 * 当前回合的用户输入**压平后**的原文（`input` 事件捕获后立刻 `flattenPrompt`
@@ -866,6 +909,54 @@ export default function (pi: ExtensionAPI) {
 		return theme === undefined ? text : theme.fg(BASH_SPINNER_COLOR, text);
 	}
 
+	/**
+	 * 回合结束符：把一行静态文案画在 spinner 原来那一行（形状 / 词表见 `turn-marker.ts`）。
+	 *
+	 * 为什么是 widget 而不是继续用 working message：pi 在应用层 `agent_end` 就
+	 * `clearStatusIndicator("working")` 了，而 `setWorkingMessage` / `setWorkingVisible` 只在
+	 * 流式期间有效 —— 扩展没有让 statusContainer 在回合外继续渲染的接口。编辑器上方的 widget
+	 * 区是唯一能常驻的位置，占的行数也正好对得上：spinner 在时上方是「空行 + 文案 + 空行」
+	 * （它自带一条前导空行，下面那条是 widget 区的前导空行），结束符这一格同样是三行 ——
+	 * widget 区的前导空行 + 结束符 + 下面补的行尾空行。本机装的 prompt-editor 没开
+	 * embedWorkingStatus，spinner 走独立行，这条恒定成立。
+	 *
+	 * 用工厂形式（而不是字符串数组）：上色要走 `theme` 的 live proxy，`/theme` 换肤后重渲染
+	 * 就自愈；字符串数组在注册那一刻就把颜色烘死了。
+	 *
+	 * 自己补一个前导空格：spinner 与 recap 的缩进来自 `Text` 的 paddingX=1（渲染器给的），
+	 * widget 组件直接返回字符串，没有那一格。
+	 *
+	 * 整个动作包 try/catch：`hasUI` 与 `ui` 都是 runner 的 assertActive 代理，stale ctx 在
+	 * **读**的这一步就抛，比 widget 的 render 更早；结束符只是装饰，抛了就当没画。
+	 */
+	function showTurnMarker(ctx: ExtensionContext, text: string): void {
+		try {
+			if (!ctx.hasUI) return;
+			ctx.ui.setWidget(TURN_MARKER_WIDGET_KEY, (_tui, theme) => ({
+				render: (width: number) => [
+					truncateToWidth(` ${theme.fg(TURN_MARKER_COLOR, text)}`, width, ""),
+					// 行尾一条空行（用户 2026-10-07 要求）：spinner 在时它下面本来就有一条
+					// （widget 区的前导空行），不补的话结束符会与编辑器贴在一起、整块上移一格。
+					// 顺带也是 widget 之间的间隔：recap / simple-task 的 `gap.ts` 看到邻居末行
+					// 是空行就不再补 —— 两个 widget 之间仍恰好一行。
+					"",
+				],
+				invalidate() {},
+			}));
+		} catch {
+			// stale ctx / 宿主不支持：静默跳过。
+		}
+	}
+
+	/** 清掉结束符（下一回合开始；会话替换时 pi 的 `resetExtensionUI()` 也会清）。 */
+	function clearTurnMarker(ctx: ExtensionContext): void {
+		try {
+			ctx.ui.setWidget(TURN_MARKER_WIDGET_KEY, undefined);
+		} catch {
+			// stale ctx：不碰 UI。
+		}
+	}
+
 	/** 旧 ctx（会话被替换 / `/reload`）：停掉所有定时器、清掉账本，别再拿它去碰 UI。 */
 	function stopActivity(): void {
 		stopTimer();
@@ -1031,6 +1122,7 @@ export default function (pi: ExtensionAPI) {
 
 	pi.on("agent_start", async (_event, ctx) => {
 		turnStartedAt = Date.now();
+		turnOutcome = null;
 		resetCounter("thinking");
 		resetCounter("toolcall");
 		executingTools.clear();
@@ -1042,6 +1134,8 @@ export default function (pi: ExtensionAPI) {
 		clearWatchdogHint();
 		// print / json 模式没有 working loader 行，起定时器只是白跑。
 		if (ctx.hasUI) {
+			// 新回合开始，上一回合的结束符退场（本回合结束时再画新的）。
+			clearTurnMarker(ctx);
 			// 回合开始时装帧表：此刻 spinner 还没渲染（流式开始才出现），相位复位看不见；
 			// 换会话后 pi 的 resetExtensionUI() 会把 indicator 还原成默认帧，这里一并补回来。
 			installRainbowSpinner(ctx);
@@ -1125,7 +1219,9 @@ export default function (pi: ExtensionAPI) {
 	pi.on("session_before_compact", async () => {
 		clearWatchdogHint();
 	});
-	pi.on("agent_before_settle", async () => {
+	pi.on("agent_before_settle", async (event) => {
+		// 结局只有这里能拿到（`agent_settled` 不带载荷），结束符按它决定画不画。
+		turnOutcome = event.outcome;
 		clearWatchdogHint();
 	});
 
@@ -1134,8 +1230,13 @@ export default function (pi: ExtensionAPI) {
 	 * 或继续排队的后续消息 —— 那些阶段 spinner 仍在转，所以不能提前停表）。
 	 */
 	pi.on("agent_settled", async (_event, ctx) => {
+		// 结束符要用回合时长与结局，两者都得在清状态之前取出来。
+		const settledAt = Date.now();
+		const startedAt = turnStartedAt;
+		const completed = turnOutcome === "completed";
 		stopActivity();
 		turnStartedAt = null;
+		turnOutcome = null;
 		lastMessage = null;
 		promptText = null;
 		promptSummaryText = null;
@@ -1145,6 +1246,13 @@ export default function (pi: ExtensionAPI) {
 		} catch {
 			// 旧 ctx，忽略
 		}
+		// 结束符：spinner 此刻已被 pi 清掉，原地留一行「跑了多久 · 几点结束」。
+		// 只认正常完成；`startedAt === null`（没见到 agent_start，比如中途重载）不画。
+		if (!TURN_MARKER_ENABLED || !completed || startedAt === null) return;
+		showTurnMarker(
+			ctx,
+			formatTurnMarker(pickTurnVerb(), formatDuration(settledAt - startedAt), formatEndClock(new Date(settledAt))),
+		);
 	});
 
 	/**
@@ -1163,6 +1271,7 @@ export default function (pi: ExtensionAPI) {
 	pi.on("session_shutdown", async () => {
 		stopActivity();
 		turnStartedAt = null;
+		turnOutcome = null;
 		promptText = null;
 		promptSummaryText = null;
 		// 去重键也要清：新会话里用户可能又敲一条与上一会话最后一条完全相同的提示词，

@@ -135,10 +135,10 @@ test("composeHeaderLines：印记下方留一个空行，提示行与说明段�
 });
 
 test("poweredByLines：宽终端画三行 `@bachi/` + Pi-Coder 字形，窄终端退回整句", () => {
-	// 三行字形的原始字节。原稿第 3 行是 14 列，这里补一个行尾空格让三行等宽 ——
-	// 与印记行的 `MARK_BLANK` 同一个约定，行尾空白在终端里不可见。
-	const ART = ["┏┓•  ┏┓   ┓    ", "┃┃┓━━┃ ┏┓┏┫┏┓┏┓", "┣┛┗  ┗┛┗┛┗┻┗ ┛ "];
+	// 三行字形的原始字节（用户 2026-10-06 换的这一稿）。
+	const ART = ["╭─╮╷   ╭─╴╭─╮╶┬╮╭─╴╭─╮", "├─╯│╶─╴│  │ │ ││├╴ ├┬╯", "╵  ╵   ╰─╴╰─╯╶┴╯╰─╴╵╰╴"];
 	const PREFIX = "This pi harness is powered by latest @bachi/";
+	assert.equal(new Set(ART.map((line) => line.length)).size, 1, "这一稿三行天然等宽（各 22 列），不需要上一稿那种行尾补空格");
 	const wide = poweredByLines(identityTheme, 200).map(plain);
 	// 中间行是「整句 + 字形」，接缝处不补空格：`@bachi/` 的斜杠直接顶住字形的第一列
 	assert.deepEqual(wide, [
@@ -146,19 +146,22 @@ test("poweredByLines：宽终端画三行 `@bachi/` + Pi-Coder 字形，窄终�
 		PREFIX + ART[1],
 		" ".repeat(PREFIX.length) + ART[2],
 	]);
-	for (const line of wide) assert.equal(line.length, PREFIX.length + 15, "三行必须等宽，否则字形会歪");
-	// 窄终端：整块（含 `composeHeaderLines` 补的那一格缩进）装不下就退回整句
-	assert.deepEqual(poweredByLines(identityTheme, 59).map(plain), [`${PREFIX}pi-coder.`]);
-	assert.deepEqual(poweredByLines(identityTheme, 60).map(plain), wide);
+	for (const line of wide) assert.equal(line.length, PREFIX.length + 22, "三行必须等宽，否则字形会歪");
+	// 窄终端：整块（含 `composeHeaderLines` 补的那一格缩进）装不下就退回整句；
+	// 字形从 15 列变成 22 列，阈值也从 60 上移到 67（44 + 22 + 1）。
+	assert.deepEqual(poweredByLines(identityTheme, 66).map(plain), [`${PREFIX}pi-coder.`]);
+	assert.deepEqual(poweredByLines(identityTheme, 67).map(plain), wide);
 });
 
-test("poweredByLines：句子走 dim，字形走 accent", () => {
+test("poweredByLines：句子与字形同走 dim（字形不再用 accent）", () => {
 	const marked = { fg: (color: string, text: string) => `<${color}>${text}</>`, bold: (text: string) => text };
 	const lead = " ".repeat("This pi harness is powered by latest @bachi/".length);
 	const lines = poweredByLines(marked, 200);
-	assert.equal(lines[1], `<dim>This pi harness is powered by latest @bachi/</><accent>┃┃┓━━┃ ┏┓┏┫┏┓┏┓</>`);
-	assert.equal(lines[0], `${lead}<accent>┏┓•  ┏┓   ┓    </>`, "首行的引导空格不上色（不可见，且省几个转义）");
-	assert.deepEqual(poweredByLines(marked, 59), [`<dim>This pi harness is powered by latest @bachi/pi-coder.</>`]);
+	// 中间行整行一次上色：前缀与字形同色，合成一个 `dim` 段（比两段相邻转义少几个字节）
+	assert.equal(lines[1], `<dim>This pi harness is powered by latest @bachi/├─╯│╶─╴│  │ │ ││├╴ ├┬╯</>`);
+	assert.equal(lines[0], `${lead}<dim>╭─╮╷   ╭─╴╭─╮╶┬╮╭─╴╭─╮</>`, "首行的引导空格不上色（不可见，且省几个转义）");
+	for (const line of lines) assert.equal(line.includes("accent"), false, `字形不许再用 accent：${JSON.stringify(line)}`);
+	assert.deepEqual(poweredByLines(marked, 66), [`<dim>This pi harness is powered by latest @bachi/pi-coder.</>`]);
 });
 
 test("formatTitleLine：版本号后面跟模型与推理档位", () => {

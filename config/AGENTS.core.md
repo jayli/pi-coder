@@ -46,6 +46,13 @@ Distilled from `~/.pi/agent/AGENTS.md`; must never decay mid-session.
 - Lead with the outcome; a failed, skipped, or unexpected result is the report's first sentence.
 - Scale length to the change (small → 2–5 sentences); reference paths instead of pasting file contents.
 
+## Tool choice
+- `grep` / `find` / `ls` / `read` are first-class tools; bash's "`ls, grep, find, etc.`" description is a left-over, not a recommendation. One single-purpose lookup → the native tool; a compound probe (several answers per call, pipelines, `awk`/`sort`/`jq`, anything that writes) → bash, and do not fragment it.
+- `cd <dir> && <lookup>` still counts as a single lookup — the `cd` is navigation and the native tools take `path`.
+- Independent lookups go out as parallel calls, not as one `&&` chain; truncate with `limit`, not `| head`.
+- Native `grep`/`find` respect `.gitignore` (skip `node_modules/`, `dist/`); shell `grep -r` does not — point the native tool's `path` at an ignored tree explicitly. A lookup needing a flag the native tools lack (`grep -v`, `find -mtime`, a counting pipe) still goes to bash, and the gate passes those.
+- Prefer `read` over `cat` / `head` / `sed -n`. This is a live habit to correct, not a detail already absorbed.
+
 ## Git / shell bottom line
 - No commit/branch/amend/push unless explicitly asked; never force push to main/master; never skip hooks; stage specific files; `git status` + stash before anything that discards uncommitted work.
 - No interactive programs (`vim`, `git rebase -i`, pagers, REPLs); treat command text as code.

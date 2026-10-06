@@ -286,7 +286,7 @@ test("session_start：header 是 logo（每行缩进一格、没有 /logo 提示
 
 		const lines = (tui.headerComponent as { render(w: number): string[] }).render(80);
 		const plain = lines.map(stripAnsi);
-		const firstWordmark = plain.findIndex((line, i) => i >= 4 && /[┏┃┣]/.test(line));
+		const firstWordmark = plain.findIndex((line, i) => i >= 4 && /[╭├╵]/.test(line));
 		// 印记下面那条空行**保留**，「提示行 → 说明段」之间那条不留（用户 2026-10-05 定）：
 		// 空行只属于「大 logo → 下面的文字」这一条缝，换成形状就是「整份 header 恰好一个空行、
 		// 且紧跟在四行印记之后」。提示行的去留仍不作断言（`keyHint` / `keyText` 在 `node --test`
@@ -316,15 +316,15 @@ test("session_start：header 是 logo（每行缩进一格、没有 /logo 提示
 		const hintLine = plain.find((line) => line.includes("commands"));
 		if (hintLine) assert.ok(hintLine.startsWith(" interrupt"), `提示行应该缩进一格：${JSON.stringify(hintLine)}`);
 		assert.ok(
-			plain.some((line) => line.includes("This pi harness is powered by latest @bachi/┃┃┓━━┃")),
+			plain.some((line) => line.includes("This pi harness is powered by latest @bachi/├─╯│╶─╴│")),
 			"说明行应该保留（尾部已换成字形，不再有 `pi-coder.`）",
 		);
 		assert.equal(plain.some((line) => line.includes("/logo")), false, "`/logo toggles this header.` 提示已删掉");
 
-		// 说明段：80 列下是「`@bachi/` + Pi-Coder 字形」三行（用户 2026-10-05 定）
-		const artRows = plain.filter((line) => /[┏┃┣]/.test(line));
+		// 说明段：80 列下是「`@bachi/` + Pi-Coder 字形」三行（用户 2026-10-05 定，字形 2026-10-06 换稿）
+		const artRows = plain.filter((line) => /[╭├╵]/.test(line));
 		assert.equal(artRows.length, 3, `说明段应该是三行字形：${JSON.stringify(artRows)}`);
-		assert.ok(artRows[1]!.includes("This pi harness is powered by latest @bachi/┃┃┓"), "句子与字形在中间行接在一起");
+		assert.ok(artRows[1]!.includes("This pi harness is powered by latest @bachi/├─╯"), "句子与字形在中间行接在一起");
 		assert.equal(new Set(artRows.map((line) => line.length)).size, 1, "三行字形必须等宽，否则字形会歪");
 
 		// 已加载资源清单：按 pi 的顺序填，四段连同各自的空行都不该进去（含开头那个额外空行）
@@ -360,10 +360,10 @@ test("窄终端 / 超长模型 id：每一帧都不超过终端宽度（pi-tui �
 				assert.ok(stripAnsi(line).length <= width, `宽度 ${width} 下这行超了：${JSON.stringify(stripAnsi(line))}`);
 			}
 		}
-		// 窄终端（装不下「前缀 + 15 列字形」）时退回句，不把字形截成残片
+		// 窄终端（装不下「前缀 + 22 列字形」）时退回句，不把字形截成残片
 		const narrow = component.render(59).map(stripAnsi);
 		assert.ok(narrow.some((line) => line.includes("@bachi/pi-coder.")), "59 列下应该退回整句");
-		assert.equal(narrow.some((line) => /[┏┃┣]/.test(line)), false, "退回时一个字形都不能留");
+		assert.equal(narrow.some((line) => /[╭├╵]/.test(line)), false, "退回时一个字形都不能留");
 		// 长模型 id 真的被截（而不是把整行撑爆）：48 列下侧栏只剩 33 列可用
 		const longLine = stripAnsi(component.render(48)[1] ?? "");
 		assert.ok(longLine.endsWith("…"), `长模型 id 应该被截断：${JSON.stringify(longLine)}`);

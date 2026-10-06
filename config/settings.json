@@ -12,7 +12,7 @@
     "--config.node-linker=hoisted"
   ],
   "extensions": ["-builtin:codemode"],
-  "defaultTools": ["+codemode"],
+  "defaultTools": ["read", "bash", "edit", "write", "grep", "find", "ls", "codemode"],
   "tuiMode": "regular",
   "packages": [
     {
