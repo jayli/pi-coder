@@ -97,14 +97,16 @@ type WidgetFactory = (tui: unknown, theme: unknown) => WidgetComponent;
 interface Recorder {
 	/** `modelRegistry.complete` 被调用的次数（摘要生成 = 一次）。 */
 	completeCalls: number;
+	/** 每次 `modelRegistry.complete` 收到的 options（`maxTokens` 等断言看这里）。 */
+	completeOptions: Array<Record<string, unknown> | undefined>;
 	/** 每次 `setWidget(key, <factory>)` 记一个；undefined 不入列。 */
 	widgets: WidgetFactory[];
 	/** `ui.notify` 收到的文案（成功是一条 `✦ Recap: …`，失败是「没能生成 recap…」）。 */
 	notifies: string[];
 }
 
-/** 假 ctx：只提供 recap 这条路径上真正用到的东西。 */
-function createContext(recorder: Recorder, branch?: unknown[]): unknown {
+/** 假 ctx：只提供 recap 这条路径上真正用到的东西。`complete` 可注入模型返回（含 stopReason）。 */
+function createContext(recorder: Recorder, branch?: unknown[], complete?: () => unknown): unknown {
 	return {
 		mode: "tui",
 		isIdle: () => true,
@@ -118,9 +120,10 @@ function createContext(recorder: Recorder, branch?: unknown[]): unknown {
 		},
 		modelRegistry: {
 			getApiKeyAndHeaders: async () => ({ ok: true, apiKey: "test" }),
-			complete: async () => {
+			complete: async (_model: unknown, _context: unknown, options?: Record<string, unknown>) => {
 				recorder.completeCalls += 1;
-				return { content: [{ type: "text", text: "已把 recap 定时改成等子代理结束" }] };
+				recorder.completeOptions.push(options);
+				return complete ? complete() : { content: [{ type: "text", text: "已把 recap 定时改成等子代理结束" }] };
 			},
 		},
 		ui: {
@@ -226,7 +229,7 @@ test("有子代理在跑时不生成摘要；等它结束后重新起 10s 定时
 		assert.ok(shutdown, "应该注册了 session_shutdown");
 		assert.ok(extension.commands.has("recap"), "应该注册了 /recap 命令");
 
-		const recorder: Recorder = { completeCalls: 0, widgets: [], notifies: [] };
+		const recorder: Recorder = { completeCalls: 0, completeOptions: [], widgets: [], notifies: [] };
 		const ctx = createContext(recorder);
 
 		// 回合结束：起 10s 空闲表（此刻不会有任何输出）。
@@ -286,7 +289,7 @@ test("间隔由渲染时探测邻居决定：无邻居不加、邻居有内容�
 		assert.ok(command, "应该注册了 /recap 命令");
 
 		// /recap 是 force=true 的那条路（不走 10s 闲置闸门），拿到的 widget 工厂就是渲染现场。
-		const recorder: Recorder = { completeCalls: 0, widgets: [], notifies: [] };
+		const recorder: Recorder = { completeCalls: 0, completeOptions: [], widgets: [], notifies: [] };
 		await command.handler("", createContext(recorder));
 		assert.equal(recorder.widgets.length, 1, "/recap 应该挂上 widget");
 
@@ -389,7 +392,7 @@ test("/recap 重复执行不重跑模型、不发提示；有新对话后才重�
 			{ type: "message", message: { role: "user", content: "甲" } },
 			{ type: "message", message: { role: "assistant", content: [{ type: "text", text: "乙" }] } },
 		];
-		const recorder: Recorder = { completeCalls: 0, widgets: [], notifies: [] };
+		const recorder: Recorder = { completeCalls: 0, completeOptions: [], widgets: [], notifies: [] };
 		const ctx = createContext(recorder, branch);
 
 		// 第一次：正常生成 + 通知。
@@ -423,6 +426,94 @@ test("/recap 重复执行不重跑模型、不发提示；有新对话后才重�
 		assert.equal(recorder.completeCalls, 3, "指纹变了就该重新生成");
 
 		await loaded.extensions[0]?.handlers.get("session_shutdown")?.[0]?.({}, ctx);
+	} finally {
+		workspace.cleanup();
+	}
+});
+
+/**
+ * 输出预算必须容得下「思考 + 正文」。claude 路由在 `gateway/config.yaml` 里钉了
+ * `thinking: {type: enabled}` + `reasoning_effort: max`，摘要请求就算不传 thinking 也会先思考，
+ * 而 Anthropic 的 `max_tokens` 是两者共享的预算 —— 预算太小时思考吃光额度，正文只剩半句
+ * （甚至 0 字符）。本机实测 96 时 17 次里 6 次 `stop_reason=max_tokens`，512 时 8/8 完整。
+ */
+test("摘要请求的输出预算要同时容得下思考与正文（96 会被思考吃光）", { skip, timeout: 30_000 }, async () => {	const workspace = makeWorkspace();
+	try {
+		const bus = createTestBus();
+		const pi = (await import(pathToFileURL(piEntry as string).href)) as {
+			discoverAndLoadExtensions: (
+				configuredPaths: string[],
+				cwd: string,
+				agentDir?: string,
+				eventBus?: unknown,
+			) => Promise<{
+				extensions: Array<{ commands: Map<string, { handler: (args: string, ctx: unknown) => Promise<void> }> }>;
+				errors: Array<{ path: string; error: string }>;
+			}>;
+		};
+		const loaded = await pi.discoverAndLoadExtensions([EXTENSION_PATH], workspace.projectDir, workspace.agentDir, bus);
+		assert.deepEqual(loaded.errors, []);
+		const command = loaded.extensions[0]?.commands.get("recap");
+		assert.ok(command, "应该注册了 /recap 命令");
+
+		const recorder: Recorder = { completeCalls: 0, completeOptions: [], widgets: [], notifies: [] };
+		await command.handler("", createContext(recorder));
+
+		const maxTokens = recorder.completeOptions[0]?.maxTokens;
+		assert.equal(typeof maxTokens, "number", "generate() 必须显式给 maxTokens");
+		assert.ok(
+			(maxTokens as number) >= 1024,
+			`输出预算 ${String(maxTokens)} 太小：思考与正文共享这个上限，实测 96 会被思考吃光并把正文切成半句`,
+		);
+
+		// 这些 max 档路由在 `temperature: 0` 下会退化成停不下来的长思考（`working-indicator`
+		// 实测 2048 额度也被吃光且零正文，默认温度 3s 就正常返回）。摘要不需要确定性到那个程度。
+		assert.notEqual(recorder.completeOptions[0]?.temperature, 0, "不能给这些 max 档路由传 temperature: 0");
+	} finally {
+		workspace.cleanup();
+	}
+});
+
+/**
+ * `stop_reason=max_tokens` 意味着模型的话没说完 —— 这时摘要必须带省略号，不能把半句话
+ * 当成完整摘要显示。正常结束（`stop`）时一个字都不应该多（对照由上面几条 `notifies`
+ * 的 deepEqual 钉住）。
+ */
+test("被 max_tokens 截断的摘要以省略号收尾，不把半句当完整摘要", { skip, timeout: 30_000 }, async () => {
+	const workspace = makeWorkspace();
+	try {
+		const bus = createTestBus();
+		const pi = (await import(pathToFileURL(piEntry as string).href)) as {
+			discoverAndLoadExtensions: (
+				configuredPaths: string[],
+				cwd: string,
+				agentDir?: string,
+				eventBus?: unknown,
+			) => Promise<{
+				extensions: Array<{ commands: Map<string, { handler: (args: string, ctx: unknown) => Promise<void> }> }>;
+				errors: Array<{ path: string; error: string }>;
+			}>;
+		};
+		const loaded = await pi.discoverAndLoadExtensions([EXTENSION_PATH], workspace.projectDir, workspace.agentDir, bus);
+		assert.deepEqual(loaded.errors, []);
+		const command = loaded.extensions[0]?.commands.get("recap");
+		assert.ok(command, "应该注册了 /recap 命令");
+
+		const recorder: Recorder = { completeCalls: 0, completeOptions: [], widgets: [], notifies: [] };
+		await command.handler(
+			"",
+			createContext(recorder, undefined, () => ({
+				content: [{ type: "text", text: "用户否决记忆弹窗方案改每次不记忆，助手" }],
+				stopReason: "length",
+			})),
+		);
+
+		assert.equal(recorder.notifies.length, 1);
+		assert.match(recorder.notifies[0] ?? "", /助手…$/, "被 max_tokens 切断的正文必须补省略号");
+
+		const component = recorder.widgets[0]?.(undefined, { fg: (_color: string, text: string) => text });
+		assert.ok(component);
+		assert.match(component.render(80).join("\n"), /助手…/, "widget 里显示的同样是带省略号的版本");
 	} finally {
 		workspace.cleanup();
 	}

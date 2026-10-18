@@ -602,6 +602,90 @@ test("预览截断：超过 10 行只画 10 行 + 提示行，展开态（ctrl+o
 	assert.ok(!expandedLines.some((line: string) => line.includes("to expand")), "展开态不出提示行");
 });
 
+test("预览截断：读一条记忆时折叠态只到 description、正文整段收起，展开态（ctrl+o）全画", { skip }, async () => {
+	const h = await loadHarness();
+	cleanup.push(() => fs.rmSync(h.root, { recursive: true, force: true }));
+	const definition = h.extension.tools.get("memory_read")!.definition as any;
+	// memory_read 读一条的真实结果文本：四行元信息 + 空行 + 正文
+	const body = Array.from({ length: 6 }, (_unused, index) => `body line ${index + 1}`).join("\n");
+	const result = {
+		content: [
+			{
+				type: "text",
+				text: `name: one\ntype: project\nmodified: 2026-10-17T06:37:32.756Z\ndescription: 一句话说明\n\n${body}`,
+			},
+		],
+		details: { action: "read", name: "one", type: "project" },
+	};
+
+	const collapsed = definition.renderResult(result, { expanded: false }, plainTheme, renderContext()).render(80).map(plain);
+	// 头 4 行 + 提示行；提示行说的是**全部**被收起的行数（空行 + 正文 6 行 = 7 行里的 3 行？不：
+	// 空行与正文都算被裁的视觉行 —— 共 1 + 6 = 7 行被收起）
+	assert.equal(collapsed.length, 5, `4 行元信息 + 1 行提示：${JSON.stringify(collapsed)}`);
+	assert.ok(collapsed[0]!.includes("name: one"), `首行是 name：${JSON.stringify(collapsed[0])}`);
+	assert.ok(collapsed[3]!.includes("description: 一句话说明"), `第 4 行是 description：${JSON.stringify(collapsed[3])}`);
+	assert.ok(!collapsed.join("\n").includes("body line"), "折叠态不该画任何正文");
+	assert.match(collapsed[4]!, /7 more lines, ctrl\+o to expand/, `提示行：${JSON.stringify(collapsed[4])}`);
+	assert.ok(collapsed[4]!.includes("└"), "提示行是树的末行，挂 └");
+	assert.ok(collapsed.slice(0, 4).every((line: string) => line.includes("│")), `提示行之前都挂 │：${JSON.stringify(collapsed)}`);
+
+	const expanded = definition.renderResult(result, { expanded: true }, plainTheme, renderContext()).render(80).map(plain);
+	assert.equal(expanded.length, 11, `展开态 4 行头 + 空行 + 6 行正文：${JSON.stringify(expanded)}`);
+	assert.ok(expanded.join("\n").includes("body line 6"), "展开态含正文最后一行");
+	assert.ok(!expanded.some((line: string) => line.includes("to expand")), "展开态不出提示行");
+});
+
+test("预览截断：memory_search 的多条命中块仍按 10 行平铺（不按空行切头）", { skip }, async () => {
+	const h = await loadHarness();
+	cleanup.push(() => fs.rmSync(h.root, { recursive: true, force: true }));
+	const definition = h.extension.tools.get("memory_search")!.definition as any;
+	// 命中块 = `## name (type)` / description / snippet，块之间空行 —— 按空行切头会把后面的命中整片藏起来
+	const hits = Array.from({ length: 4 }, (_unused, index) => `## hit-${index + 1} (user)\ndescription ${index + 1}\nsnippet ${index + 1}`).join("\n\n");
+	const result = { content: [{ type: "text", text: hits }], details: { action: "search", count: 4 } };
+	const collapsed = definition.renderResult(result, { expanded: false }, plainTheme, renderContext()).render(80).map(plain);
+	// 15 个源行 → 老的平铺口径：10 行 + 1 行提示（而不是在第一个空行处就剩下 3 行）
+	assert.equal(collapsed.length, 11, `10 行命中内容 + 提示行：${JSON.stringify(collapsed)}`);
+	assert.ok(collapsed.join("\n").includes("hit-3"), `第三个命中块应出现：${JSON.stringify(collapsed)}`);
+	assert.match(collapsed[10]!, /5 more lines, ctrl\+o to expand/, `提示行：${JSON.stringify(collapsed[10])}`);
+});
+
+test("正文：读一条记忆时四个字段名走 syntaxKeyword、值与正文仍走 text", { skip }, async () => {
+	const h = await loadHarness();
+	cleanup.push(() => fs.rmSync(h.root, { recursive: true, force: true }));
+	const definition = h.extension.tools.get("memory_read")!.definition as any;
+	const result = {
+		content: [
+			{
+				type: "text",
+				text: "name: one\ntype: project\nmodified: 2026-10-17T06:37:32.756Z\ndescription: 一句话说明\n\nbody text",
+			},
+		],
+		details: { action: "read", name: "one", type: "project" },
+	};
+	const painted = definition.renderResult(result, { expanded: true }, paintedTheme, renderContext()).render(80);
+
+	// 字段名一段 syntaxKeyword、值一段 text（两段各自成 SGR，不让值色透到字段名上）
+	assert.ok(
+		painted[0]!.includes("syntaxKeyword(name:)text( one)"),
+		`name 字段名走 syntaxKeyword：${JSON.stringify(painted[0])}`,
+	);
+	assert.ok(painted[1]!.includes("syntaxKeyword(type:)text( project)"), `type：${JSON.stringify(painted[1])}`);
+	assert.ok(
+		painted[2]!.includes("syntaxKeyword(modified:)text( 2026-10-17T06:37:32.756Z)"),
+		`modified：${JSON.stringify(painted[2])}`,
+	);
+	assert.ok(
+		painted[3]!.includes("syntaxKeyword(description:)text( 一句话说明)"),
+		`description：${JSON.stringify(painted[3])}`,
+	);
+
+	// 正文不受影响：仍是纯 text（无 syntaxKeyword 段）
+	const bodyLine = painted.find((line: string) => line.includes("body text"))!;
+	assert.ok(!bodyLine.includes("syntaxKeyword("), `正文不该被着色：${JSON.stringify(bodyLine)}`);
+	// 结构符仍是 muted，且颜色段顺序仍是 muted → syntaxKeyword → text
+	assert.match(painted[0]!, /^ {2}muted\(│ \)syntaxKeyword\(/, `结构符 muted、字段名 syntaxKeyword：${JSON.stringify(painted[0])}`);
+});
+
 test("整块无底色、无上下边界空行：经 pi 真实组件渲染后不含背景 SGR", { skip }, async () => {
 	const h = await loadHarness();
 	cleanup.push(() => fs.rmSync(h.root, { recursive: true, force: true }));

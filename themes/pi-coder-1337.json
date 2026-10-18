@@ -1,5 +1,5 @@
 {
-  "$schema": "https://raw.githubusercontent.com/earendil-works/pi/main/packages/coding-agent/src/modes/interactive/theme/theme-schema.json",
+  "$schema": "https://pi.dev/schemas/theme.schema.json",
   "name": "pi-coder-1337",
   "vars": {
     "bg": "#191919",
@@ -65,7 +65,6 @@
     "toolErrorBg": "errorCard",
     "toolTitle": "funcBlue",
     "toolOutput": "softFg",
-    "bashOutput": "bashOutput",
     "mdHeading": "constantLanguage",
     "mdLink": "libFunc",
     "mdLinkUrl": "comment",
@@ -79,8 +78,6 @@
     "toolDiffAdded": "addedGreen",
     "toolDiffRemoved": "removedRed",
     "toolDiffContext": "softFg",
-    "toolDiffAddedBg": "addedLine",
-    "toolDiffRemovedBg": "removedLine",
     "syntaxComment": "comment",
     "syntaxKeyword": "keyword",
     "syntaxFunction": "funcBlue",

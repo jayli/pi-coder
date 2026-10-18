@@ -109,8 +109,17 @@ export interface TurnSettledInput {
 	noteMs?: number;
 }
 
-/** 状态词与色槽：running 橙、exit 0 绿、非 0 / killed / 带信号退出 红。 */
-function statusWord(task: BackgroundStatusTask): { word: string; slot: string } {
+/**
+ * 状态词与色槽：running 橙、exit 0 绿、非 0 / killed / 带信号退出 红。
+ *
+ * 导出给 `table.ts` 复用（用户 2026-10-16 定：总览表不新造词汇）。参数收窄到只读这三个
+ * 字段，所以 dock 行与总览表的状态词永远不会漂移。
+ */
+export function statusWord(task: {
+	status: TaskStatus;
+	exitCode: number | undefined;
+	signal: string | undefined;
+}): { word: string; slot: string } {
 	if (task.status === "running") return { word: "running", slot: "warning" };
 	if (task.status === "killed") return { word: "killed", slot: "error" };
 	if (task.exitCode === 0) return { word: "exit 0", slot: "success" };

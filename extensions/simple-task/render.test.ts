@@ -18,6 +18,11 @@
  *     第 1 行就是工具标题本身，最后一行是结果本身；
  *   - 标题与结果正文都从**列 1** 起（每行前置一个空格、不顶格 —— 用户 2026-09-26 定：
  *     补回默认壳原本提供的那一列左边距，由 Text 的 `paddingX = 1` 画）；
+ *   - 失败结果（校验失败 / execute 抛错）同样从列 1 起（用户 2026-10-13 定）：isError 走
+ *     index.ts 的 renderFailureResult 自绘 —— 修复前成功路径的 renderResult 读不到错误
+ *     形状里的 details 而抛错，内核退回自己的 fallback（paddingX = 0，顶格）；现形状
+ *     照抄内核 fallback 的 10 行预览 + 展开提示，只补缩进；对照断言钉住内核 fallback
+ *     本身仍是列 0（本修复不动内核，只让扩展不再掉进 fallback）；
  *   - 其他工具照旧走默认壳（有底色）—— 有专门的对照断言。
  * 找不到本机 pi 的库入口就整体 skip（不假装通过）。
  */
@@ -118,6 +123,7 @@ interface PiApi {
 	) => {
 		setArgsComplete?: () => void;
 		markExecutionStarted: () => void;
+		setExpanded?: (expanded: boolean) => void;
 		updateResult: (result: unknown, isPartial?: boolean) => void;
 		render: (width: number) => string[];
 	};
@@ -155,15 +161,35 @@ if (pi) {
 test.after(() => cleanup?.());
 
 /** 渲染一个 task 工具块：与 pi 的调用顺序一致（setArgsComplete → markExecutionStarted → updateResult）。 */
-function renderBlock(name: string, args: unknown, result?: { content: unknown[]; details?: unknown; isError?: boolean }): string[] {
+function renderBlock(
+	name: string,
+	args: unknown,
+	result?: { content: unknown[]; details?: unknown; isError?: boolean },
+	expanded = false,
+): string[] {
 	assert.ok(pi && cached);
 	const definition = cached.tools.get(name)?.definition;
 	assert.ok(definition, `本扩展必须注册 ${name} 工具`);
 	const component = new pi.ToolExecutionComponent(name, "call-1", args, {}, definition, { requestRender() {} }, cached.projectDir);
 	component.setArgsComplete?.();
 	component.markExecutionStarted();
+	if (expanded) component.setExpanded?.(true);
 	if (result) component.updateResult(result, false);
 	return component.render(79);
+}
+
+/**
+ * 内核校验失败时交给 renderResult 的错误形状（createErrorToolResult：纯文本 + details:{} +
+ * isError:true）—— 文本形状照抄 chunk-OIM2DMFI.js 的 errorMessage4 模板。
+ */
+function validationFailureResult(args: { tasks: unknown[] }): {
+	content: Array<{ type: string; text: string }>;
+	details: Record<string, never>;
+	isError: boolean;
+} {
+	const errorLines = args.tasks.map((_value, index) => `  - tasks.${index}: must be string`).join("\n");
+	const text = `Validation failed for tool "task_set":\n${errorLines}\n\nReceived arguments:\n${JSON.stringify(args, null, 2)}`;
+	return { content: [{ type: "text", text }], details: {}, isError: true };
 }
 
 /** 三个工具各自的样例参数与成功结果（details 里的 state 供 renderResult 读计数）。 */
@@ -234,7 +260,77 @@ test("整块没有任何底色（pending / 成功 / 失败三种底都不画）"
 	assert.equal(other.render(79).some(hasBg), true, "其他工具的底色必须还在");
 });
 
+test("失败结果不顶格：错误正文与截断提示都从列 1 起（用户 2026-10-13 定）", { skip }, () => {
+	const args = { tasks: [1, 2, 3, 4, 5] };
+	const failed = validationFailureResult(args);
+	const visible = renderBlock("task_set", args, failed).map(plain);
+	assert.equal(visible[0], "", "第 0 行是 pi 的固定留白");
+	assert.equal(visible[1]!.startsWith(" task_set"), true, "标题行从列 1 起");
+	// 每行 = 恰好一个空格 + 内核错误原文行（原文自身带的缩进原样保留 —— 用户样例的逐字形状）
+	const srcLines = (failed.content[0]!.text ?? "").split("\n").slice(0, 10);
+	srcLines.forEach((src, index) => {
+		const rendered = visible[2 + index]!;
+		if (src === "") {
+			assert.equal(rendered.trim(), "", `第 ${index} 行是空行`);
+			return;
+		}
+		assert.equal(
+			rendered.startsWith(` ${src}`),
+			true,
+			`第 ${index} 行该是「空格 + 原文」：${JSON.stringify({ src, rendered })}`,
+		);
+	});
+	// 截断提示与内核 fallback 同文案，同样从列 1 起
+	const hint = visible.find((line) => line.includes("more lines"));
+	assert.ok(hint, "非展开态该有 ... (N more lines) 提示");
+	assert.equal(hint.startsWith(" ... ("), true, `提示行该从列 1 起：${JSON.stringify(hint)}`);
+});
+
+test("失败结果展开态（ctrl+o）不裁剪、全文都从列 1 起", { skip }, () => {
+	const args = { tasks: [1, 2, 3, 4, 5] };
+	const visible = renderBlock("task_set", args, validationFailureResult(args), true).map(plain);
+	assert.equal(visible.some((line) => line.includes("more lines")), false, "展开态不该有截断提示");
+	assert.equal(visible.some((line) => line.trim() === "}"), true, `参数 JSON 的收尾行该在（全文展开）：${JSON.stringify(visible)}`);
+});
+
+test("三个工具的失败结果都不顶格（共享同一条 isError 分支）", { skip }, () => {
+	for (const name of ["task_set", "task_update", "task_get"]) {
+		const visible = renderBlock(name, {}, { content: [{ type: "text", text: "boom" }], details: {}, isError: true }).map(plain);
+		assert.equal(visible[2]!.startsWith(" boom"), true, `${name} 失败正文该从列 1 起：${JSON.stringify(visible[2])}`);
+		assert.equal(visible[2]!.startsWith("  "), false, `${name} 失败正文不该顶格或两格：${JSON.stringify(visible[2])}`);
+	}
+});
+
+test("对照：内核 fallback（renderResult 抛错的 definition）保持列 0 顶格不动", { skip }, () => {
+	assert.ok(pi && cached);
+	// 复刻修复前的旧路径：renderResult 读不到期望字段而抛错 → 内核 catch → 自己的 fallback（paddingX = 0）
+	const throwingDefinition = {
+		renderShell: "self",
+		renderCall: () => ({ render: () => [] as string[], invalidate() {} }),
+		renderResult: () => {
+			throw new Error("renderer exploded");
+		},
+	};
+	const component = new pi.ToolExecutionComponent(
+		"custom",
+		"call-x",
+		{},
+		{},
+		throwingDefinition,
+		{ requestRender() {} },
+		cached.projectDir,
+	);
+	component.updateResult({ content: [{ type: "text", text: "boom" }], details: {}, isError: true }, false);
+	const visible = component.render(79).map(plain);
+	assert.equal(
+		visible.some((line) => line.startsWith("boom")),
+		true,
+		"内核 fallback 该保持列 0 顶格（本修复不动内核，只让扩展不再掉进 fallback）：" + JSON.stringify(visible),
+	);
+});
+
 test("无边界空行：标题是块的第一行、结果是最后一行，正文在列 1（每行前置一个空格）", { skip }, () => {
+	assert.ok(cached);
 	for (const [name, sample] of Object.entries(SAMPLES)) {
 		for (const [label, lines] of [
 			["执行中", renderBlock(name, sample.args)],

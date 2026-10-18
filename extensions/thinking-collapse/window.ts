@@ -39,17 +39,49 @@
  *
  * 出口行必须**恰好是一行**：thinking 不会被仔细阅读，格式整洁比内容完整更重要，
  * 所以宁可截掉字符也不允许 pi 二次折行。而 pi 会把本扩展的返回值再交给 marked 解析一次，
- * 于是唯一能把两条视觉行**合并**成一条超宽行的是行内 code span：marked 的 codespan
- * tokenizer 会把 code span 里的换行**换成空格**（`rules.inline.code` + `newLineCharGlobal`，
- * 实测 `` `a\nb` `` → text `"a b"`），合并出来的超宽行再被 pi 按 contentWidth 折一次，
- * 折出来的续行没有标签、看上去就是凭空多出来的一行 —— 就是屏幕上看到的「折行」。所以出口行里的反引号必须
- * **自身配对**：`stripUnpairedBackticks` 按 marked 的判定规则（`findCodeSpanEnd`）把配不上
- * 对的反引号整段删掉。头部截断会切在 code span 中间、留下一串落单的闭合反引号，正是同一个 bug。
+ * 于是有两类东西能把这一行弄宽：
+ *
+ * 1. **行内 code span 把两行并成一行**。marked 的 codespan tokenizer 会把 code span 里的换行
+ *    **换成空格**（`rules.inline.code` + `newLineCharGlobal`，实测 `` `a\nb` `` → text `"a b"`），
+ *    合并出来的超宽行再被 pi 按 contentWidth 折一次，折出来的续行没有标签、看上去就是凭空多出来
+ *    的一行。所以出口行里的反引号必须**自身配对**：`stripUnpairedBackticks` 按 marked 的判定规则
+ *    （`findCodeSpanEnd`）把配不上对的反引号整段删掉。头部截断会切在 code span 中间、留下一串
+ *    落单的闭合反引号，正是同一个 bug。
+ * 2. **marked 的 inline 规则吃掉我们插进去的颜色转义**（`/rainbow` 开着时才有）。彩虹色是
+ *    `\x1b[38;2;149;174;43m`，对 marked 而言只是一串普通字符 —— 它的 email 自动链接规则会把尾巴上的
+ *    `43m` 当成邮箱**用户名**的一部分吞进链接，转义被截成 `\x1b[38;2;149;174;`：没有终止字符 `m`，
+ *    pi 的 `visibleWidth` 不认它，残尾就以可见文字显示出来（屏幕上看到的 `43mpi-web-access@0.39.0`），
+ *    行宽跟着超出预算 → pi 折行。同类第二条路径是正文里的 `](`：它让 CSI 的 `[` 变成 markdown 链接的
+ *    左括号，整段被当成链接。修法是 `escapeMarkdownHooks` 把 `@` 与 `]` 转义成 `\@` / `\]`
+ *    （marked 的 escape 规则吃掉反斜杠，渲染后逐字变回原样）；转义会让原文变长，所以宽度预算用
+ *    `hookAwareWidth` 预留这部分开销，出口行的原始宽度仍严格不超预算。
+ *
  * 出口处还有一道硬截断兜底（`truncateTail`），保证任何情况下都不超宽。
  */
 
+import type { RainbowUnit } from "./rainbow.ts";
 /** 可见宽度函数：与 pi-tui `visibleWidth` 同语义（剥 ANSI、宽字符按 2 列）。 */
 export type WidthFn = (text: string) => number;
+
+/**
+ * 出口着色钩子（`/rainbow` 用）：拿**拼接完成的整行纯文本**与窗口区间，返回着色后的窗口文本。
+ *
+ * 合约只有一条：**只能往单位前后插转义序列，可见字符一个不能改、不能增、不能删**（`dropped`
+ * 里列出的那几个原字符在着色结果里也不得出现）。宽度、头部截断、折行判定全部建在可见字符
+ * 上（本模块的核心约束是出口行恰好一行），所以只要可见文本不变，后续那套逻辑就照旧成立。
+ *
+ * 三个参数都是位置的交代：`line` 是完整纯文本行，`[from, to)` 是窗口区间，`dropped` 是
+ * 窗口内已被删掉的原字符下标（落单的反引号）—— 着色拿 `from` 去单位表里定位，色相于是能
+ * 按单位的**绝对序号**算，滚动过程中同一批字颜色不变。
+ *
+ * 调用点在**头部截断之后**、但**先于字符串拼接**：窗口在纯文本空间里算完，着色只在最后落笔。
+ */
+export type ColorizeFn = (
+	line: string,
+	from: number,
+	to: number,
+	dropped: readonly number[],
+) => string;
 
 /** 首行标签：`Think: `（占 7 列，从第 0 列开始）。 */
 export const HEADER_LABEL = "Think: ";
@@ -129,6 +161,196 @@ const NO_SPACE_AFTER = new Set(["(", "[", "{", "<", '"', "'", "`", "…", "—",
  * 不补空格会和上一行粘成一个词。
  */
 const NO_SPACE_BEFORE = new Set([")", "]", "}", ">", ",", ".", ";", ":", "!", "?", "%", '"', "'", "`", "…"]);
+
+/**
+ * 会被 marked 的 inline 规则「吃掉」的字符：出口前按条件转义（加一个反斜杠）。
+ *
+ * 只有这两个字符，各自对应一条**已实测**的路径（见文件头「硬性不折行」第 2 条）：
+ *
+ *   - `@` —— marked 的 email 自动链接（`url` tokenizer 的
+ *     `[A-Za-z0-9._+-]+(@)[a-zA-Z0-9-_]+(?:\.[a-zA-Z0-9-_]*[a-zA-Z0-9])+`）会把紧贴在颜色转义后面的
+ *     `43mpi-web-access@0.39.0` 整个当成邮箱，`43m` 是用户名的一部分 —— 转义因此少了终止字符 `m`。
+ *   - `]` —— 正文里出现**未配对**的 `](` 时，CSI 的 `[` 就成了 markdown 链接的左括号，
+ *     `[38;2;…msee foo](bar)` 整个被当成链接，链接文字只剩 `38;2;…msee foo`（实测：屏幕上是
+ *     `\u001b38;2;149;174;43msee foo` 这种残尾）。
+ *
+ * 刻意**只**转义这两个：marked 的 escape 规则会把反斜杠吃掉、渲染后逐字还原，所以转义本身不改变
+ * 可见文字；但每多一个转义，pi 就会多切出一个 `escape` token，而 pi 是**每个 token 只套一次前景色**的，
+ * 那个被转义的字符于是回落到环境色、丢掉自己的彩虹色。实测代价：`@` 在 3450 万字 thinking 语料里
+ * 出现 2113 次、`]` 7668 次（0.006% / 0.02%），每处一个字符。转义面越小，这个副作用越小 ——
+ * 所以多转一个 `<` / `!` 的方案实测会让 129/5940 帧各掉一个字符的颜色，已否决。
+ */
+const MARKDOWN_HOOK_CHARS = "@]";
+
+/**
+ * 带凭据的裸 URL（`https://user:pass@host`）：这种词里的 `@` 不转义。
+ *
+ * 两个理由：它不会触发 email 规则（marked 的 `url` tokenizer 先把整个 `https://…` 吃掉，实测不泄漏），
+ * 而在 URL 里插反斜杠 marked **不会**吃掉它 —— `url` 规则的尾巴是 `[^\s<]*` 原样输出，
+ * 渲染出来就成了 `https://user:pass\@localhost:8002` 这个多一个反斜杠的假 URL（实测）。
+ * 语料里这类 URL 占 0.065% 的块，不处理就是凭空弄脏它们。
+ */
+const URL_WORD_RE = /^(?:https?|ftp):\/\//i;
+const WWW_WORD_RE = /^www\./i;
+
+/** 正文里有没有需要转义的字符（快路径用，以 `MARKDOWN_HOOK_CHARS` 为唯一源）。 */
+function hasHookChar(text: string): boolean {
+	for (const ch of MARKDOWN_HOOK_CHARS) {
+		if (text.includes(ch)) return true;
+	}
+	return false;
+}
+
+/**
+ * 从 `pos` 开始的 ANSI / OSC / APC 转义序列长度，不是序列则返回 0。
+ *
+ * 口径与 pi-tui 的 `ansiCodeLength` 逐条对齐（CSI 以 `m`/`G`/`K`/`H`/`J` 终止，OSC/APC 以 BEL 或
+ * ST 终止）：只有同口径，「我认为是转义的部分」才等于「pi 量宽度时跳过的部分」。
+ */
+function ansiSequenceLength(text: string, pos: number): number {
+	if (pos >= text.length || text.charCodeAt(pos) !== 0x1b) return 0;
+	const next = text[pos + 1];
+	if (next === "[") {
+		for (let j = pos + 2; j < text.length; j++) {
+			const c = text.charCodeAt(j);
+			// m, G, K, H, J
+			if (c === 0x6d || c === 0x47 || c === 0x4b || c === 0x48 || c === 0x4a) return j + 1 - pos;
+		}
+		return 0;
+	}
+	if (next === "]" || next === "_") {
+		for (let j = pos + 2; j < text.length; j++) {
+			if (text.charCodeAt(j) === 0x07) return j + 1 - pos;
+			if (text.charCodeAt(j) === 0x1b && text[j + 1] === "\\") return j + 2 - pos;
+		}
+		return 0;
+	}
+	return 0;
+}
+
+/**
+ * 一次扫描同时产出「转义后的文本」与「插了多少个反斜杠」。
+ *
+ * 两者必须出自同一条扫描：窗口是按宽度裁的，而转义会让文本变长 —— 预算用的「会插几个」与实际
+ * 「插了几个」如果口径不一，「出口行原始宽度 ≤ 预算」这条不变量就守不住。
+ *
+ * 三类位置**不动**：
+ *
+ *   - **转义序列内部**（CSI / OSC / APC）：marked 眼里那只是一串普通字符，插一个反斜杠就把整条颜色
+ *     转义弄坏了。`ansiSequenceLength` 整条跳过，所以本函数可以直接对着**已着色**的字符串跑 ——
+ *     这正是它在流水线里的位置（着色之后、拼接之前）。
+ *   - **code span 内部**：marked 对 code span 不做 escape 处理，那里的 `\@` 会原样显示成反斜杠加 at
+ *     （实测过），反而弄脏文字；code span 里的 `@` 也不会触发 email 规则 —— 它整个是一个 codespan
+ *     token，不参与 inline 链接解析。配对判定用 `findCodeSpanEnd`，与上游 `stripUnpairedBackticks` 同口径。
+ *   - **已经被转义过的**（前面有奇数个反斜杠）：重复转义会把 `\@` 变成 `\\@`，渲染出来就成了反斜杠加 at
+ *     （marked 的 escape 规则只吃一个反斜杠）。奇偶按「跳过 ANSI 后的可见反斜杠连跑数」算，
+ *     所以中间夹着颜色转义也判得准 —— 这让本函数**幂等**。
+ *
+ * 两个字符各自的条件也不同（都是为了不把本来正常的东西弄脏）：
+ *
+ *   - `@` —— 所在**可见词**是带完整开头的裸 URL（`https?://` / `ftp://` / `www.`）时不转义：那种词里
+ *     marked 的 `url` tokenizer 先把整个 URL 吃掉（实测不泄漏），而 URL 内部插的反斜杠它**不会**吃 ——
+ *     渲染出来就成了 `https://user:pass\@localhost:8002` 这个多一个反斜杠的假 URL。词必须是**可见**词
+ *     （不含转义序列）：彩虹着色会给每个单位都前置一条颜色转义，按原始下标切片会把转义也算进词里，
+ *     `https://` 于是永远匹配不上（实测的 bug）。注意「开头完整」是必要条件：头部截断把 `https://`
+ *     挤掉、只剩 `pass@x.com/path` 时，email 规则照样会吃掉颜色转义的尾巴（实测），所以那种 `@` 仍要转义。
+ *   - `]` —— 只在**窗口内未配对**（前面没有可见的 `[`）时转义。配对的 `[a](b)` 是真链接，转义会把
+ *     可见文字从 `a` 改成 `[a](b)`（实测），那是失真；未配对的 `](` 才会让 CSI 的 `[` 变成链接左括号。
+ *     所以深度必须按**窗口**算、不能按整行算：头部截断可能把 `[` 挤掉，留下一个窗口内未配对的 `]`。
+ */
+function scanMarkdownHooks(text: string): { text: string; inserted: number } {
+	// 快路径：正文里根本没有这两个字符时一字不改（语料里绝大多数帧都是这种）
+	if (!hasHookChar(text)) return { text, inserted: 0 };
+	let out = "";
+	let inserted = 0;
+	let i = 0;
+	let backslashRun = 0;
+	let depth = 0;
+	/** 当前**可见**词（不含转义序列），遇空白清零 —— 判 URL 开头用。 */
+	let word = "";
+	while (i < text.length) {
+		const length = ansiSequenceLength(text, i);
+		if (length > 0) {
+			// 整条跳过：既不参与转义，也不打断反斜杠奇偶、不算进当前词
+			out += text.slice(i, i + length);
+			i += length;
+			continue;
+		}
+		const ch = text[i];
+		if (ch === "`") {
+			const end = findCodeSpanEnd(text, i);
+			if (end > i) {
+				// 配对的 code span：整段原样带过（marked 不对 code span 做 escape 处理）
+				out += text.slice(i, end);
+				i = end;
+				backslashRun = 0;
+				word = "";
+				continue;
+			}
+			// 落单反引号（上游已删过，兜底再认一次）：不构成 span，按普通字符走
+			out += ch;
+			i++;
+			backslashRun = 0;
+			word += ch;
+			continue;
+		}
+		word = /\s/.test(ch) ? "" : word + ch;
+		if (ch === "[") {
+			depth++;
+		} else if (ch === "]") {
+			if (depth > 0) depth--;
+			else if (backslashRun % 2 === 0) {
+				out += "\\";
+				inserted++;
+			}
+		} else if (ch === "@") {
+			// 当前词的可见前缀（不含这个 `@` 本身）
+			const prefix = word.slice(0, -1);
+			if (!URL_WORD_RE.test(prefix) && !WWW_WORD_RE.test(prefix) && backslashRun % 2 === 0) {
+				out += "\\";
+				inserted++;
+			}
+		}
+		out += ch;
+		backslashRun = ch === "\\" ? backslashRun + 1 : 0;
+		i++;
+	}
+	return { text: out, inserted };
+}
+
+/**
+ * 把会被 marked 的 inline 规则吃掉的字符转义掉（`@` → `\@`，未配对的 `]` → `\]`）。**幂等**。
+ *
+ * 条件与「哪些位置不能动」全在 `scanMarkdownHooks` 的注释里。渲染后逐字还原（marked 的 `escape`
+ * 规则把反斜杠吃掉），所以这是**保真**变换；唯一的副作用是每个转义会让 pi 多切一个 inline token，
+ * 而 pi 是每个 token 只套一次前景色的 —— 那个被转义的字符于是回落到环境色，丢掉自己的彩虹色。
+ * 实测代价：`@` 在 3450 万字 thinking 语料里出现 2113 次、`]` 7668 次（0.006% / 0.02%），每处一个字符。
+ */
+export function escapeMarkdownHooks(text: string): string {
+	return scanMarkdownHooks(text).text;
+}
+/**
+ * 这段文本转义后会**多出**多少列（= 会插入的反斜杠数）。
+ *
+ * 与 `escapeMarkdownHooks` 共用同一条扫描，所以「预算里预留的」与「实际插入的」严格一致。
+ * code span 里的 `@` / 配对的 `]` / URL 里的 `@` 都不转义，也就不计数。
+ */
+export function countMarkdownHooks(text: string): number {
+	return scanMarkdownHooks(text).inserted;
+}
+
+/**
+ * 计入转义开销的宽度：`widthOf` 的结果再加上会插入的反斜杠数（每个 1 列）。
+ *
+ * 为什么要预留：转义发生在**窗口取完之后**（得先知道窗口里有哪些字符才能判配对与 URL），而窗口是按
+ * `widthOf` 裁的。不预留的话，`a@b.com` 这样的正文会让出口行的**原始**宽度超出预算 —— 虽然 marked
+ * 渲染时会把反斜杠吃掉、真实显示宽度不变，但「出口行原始宽度 ≤ 预算」这条本模块的既有不变量就不成立
+ * 了，现有测试与「宁可截字符也不折行」的兜底都会失去依据。预留之后两个口径同时成立：
+ * 原始宽度 ≤ 预算，渲染宽度 ≤ 原始宽度。
+ */
+export function hookAwareWidth(text: string, widthOf: WidthFn): number {
+	return widthOf(text) + countMarkdownHooks(text);
+}
 
 /** 取字符串末尾一个码点（不切半个代理对）。 */
 function lastCodePoint(text: string): string {
@@ -241,9 +463,20 @@ export function findCodeSpanEnd(text: string, start: number): number {
  * 而这一行的内容本来就已经被头部截断过，代价可以忽略。
  */
 export function stripUnpairedBackticks(text: string): string {
-	if (!text.includes("`")) return text;
+	return stripUnpairedBackticksIndexed(text, 0).text;
+}
+
+/**
+ * `stripUnpairedBackticks` 的**带位置**版：除了删干净后的文本，还回报每个被删掉的反引号在
+ * **原串**里的下标（加上 `baseIndex` 偏移）。
+ *
+ * 着色需要它：单位的色相按整行**绝对序号**算，删掉几个反引号不该把后续单位的颜色整体挪位
+ * —— 所以着色时按这些下标跳过对应字符，而不是“先删字符再重算单位”。
+ */
+export function stripUnpairedBackticksIndexed(text: string, baseIndex: number): { text: string; dropped: number[] } {
+	if (!text.includes("`")) return { text, dropped: [] };
 	let out = "";
-	let changed = false;
+	const dropped: number[] = [];
 	let i = 0;
 	while (i < text.length) {
 		if (text[i] === "`") {
@@ -254,15 +487,37 @@ export function stripUnpairedBackticks(text: string): string {
 				continue;
 			}
 			let run = i;
-			while (text[run] === "`") run++;
+			while (text[run] === "`") {
+				dropped.push(baseIndex + run);
+				run++;
+			}
 			i = run;
-			changed = true;
 			continue;
 		}
 		out += text[i];
 		i++;
 	}
-	return changed ? out : text;
+	return { text: out, dropped };
+}
+
+/** 一行里所有 code span 的区间（绝对下标），供着色时跳过（保留它们自己的 `mdCode` 色）。 */
+export function findCodeSpans(text: string): Array<{ start: number; end: number }> {
+	const spans: Array<{ start: number; end: number }> = [];
+	let i = 0;
+	while (i < text.length) {
+		if (text[i] !== "`") {
+			i++;
+			continue;
+		}
+		const end = findCodeSpanEnd(text, i);
+		if (end > i) {
+			spans.push({ start: i, end });
+			i = end;
+			continue;
+		}
+		while (text[i] === "`") i++;
+	}
+	return spans;
 }
 
 /**
@@ -276,6 +531,20 @@ export function clipToTail(text: string, maxWidth: number, widthOf: WidthFn, ell
 	if (widthOf(text) <= maxWidth) return text;
 	const budget = maxWidth - widthOf(ellipsis);
 	if (budget <= 0) return "";
+	return ellipsis + text.slice(clipToTailIndex(text, maxWidth, widthOf, widthOf(ellipsis)));
+}
+/**
+ * `clipToTail` 的**起始下标**版（不拼 `…`）：去掉了窗口左侧多少个字符。
+ *
+ * 窗口逻辑本身只需要这个下标 —— 着色的切点由调用方拿它去单位表里定位，色相因此可以按
+ * 单位的**绝对序号**算（见 `ColorizeFn`）。两者的宽度口径必须严格一致，所以共用同一段
+ * 循环：`clipToTail` 就是本函数加一个 `…`。
+ */
+export function clipToTailIndex(text: string, maxWidth: number, widthOf: WidthFn, ellipsisWidth = 1): number {
+	if (maxWidth <= 0) return text.length;
+	if (widthOf(text) <= maxWidth) return 0;
+	const budget = maxWidth - ellipsisWidth;
+	if (budget <= 0) return text.length;
 	let used = 0;
 	let i = text.length;
 	while (i > 0) {
@@ -285,7 +554,7 @@ export function clipToTail(text: string, maxWidth: number, widthOf: WidthFn, ell
 		used += width;
 		i = start;
 	}
-	return ellipsis + text.slice(i);
+	return i;
 }
 
 /**
@@ -297,17 +566,31 @@ export function clipToTail(text: string, maxWidth: number, widthOf: WidthFn, ell
 export function truncateTail(text: string, maxWidth: number, widthOf: WidthFn, ellipsis = ELLIPSIS): string {
 	if (maxWidth <= 0) return "";
 	if (widthOf(text) <= maxWidth) return text;
-	const budget = maxWidth - widthOf(ellipsis);
-	if (budget <= 0) return "";
-	let out = "";
+	const keep = truncateTailIndex(text, maxWidth, widthOf, widthOf(ellipsis));
+	if (keep <= 0) return "";
+	return `${text.slice(0, keep).replace(/\s+$/, "")}${ellipsis}`;
+}
+
+/**
+ * `truncateTail` 的**保留长度**版：从尾部截断后，头部留下了多少个字符。
+ *
+ * 与 `truncateTail` 共用同一条循环（那个函数就是本函数加一个 `…`），所以两者的截断点
+ * 严格一致 —— 着色路径要用它把「保留到哪个绝对下标」算出来。
+ */
+export function truncateTailIndex(text: string, maxWidth: number, widthOf: WidthFn, ellipsisWidth = 1): number {
+	if (maxWidth <= 0) return 0;
+	if (widthOf(text) <= maxWidth) return text.length;
+	const budget = maxWidth - ellipsisWidth;
+	if (budget <= 0) return 0;
 	let used = 0;
+	let count = 0;
 	for (const ch of text) {
 		const width = widthOf(ch);
 		if (used + width > budget) break;
-		out += ch;
 		used += width;
+		count += ch.length;
 	}
-	return out.replace(/\s+$/, "") + ellipsis;
+	return count;
 }
 
 /**
@@ -317,12 +600,16 @@ export function truncateTail(text: string, maxWidth: number, widthOf: WidthFn, e
  * @param availableWidth  pi 给 transform 的内容宽度（已扣掉 Markdown 组件左右各 1 列 padding）
  * @param widthOf         可见宽度函数（运行时传 pi-tui 的 `visibleWidth`）
  * @param ansi            是否夹斜体开关控制码
+ * @param colorize       可选：出口着色（`/rainbow`）。在头部截断**之前**拿到**整行纯文本**，
+ *                        只允许插转义、可见字符一字不改（详见 `ColorizeFn`）。着色在纯文本
+ *                        空间里算完之后才落笔，所以宽度、截断、折行判定全部不受它影响。
  */
 export function buildThinkingWindow(
 	markdown: string,
 	availableWidth: number,
 	widthOf: WidthFn,
 	ansi = true,
+	colorize?: ColorizeFn,
 ): string {
 	const body = normalizeTabs(markdown).trim();
 	if (body === "") return markdown;
@@ -340,15 +627,54 @@ export function buildThinkingWindow(
 	const useLabel = width >= widthOf(HEADER_LABEL) + widthOf(ELLIPSIS) + MIN_CONTENT_WIDTH;
 	const label = useLabel ? HEADER_LABEL : "";
 	const budget = Math.max(MIN_CONTENT_WIDTH, width - widthOf(label));
+	/** 计入出口转义开销的宽度口径（见 `hookAwareWidth`）。 */
+	const hookWidth = (text: string): number => hookAwareWidth(text, widthOf);
+
+	// 落单反引号先删掉再算窗口：删除会让后面的字符位置整体前移，而着色的色相是按单位的
+	// **绝对序号**算的 —— 在**最先**清一遍，后面算出的窗口下标才与着色看到的坐标一致。
+	// （头部/尾部截断自己也切得出新的落单反引号，所以窗口取完还要再清一遍，见下。）
+	const cleanLine = stripUnpairedBackticks(line);
 
 	// 头部截断滚动：放得下就全显示，放不下就从头部丢掉溢出字符、行首补 `…`，行尾永远是最新 token。
-	let content = stripUnpairedBackticks(clipToTail(line, budget, widthOf));
-	// 兜底：任何情况下出口行都不许超宽（超了宁可截掉尾部）。
-	if (widthOf(label) + widthOf(content) > width) {
-		content = truncateTail(content, width - widthOf(label), widthOf);
+	// 两个下标版函数与它们的成串版共用同一段循环，所以「算窗口」与「拼字符串」的截断点严格一致。
+	//
+	// 宽度口径用 `hookAwareWidth`（可见宽度 + 会插入的反斜杠数）：出口转义在**窗口取完之后**才做
+	// （`]` 是否未配对、`@` 是否在 URL 里都得按窗口内的字符判），而转义会让原始文本变长。按预留了
+	// 转义开销的预算裁，「出口行原始宽度 ≤ budget」这条不变量才继续成立；marked 渲染时把反斜杠吃掉，
+	// 所以真实显示宽度只会更窄。不含 `@` / `]` 时 `hookAwareWidth` 与 `widthOf` 完全等价，行为不变。
+	const ellipsisWidth = widthOf(ELLIPSIS);
+	const ellipsisFits = budget - ellipsisWidth > 0;
+	const from = ellipsisFits ? clipToTailIndex(cleanLine, budget, hookWidth, ellipsisWidth) : cleanLine.length;
+	const clipped = cleanLine.slice(from);
+
+	// 兜底：任何情况下出口行都不许超宽（超了宁可截掉尾部）。窗口已经按 budget 取过，这里
+	// 理论上不会触发；真触发就退回不着色的纯文本路径 —— 宁可这一帧没颜色，也不能折行。
+	if (from > 0 && hookWidth(clipped) > budget) {
+		const fallback = truncateTail(clipped, budget, hookWidth);
+		return label === ""
+			? escapeMarkdownHooks(fallback)
+			: italicOff + label + italicOn + stripUnpairedBackticks(escapeMarkdownHooks(fallback));
 	}
-	content = stripUnpairedBackticks(content);
+
+	// 窗口内的落单反引号（被 cut 切出来的）连位置一起删：位置要带去给着色跳过那几个字符。
+	const { text: stripped, dropped } = stripUnpairedBackticksIndexed(clipped, from);
+
+	// 着色：在**纯文本**窗口上做，色相按整行的单位序号算，所以同一批字在滚动中颜色不变。
+	// 看得到的字符一个不多一个不少（`paint` 只插转义，`dropped` 里的反引号两边都算删掉）。
+	let content = stripped;
+	if (colorize && stripped !== "") {
+		const painted = colorize(cleanLine, from, from + clipped.length, dropped);
+		// 可见宽度不变是着色层的合约；万一被破了就退回纯文本，保证不折行。
+		content = widthOf(painted) === widthOf(stripped) ? painted : stripped;
+	}
+
+	// 出口转义：必须在**着色之后**做 —— 一来 `]` 的配对与 `@` 是否在 URL 里都得按窗口内的实际字符判
+	// （头部截断可能把 `[` 挤掉，留下一个窗口内未配对的 `]`），二来 `scanMarkdownHooks` 会整条跳过
+	// ANSI 序列，所以对着已着色的字符串跑是安全的；插入的反斜杠不占可见宽度，着色的宽度合约不受影响。
+	content = escapeMarkdownHooks(content);
+
+	const prefix = from > 0 && ellipsisFits ? ELLIPSIS : "";
 
 	// 标签要正常字形（关掉 pi 给的斜体再开回来）；没有标签时正文沿用斜体。
-	return label === "" ? content : italicOff + label + italicOn + content;
+	return label === "" ? prefix + content : italicOff + label + italicOn + prefix + content;
 }

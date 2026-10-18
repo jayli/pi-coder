@@ -274,16 +274,18 @@ test("圆点颜色：读的时候 dim、成功绿、失败红", { skip }, () => 
 
 test("圆点颜色是从主题现取的（改主题 → 下次渲染就跟着变）", { skip }, () => {
 	// 断言「每次渲染现取」而不是写死三个色值：临时改 dark 皮肤的两个槽位再渲染，颜色必须跟着变。
+	// 改的是 `fgAnsi`（已解析的 SGR 表）：0.99.1 起 pi 的 `Theme` 只剩 `fgAnsi` / `bgAnsi`
+	// （`fgColors` 那份色值表已经不存在），扩展与 pi 自己的渲染都从它取。
 	const singleton = (globalThis as Record<symbol, unknown>)[Symbol.for("@earendil-works/pi-coding-agent:theme")] as
-		| { fgColors?: Map<string, string> }
+		| { fgAnsi?: Map<string, string> }
 		| undefined;
-	assert.ok(singleton?.fgColors?.set, "pi 的 theme 单例该在（initTheme 已调过）");
-	const fgColors = singleton!.fgColors!;
-	const dimBefore = fgColors.get("dim");
-	const addedBefore = fgColors.get("toolDiffAdded");
+	assert.ok(singleton?.fgAnsi?.set, "pi 的 theme 单例该在（initTheme 已调过）");
+	const fgAnsi = singleton!.fgAnsi!;
+	const dimBefore = fgAnsi.get("dim");
+	const addedBefore = fgAnsi.get("toolDiffAdded");
 	try {
-		fgColors.set("dim", "\u001b[38;2;1;2;3m");
-		fgColors.set("toolDiffAdded", "\u001b[38;2;4;5;6m");
+		fgAnsi.set("dim", "\u001b[38;2;1;2;3m");
+		fgAnsi.set("toolDiffAdded", "\u001b[38;2;4;5;6m");
 		assert.equal(
 			/(\u001b\[38;2;\d+;\d+;\d+m)\u2022/.exec(renderBlock({ path: "/tmp/x.js" }, { noResult: true })[1]!)?.[1],
 			"\u001b[38;2;1;2;3m",
@@ -295,10 +297,10 @@ test("圆点颜色是从主题现取的（改主题 → 下次渲染就跟着变
 			"成功该跟着新的 toolDiffAdded 走",
 		);
 	} finally {
-		if (dimBefore === undefined) fgColors.delete("dim");
-		else fgColors.set("dim", dimBefore);
-		if (addedBefore === undefined) fgColors.delete("toolDiffAdded");
-		else fgColors.set("toolDiffAdded", addedBefore);
+		if (dimBefore === undefined) fgAnsi.delete("dim");
+		else fgAnsi.set("dim", dimBefore);
+		if (addedBefore === undefined) fgAnsi.delete("toolDiffAdded");
+		else fgAnsi.set("toolDiffAdded", addedBefore);
 	}
 });
 

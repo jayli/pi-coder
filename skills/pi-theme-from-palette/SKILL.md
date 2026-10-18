@@ -13,8 +13,11 @@ description: 从一份现成配色（vim colorscheme / tmTheme plist / codex 主
 
 基准文件（次要槽位全部来自它，也是结构模板）：
 `<包内>/themes/pi-coder-1337.json`（本仓即 `themes/pi-coder-1337.json`，npm 装到 `node_modules/@bachi/pi-coder/themes/`）
-槽位语义与三套现成皮肤的取值对照：
-`<包内>/assets/pi-coder-palettes.html`（`三色对照` 表列出全部 53 个槽位）
+槽位全集与五套现成皮肤的取值，直接看 `<包内>/themes/` 下五个 `pi-coder-*.json`
+（本仓即 `themes/`）
+的 `colors` 段（取并集），加上扩展自用的三个 `vars`（`bashOutput` / `addedLine` / `removedLine`，
+**不在 `colors` 里**，pi 1.2.0 起写进 `colors` 会让整份皮肤失效 —— 详见「落盘与结构规则」一节；
+色板展示页 `<包内>/assets/pi-coder-palettes.html`（本仓即 `assets/pi-coder-palettes.html`）已不再带对照表）。
 
 ## 主色 / 次要的边界（硬规则）
 
@@ -46,9 +49,19 @@ description: 从一份现成配色（vim colorscheme / tmTheme plist / codex 主
 | `syntaxPunctuation` | 标点 | `#ffffff` |
 
 **其余 37 个槽位 —— 一律照搬 1337，逐字节相同，不得另配：**
-`borderMuted` `muted` `dim` `text` `thinkingText`、`scrollbarTrack` `scrollbarThumb`、`searchMatchBg` `searchMatchText`、`userMessageBg` `userMessageText`、`customMessageBg` `customMessageText` `customMessageLabel`、`toolPendingBg` `toolSuccessBg` `toolErrorBg`、`toolOutput` `bashOutput`、`mdLinkUrl` `mdCodeBlock` `mdCodeBlockBorder` `mdQuote` `mdQuoteBorder` `mdHr`、`toolDiffAdded` `toolDiffRemoved` `toolDiffContext` `toolDiffAddedBg` `toolDiffRemovedBg`、`thinkingOff` `thinkingMinimal` `thinkingLow` `thinkingMedium` `thinkingHigh` `thinkingXhigh` `thinkingMax`、`export` 三项。
+`borderMuted` `muted` `dim` `text` `thinkingText`、`scrollbarTrack` `scrollbarThumb`、`searchMatchBg` `searchMatchText`、`userMessageBg` `userMessageText`、`customMessageBg` `customMessageText` `customMessageLabel`、`toolPendingBg` `toolSuccessBg` `toolErrorBg`、`toolOutput`、`mdLinkUrl` `mdCodeBlock` `mdCodeBlockBorder` `mdQuote` `mdQuoteBorder` `mdHr`、`toolDiffAdded` `toolDiffRemoved` `toolDiffContext`、`thinkingOff` `thinkingMinimal` `thinkingLow` `thinkingMedium` `thinkingHigh` `thinkingXhigh` `thinkingMax`、`export` 三项，以及**扩展自用的四个 `vars`**（见下段）。
 
-用户点名过的次要槽位，别再去动它们：**diff 的新增/删除前景与背景**（`toolDiffAdded` `#8bc391` / `toolDiffRemoved` `#e27878` / `toolDiffAddedBg` `#1c241b` / `toolDiffRemovedBg` `#2e1c21`）与**思考档 xhigh / max**（`thinkingXhigh` `thinkingMax` `#696969`）。`bashOutput` 只有 1337 和 ayu 定义，属于次要，照搬。
+用户点名过的次要槽位，别再去动它们：**diff 的新增/删除前景**（`toolDiffAdded` `#8bc391` / `toolDiffRemoved` `#e27878`）与**思考档 xhigh / max**（`thinkingXhigh` `thinkingMax` `#696969`）。
+
+**扩展自用的四个色只写在 `vars` 里，不写 `colors`**（pi 1.2.0 起主题 schema 严格化，`colors` 里多一个 key 会让**整份皮肤作废**、回退 `system` 主题）：
+
+| `vars` 名 | 值（跟 1337） | 谁在读 |
+| --- | --- | --- |
+| `bashOutput` | `#999999` | bash 输出正文的独立灰（`bash-command-collapse.ts`） |
+| `addedLine` | `#1c241b` | diff 新增行整行底色（`tool-diff.ts`） |
+| `removedLine` | `#2e1c21` | diff 删除行整行底色（`tool-diff.ts`） |
+
+（历史命名：另两套皮肤用 `diffAddedBg` / `diffRemovedBg` 作变量名，扩展两个名字都查，所以新皮肤跟 1337 用 `addedLine` / `removedLine` 即可。）
 
 ## 两条最容易违反的规则
 
@@ -98,7 +111,10 @@ description: 从一份现成配色（vim colorscheme / tmTheme plist / codex 主
 
 - **输出路径**：默认 `~/.pi/agent/themes/<name>.json`（pi 全局主题目录；项目用 `.pi/themes/`，包内是 `themes/`）。**目标文件已存在就先问，不覆盖**。
 - `name` 字段**必须等于文件名**（`loadThemeJson()` 拼 `${name}.json` 找文件）；换名要同时改文件名与 `name`。
-- `colors` 的**键集合与顺序照抄 1337**（59 项，含 `bashOutput` 这类非官方 token），只改值。
+- `colors` 的**键集合与顺序照抄 1337**（56 项，全是 pi 官方 token），只改值。
+- 扩展自用的色（`bashOutput` / `addedLine` / `removedLine`）**只能进 `vars`**，不得写回 `colors`：
+  pi 1.2.0 的严格 schema 会把它们算成非法键，**整份皮肤连同所有主色一起失效**（回退 `system` 主题），
+  启动时打印 `Invalid theme … /colors/bashOutput: schema is false`。
 - 所有色值走 `vars`：`colors` 里不出现 `#` 字面量。空串 `""` 是合法值，意思是"终端默认色"，不是未定义。
 - 不写整数：`bgAnsi()` 对整数发 `48;5;N`（256 色索引），在 truecolor 皮肤里会脏。
 - `export` 段照抄 1337（`pageBg` / `cardBg` / `infoBg`）。
@@ -106,7 +122,9 @@ description: 从一份现成配色（vim colorscheme / tmTheme plist / codex 主
 
 ## 验证（必做）
 
-pi 的主题加载是**静默失败**的：`vars` 悬空引用抛 `Variable reference not found` 后整份回退内置 `dark`，不报错；`toolDiffAddedBg` 这类 token 拼错也静默无效。所以必须用 pi 自己的加载器验，别只看 JSON 语法。
+pi 的主题加载是**静默失败**的：`vars` 悬空引用抛 `Variable reference not found` 后整份回退内置 `dark`，不报错；扩展自用色（`bashOutput` / `addedLine` / `removedLine`）变量名写错也只是静默走兑底、颜色悄悄回退。所以必须用 pi 自己的加载器验，别只看 JSON 语法。
+
+> **1.2.0 起校验器位置变了**：`validateThemeJson` 从 `…/theme/theme-json.js` 搬到了 `…/theme/theme-schema.js`（旧路径已不存在）。下面的脚本两个都试。
 
 ```bash
 # pi 全局安装根（本机是 pnpm 全局包；shim 末行带 cmd-shim-target）
@@ -115,7 +133,8 @@ mkdir -p /tmp/theme-check && cat > /tmp/theme-check/check.mjs <<'EOF'
 const R = process.env.PI_ROOT;
 const fs = await import("node:fs");
 const { loadThemeFromPath } = await import(`${R}/dist/modes/interactive/theme/theme.js`);
-const { validateThemeJson } = await import(`${R}/dist/modes/interactive/theme/theme-json.js`);
+const { validateThemeJson } = await import(`${R}/dist/modes/interactive/theme/theme-json.js`).catch(
+  () => import(`${R}/dist/modes/interactive/theme/theme-schema.js`));
 const [BASE, CAND] = process.argv.slice(2);
 const BG = new Set(["selectedBg","searchMatchBg","userMessageBg","customMessageBg","toolPendingBg","toolSuccessBg","toolErrorBg"]);
 const PRIMARY = new Set(["accent","borderAccent","border","selectedBg","success","error","warning","toolTitle",
@@ -162,7 +181,8 @@ PI_ROOT=$PI_ROOT node /tmp/theme-check/check.mjs <1337 绝对路径> <新主题�
 | --- | --- |
 | 用变量名判断"次要槽位没变" | 变量名相同不等于值相同；改共享变量会让次要槽位跟着变。只认解析后的值 |
 | 改了 1337 已有变量的值 | 会连带改掉引用它的全部槽位。新值一律新变量名 |
-| 以为 schema 会拦住拼错的 token | TypeBox 编译路径放行未知键（`additionalProperties: false` 不在执行路径上），拼错静默无效 |
+| 把扩展自用色写回 `colors` | pi 1.2.0 的严格 schema 会判整份皮肤非法（不再只是“拼错静默无效”），启动报 `Invalid theme … schema is false` 并回退 `system` 主题 |
+| 以为 schema 会拦住拼错的 token | 1.1.0 及以前 TypeBox 编译路径放行未知键；1.2.0 反过来 —— 未知键直接让整份皮肤失效 |
 | 只跑 `truecolor` | `256color` 下的量化和变量解析是另一条路，两个都要跑 |
 | `name` 与文件名不一致 | 选择器显示旧名，或 `settings.json` 的 `theme` 落空 |
 | 深色直接搬进主色 | `#191919` 上会糊；按对比度换同义更亮色并写明 |

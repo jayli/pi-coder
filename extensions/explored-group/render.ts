@@ -4,17 +4,31 @@
  * 目标形态（用户 2026-10-06 定，第四轮修订后）：
  *
  *     • Explored
- *       └ Search "bashOutput" in clients/pi
+ *       └ **Search** "bashOutput" in clients/pi              ← 加粗 = 原生 grep / find / ls
  *         **Read** …/ttt/CLAUDE.md, …/ttt/package.json      ← 加粗 = 原生 read 工具
  *         Read …/bg-tasks/bg_3.log                          ← 不加粗 = bash（cat/tail）
+ *         Search "…" in …                                   ← 不加粗 = bash（grep / rg）
+ *         List …                                            ← 不加粗 = bash（ls / fd）
  *
- * ## 加粗 = 原生 `read` 工具（用户 2026-10-06 定）
+ * ## 加粗 = 原生 **pi 工具**（用户 2026-10-06 定 `Read`，2026-10-07 扩到 grep / find / ls）
  *
- * `cat f` 与原生 `read({path: f})` 的短语都是 `Read f`，屏幕上分不出来 —— 而它们是
- * 完全不同的两件事。所以**只有原生 `read` 工具**那一行的动词 `Read` 加粗；bash 转义出来的
- * Read（`cat` / `sed -n` / `head` / `tail` …）**不加粗**。
+ * `cat f` 与原生 `read({path: f})` 的短语都是 `Read f`；`grep -rn x` 与原生
+ * `grep({pattern: "x"})` 都是 `Search "x" …` —— 屏幕上分不出来，而它们是两件不同的事
+ *（一个是模型按结构化参数调的 pi 只读工具，一个是它自己拼出来的一条 shell）。所以**原生工具
+ *调用**那一行的动词加粗，bash 折叠出来的 Read / Search / Find / List **不加粗**。
+ * 一句话：**加粗 = 原生 pi 工具，不加粗 = Bash 工具的折叠形态**。
  *
- * **只加粗 `Read` 这一个词**，其后的路径 / 行号区间一律不带粗体。
+ * 四个动词由**工具名**决定（不是类别）：`read` → `Read`、`grep` → `Search`、`find` → `Find`、
+ * `ls` → `List`；bash 里跑的 grep 类别同为 `search`，但工具名是 `bash`，所以不加粗。
+ * 见 `nativeVerbFor`。
+ *
+ * **只加粗行首这一个词**，其后的路径 / 模式 / 行号区间一律不带粗体。
+ *
+ * ## `Search` 句子里连接词 `in` 用 `dim`（用户 2026-10-07 定）
+ *
+ * `Search "pattern" in scope` 里只有 `in` 是虚词 —— 压暗它，模式与范围两个实词就跳出来了。
+ * 这是**句子层面**的排版，与来源无关：bash 折叠出来的 Search 同样适用（它只是动词不加粗）。
+ * `Find … in …` 暂不加（用户点名的只有 Search）。
  *
  * 这条标记靠 `buildEntries` 的一条硬约束成立：**连续 read 合并时按来源切段** ——
  * 来源一变（原生↔bash）就另起一行，所以**同一行里不可能两种来源混居**，
@@ -115,21 +129,43 @@ interface RowEntry {
 	/** 该条目是否为 read 合并行（决定换行时是否重画 `Read ` 动词）。 */
 	isRead: boolean;
 	/**
-	 * 该条目对应的成员是不是**原生 `read` 工具** —— 是的话 `Read` 这个词加粗。
+	 * 该条目来自**原生 pi 工具**时，行首那个要加粗的动词（`Read` / `Search` / `Find` / `List`）；
+	 * bash 折叠出来的条目是 `null`（见文件头「加粗 = 原生 pi 工具」）。
 	 *
-	 * 按**该行自己的来源**算：连续 read 合并时来源一变就另起一行（见 `buildEntries`），
+	 * read 那一支按**该行自己的来源**算：连续 read 合并时来源一变就另起一行（见 `buildEntries`），
 	 * 所以同一行里只会有一种来源，用第一个成员的 `toolName` 判定就够。
 	 */
-	boldRead: boolean;
+	boldVerb: string | null;
 }
 
 /** 折行后的最终行。 */
 interface OutputRow {
 	text: string;
-	/** 行首的 `Read ` 是原生工具的动词 → 只把它加粗（路径不加粗）。 */
-	boldRead: boolean;
+	/** 行首动词是原生工具的动词 → 只把它加粗（其后的路径 / 模式不加粗）。 */
+	boldVerb: string | null;
 	/** 来自 read 条目（原生或 bash）→ 行号区间要上色（见 `paintReadSpans`）。 */
 	isRead: boolean;
+}
+
+/**
+ * 原生 pi 只读工具 → 它那一行行首要加粗的动词；bash 与其它工具一律 `null`。
+ *
+ * 只认**工具名**，不认类别：bash 里跑的 `grep` / `ls` / `find` 折叠后类别与原生一致
+ *（search / list），但它们是模型自己拼的 shell，不该与原生调用长得一样。
+ */
+export function nativeVerbFor(toolName: string): string | null {
+	switch (toolName) {
+		case "read":
+			return "Read";
+		case "grep":
+			return "Search";
+		case "find":
+			return "Find";
+		case "ls":
+			return "List";
+		default:
+			return null;
+	}
 }
 
 function buildEntries(group: Group, cwd: string | undefined): RowEntry[] {
@@ -138,7 +174,7 @@ function buildEntries(group: Group, cwd: string | undefined): RowEntry[] {
 	let readsAreNative = false;
 	const flush = () => {
 		if (reads.length === 0) return;
-		entries.push({ text: `Read ${reads.join(JOINER)}`, isRead: true, boldRead: readsAreNative });
+		entries.push({ text: `Read ${reads.join(JOINER)}`, isRead: true, boldVerb: readsAreNative ? "Read" : null });
 		reads = [];
 		readsAreNative = false;
 	};
@@ -157,7 +193,7 @@ function buildEntries(group: Group, cwd: string | undefined): RowEntry[] {
 			continue;
 		}
 		flush();
-		entries.push({ text: labelFor(member, cwd), isRead: false, boldRead: false });
+		entries.push({ text: labelFor(member, cwd), isRead: false, boldVerb: nativeVerbFor(member.toolName) });
 	}
 	flush();
 	return entries;
@@ -197,7 +233,10 @@ function layoutRows(entries: RowEntry[], budget: number): OutputRow[] {
 	const rows: OutputRow[] = [];
 	for (const entry of entries) {
 		if (!entry.isRead) {
-			for (const text of hardWrap(entry.text, budget)) rows.push({ text, boldRead: false, isRead: false });
+			// 折行后只有**第一行**还带着那个动词，续行没有词可加粗（与 read 的 `prefixed` 同义）
+			hardWrap(entry.text, budget).forEach((text, index) => {
+				rows.push({ text, boldVerb: index === 0 ? entry.boldVerb : null, isRead: false });
+			});
 			continue;
 		}
 		// 每个文件先各自硬折（区间由 `wrapReadPiece` 整体保留），再逐块贴上首/续标记。
@@ -216,7 +255,7 @@ function layoutRows(entries: RowEntry[], budget: number): OutputRow[] {
 			if (current === "") return;
 			rows.push({
 				text: prefixed ? `Read ${current}` : current,
-				boldRead: prefixed && entry.boldRead,
+				boldVerb: prefixed ? entry.boldVerb : null,
 				isRead: true,
 			});
 			current = "";
@@ -329,17 +368,35 @@ function paintReadSpans(text: string, theme: any): string {
 }
 
 /**
- * 把一行拼成最终文本：`Read` 是原生工具动词时**只把这两个词**加粗（用户 2026-10-06 定），
- * 路径不加粗；行号区间按上面 `paintReadSpans` 的口径上色（原生与 bash 的 Read 一视同仁）。
+ * `Search "<pattern>" in <scope>` 里的连接词 —— 用 `dim` 压暗（用户 2026-10-07 定）。
+ *
+ * 贪婪匹配 `"…"`，所以模式里自带 ` in `（`Search "foo in bar" in src`）不会认错分隔符；
+ * 折行恰好断在 `in` 里（`… i` / `n …`）时匹配不上，就当普通文本 —— 与行号区间折行同一口径，
+ * 宁可不处理也不猜位置。宽度不受影响：ANSI 只在 `paintRow` 里加（见 `layoutRows` 的注释）。
+ */
+const SEARCH_SEPARATOR = /^Search (.*") in (.*)$/;
+
+function paintSearchSeparator(text: string, theme: any): string {
+	const match = text.match(SEARCH_SEPARATOR);
+	if (!match) return text;
+	return `Search ${match[1]} ${theme.fg("dim", "in")} ${match[2]}`;
+}
+
+/**
+ * 把一行拼成最终文本：原生 pi 工具那一行**只把行首动词**加粗（用户 2026-10-06 定 `Read`，
+ * 2026-10-07 扩到 `Search` / `Find` / `List`），其后的路径 / 模式不加粗；行号区间按上面
+ * `paintReadSpans` 的口径上色（原生与 bash 的 Read 一视同仁）。
  *
  * 上色走 `theme.bold` / `theme.fg`；这里也是整块唯一上色的地方 ——
  * `layoutRows` 只传标志不拼 ANSI（理由见那边的注释）。
  */
 function paintRow(row: OutputRow, theme: any): string {
-	const text = row.isRead ? paintReadSpans(row.text, theme) : row.text;
-	if (!row.boldRead) return text;
-	// 只可能是行首那个 `Read `（`layoutRows` 只在 read 条目上置这个标志）
-	return `${theme.bold("Read")}${text.slice("Read".length)}`;
+	const withSpans = row.isRead ? paintReadSpans(row.text, theme) : row.text;
+	const text = paintSearchSeparator(withSpans, theme);
+	const verb = row.boldVerb;
+	// 动词必然在行首；对不上（短语生不出来而退回工具名的兜底行）就不加粗：宁可不加，不能加错
+	if (!verb || !text.startsWith(verb)) return text;
+	return `${theme.bold(verb)}${text.slice(verb.length)}`;
 }
 
 /**

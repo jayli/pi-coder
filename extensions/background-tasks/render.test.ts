@@ -13,7 +13,8 @@ import { describe, it } from "node:test";
 
 import {
 	BODY_INDENT,
-	BODY_TEXT_SLOTS,
+	BODY_TEXT_TOKEN,
+	BODY_TEXT_VAR,
 	GUTTER_WIDTH,
 	PREVIEW_MAX_LINES,
 	TREE_LAST,
@@ -124,13 +125,13 @@ describe("树前缀（└ 跟到最后一行）", () => {
 	});
 });
 
-describe("正文颜色槽（与 bash 工具调用后的输出同色）", () => {
-	it("第一个槽是 bashOutput：本机皮肤里 bash 输出正文走的扩展 token", () => {
-		assert.equal(BODY_TEXT_SLOTS[0], "bashOutput");
+describe("正文颜色（与 bash 工具调用后的输出同色）", () => {
+	it("第一优先级是皮肤 `vars.bashOutput`：pi 1.2.0 起自定义色只能写在 vars 里", () => {
+		assert.equal(BODY_TEXT_VAR, "bashOutput");
 	});
 
-	it("回退链第二个是 toolOutput：主题没定义 bashOutput 时的统一工具输出色", () => {
-		assert.deepEqual([...BODY_TEXT_SLOTS], ["bashOutput", "toolOutput"]);
+	it("回退是 toolOutput 这个官方槽位（皮肤没定义 bashOutput 时）", () => {
+		assert.equal(BODY_TEXT_TOKEN, "toolOutput");
 	});
 });
 

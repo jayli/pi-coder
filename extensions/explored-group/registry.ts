@@ -35,7 +35,7 @@
  *
  * 一个分组 = **不被打断的最长连续只读序列**（可跨 assistant 消息）。以下任一出现即封口：
  *
- *   - `thinking` 块
+ *   - **非空** `thinking` 块（空块不断，见 `thinkingText`）
  *   - assistant 的**非空** `text`（旁白）
  *   - `user` 消息
  *   - 任何**不可折叠**的 tool 调用（写 / 执行 / 其他工具）
@@ -423,9 +423,30 @@ export function noteToolCall(id: string, toolName: string, args: unknown): boole
  * 这条设计同时保住了另外一个性质：**登记顺序 == 内容顺序**（`renderCall` 与事件两条路
  * 都按同一序走），行序因此稳定。
  */
-/** 内容指纹：长度 + 最后一个块的 id（工具块）或其类型（thinking / text）。 */
+/**
+ * 内容指纹：长度 + 最后一个块的 id（工具块）或其类型（thinking / text）。
+ *
+ * thinking 块额外带上正文长度：一个**还没吐出第一个 delta** 的空 thinking 块会停在游标上
+ * 等下一次更新（见 `replayMessage` 的 thinking 分支）。指纹不含长度的话，那次「空 → 有字」
+ * 的更新跟上一帧一模一样，会被去重直接挡掉 —— 于是真 Think 到达时也不会断组，
+ * 分组反而吞掉一段看得见的推理。
+ */
 function contentKey(content: unknown[]): string {
-	return `${content.length}:${blockKey(content[content.length - 1])}`;
+	const last = content[content.length - 1] as { type?: string; thinking?: unknown } | undefined;
+	const thinkingSize = last?.type === "thinking" && typeof last.thinking === "string" ? `:${last.thinking.length}` : "";
+	return `${content.length}:${blockKey(last)}${thinkingSize}`;
+}
+
+/**
+ * thinking 块的正文。
+ *
+ * 真实消息里字段是 `thinking`（`{type:"thinking", thinking, thinkingSignature}`，pi-ai 的块形状）；
+ * 测试夹具历史上写的是 `text`，两种都收 —— 这里只用来判空，取错字段的后果是「该断的组没断」。
+ */
+function thinkingText(block: unknown): string {
+	const b = block as { thinking?: unknown; text?: unknown } | null | undefined;
+	const value = typeof b?.thinking === "string" ? b.thinking : b?.text;
+	return typeof value === "string" ? value : "";
 }
 
 /** 单个块的身份：工具块用 id，其余用类型。 */
@@ -460,6 +481,22 @@ export function replayMessage(message: unknown): number {
 		const block = msg.content[index] as { type?: string; name?: string; id?: string; arguments?: unknown; text?: string } | null;
 		if (!block) continue;
 		if (block.type === "thinking") {
+			// **空 thinking 块不断组**（2026-10-18）：`deepseek-flash` 走 DeepSeek 官方 anthropic
+			// 端点，开启 thinking 后**每一轮**都会开一个 thinking 块；没有推理时就是一个空块
+			//（实测该路由 583 条消息里 91 个空块，539 条工具轮 539/539 都带 thinking）。而 pi 对
+			// 「整段 thinking 全为空」一个组件都不画（`assistant-message.js` 的 `thinkingBlocks.length === 0`
+			// 直接 `continue`），于是这个看不见的块把组拆了 —— 用户看到的是「中间明明没有 Think，
+			// 相邻两个 Explored 却没合并」（2026-10-18 在 bachi-workspace 会话里复现：
+			// `read … limit:60` 那一轮的 thinking 是 0 字符）。口径与下面的 `text` 分支一致。
+			if (thinkingText(block).trim() === "") {
+				// 但**最后一块**可能只是还没吐出第一个 delta：pi 在 `content_block_start` 就把块塞进
+				// content（`thinking: ""`），文本随后才到一个 delta。这时停在它这里、**不把游标推过去**，
+				// 下一次更新带着文本回来再判 —— `contentKey` 含正文长度，那一帧不会被去重挡掉。
+				// 若它到结束都是空的（后面跟了别的块，或消息就此结束），游标最多落后一块，
+				// 下一帧重看一遍这个空块，无副作用。
+				if (index === msg.content.length - 1) break;
+				continue;
+			}
 			beginBreak();
 			continue;
 		}

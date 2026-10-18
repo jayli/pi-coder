@@ -37,6 +37,25 @@
  * `previewMoreLinesHint`），否则 `memory_read` 读一条长正文、或 `memory_read` 不带 name
  * 列出几十条记忆时会平铺满屏。展开态（ctrl+o，`expanded`）不裁，与 bash / 后台任务块一致。
  * 截断按**折行之后**的视觉行数算（与树前缀同口径）。
+ *
+ * ## `memory_read` 读一条：折叠态只到 `description`（用户 2026-10-17 定）
+ *
+ * 读一条记忆的结果文本是「`name` / `type` / `modified` / `description` 四行 + 空行 + 正文」，
+ * 4 行元信息本身在窄终端上还要折行，于是 10 行预算里正文只剩三五行 —— 屏幕上既看不到
+ * 多少正文，又挤掉了本该紧凑的块。所以折叠态改成**只画元信息头**（到 `description` 为止），
+ * 正文整段收起，末尾照旧挂一条 `… (N more lines, ctrl+o to expand)` 说明还有多少行。
+ * 展开态（ctrl+o）仍画全部：那里是唯一能看到正文的地方，一个字不裁。
+ *
+ * 只对「读一条」生效（`details.action === "read"`）。`memory_read` 不带 name 时的列表、
+ * `memory_search` 的多条命中块也各含空行，按第一条空行切头会把后面的命中整片藏起来，
+ * 所以它们维持老的 10 行平铺截断。
+ *
+ * ## 元信息头的字段名走语法关键字色（用户 2026-10-17 定）
+ *
+ * `name:` / `type:` / `modified:` / `description:` 这四个**字段名**用 `syntaxKeyword` 槽
+ * 渲染，冒号后的值仍是正文的 `text` 槽 —— 与 bash 命令行里选项的着色、`/theme` 预览里的
+ * 关键字同一支笔。判定在 `memoryMetaKeyLength`：只对头部的**源行首行**上色，因此折行出来
+ * 的续行不会被误认，正文里恰好以 `name:` 开头的行（比如讲 frontmatter 的记忆）也不受影响。
  */
 
 /** 树前缀：`│ ` = 还有下文，`└ ` = 末行。各自 2 列（box-drawing 字符 + 空格）。 */
@@ -140,6 +159,62 @@ export function memoryResultTreePrefixes(lineCount: number): string[] {
 		prefixes.push(index === lineCount - 1 ? TREE_LAST : TREE_PIPE);
 	}
 	return prefixes;
+}
+
+/**
+ * `memory_read` 读一条记忆时，结果文本的元信息头占几行源行（`name` / `type` / `modified` /
+ * `description`），即**第一个空行之前**的那几行。
+ *
+ * 返回 0 表示「没有可分离的头」，调用方按老的平铺截断处理：没有空行（`not_found` 之类
+ * 的单句结果）、头前面就是空行、或结果只有头没有正文（那时没有可收起的东西）。
+ * 注意这里数的是**源行**，折行后的视觉行数由 `memoryPreviewRows` 接。
+ */
+/**
+ * `memory_read` 元信息头的字段名（顺序即结果文本里的顺序）。
+ *
+ * 白名单而不是「任意 `xxx:` 前缀」：头是 `index.ts` 自己拼的、键集固定，限制成这四个可以
+ * 避免将来别的形态（检索命中块、正文）里同形的行被顺手着色。
+ */
+export const MEMORY_META_KEYS = ["name", "type", "modified", "description"] as const;
+
+const MEMORY_META_PREFIX = new RegExp(`^(${MEMORY_META_KEYS.join("|")}):`);
+
+/**
+ * 一行元信息源行的**字段名段长度**（`name:` → 5，即 key + 冒号），0 表示这行不是字段行。
+ *
+ * 返回的是**字符**数而非可见宽度：调用方只拿它切字符串（`slice`），切点之后上色交给主题；
+ * key 全是 ASCII，所以在这个键集上两者恰好相同。冒号后的空白不计进来 —— 让值的着色从
+ * 第一个非空白字符起，空格本来也没有字形。
+ */
+export function memoryMetaKeyLength(line: string): number {
+	const match = MEMORY_META_PREFIX.exec(line);
+	return match ? match[0].length : 0;
+}
+
+export function memoryReadHeaderLineCount(lines: readonly string[]): number {
+	const blank = lines.findIndex((line) => line.trim() === "");
+	if (blank <= 0) return 0;
+	return blank;
+}
+
+/**
+ * 折叠态的可见行预算（**视觉行**）：`headRows` 是被收起正文之前的头行数（0 表示不分离头）。
+ *
+ * - 头分离成立（`0 < headRows < totalRows`）→ 只留头，正文整段算作被裁；头自己就超过
+ *   上限（`description` 特别长）时仍按上限裁头。
+ * - 其余情况 → 老的平铺截断：最多 `maxRows` 行。
+ *
+ * 展开态不调用本函数（那里一行都不裁）。
+ */
+export function memoryPreviewRows(
+	totalRows: number,
+	headRows: number,
+	maxRows: number = PREVIEW_MAX_LINES,
+): { visibleRows: number; hiddenRows: number } {
+	if (totalRows <= 0) return { visibleRows: 0, hiddenRows: 0 };
+	const budget = headRows > 0 && headRows < totalRows ? Math.min(headRows, maxRows) : maxRows;
+	if (totalRows <= budget) return { visibleRows: totalRows, hiddenRows: 0 };
+	return { visibleRows: budget, hiddenRows: totalRows - budget };
 }
 
 /**

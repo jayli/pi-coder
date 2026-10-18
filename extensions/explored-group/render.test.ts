@@ -125,15 +125,20 @@ function renderBlockRaw(name: string, id: string, args: unknown, width = 100, ex
 	return lines;
 }
 
-/** 该行里 `Read` 这个词是不是粗体（只看动词，不看后续路径）。 */
-function readVerbIsBold(line: string): boolean {
+/** 该行里 `verb` 这个词是不是粗体（只看动词，不看后续路径 / 模式）。 */
+function verbIsBold(line: string, verb: string): boolean {
 	// 字形周围的粗体开关：pi 用 `\u001b[1m` … `\u001b[22m`（`theme.bold()` = chalk.bold）
-	const at = line.indexOf("Read");
+	const at = line.indexOf(verb);
 	if (at < 0) return false;
 	const before = line.slice(0, at);
 	const lastOn = before.lastIndexOf("\u001b[1m");
 	const lastOff = before.lastIndexOf("\u001b[22m");
 	return lastOn > lastOff;
+}
+
+/** 该行里 `Read` 这个词是不是粗体（只加粗动词，路径不加粗）。 */
+function readVerbIsBold(line: string): boolean {
+	return verbIsBold(line, "Read");
 }
 
 /**
@@ -352,6 +357,50 @@ test("断组：thinking 插在中间 → 两个独立 Explored 块", { skip }, (
 	assert.deepEqual(renderBlock("bash", "k1", BASH("grep -n a f1.ts")), ["• Explored", '  └ Search "a" in f1.ts']);
 	// k2 自己成了新组的组长 —— 两个块，各自一棵树
 	assert.deepEqual(renderBlock("bash", "k2", BASH("grep -n b f2.ts")), ["• Explored", '  └ Search "b" in f2.ts']);
+});
+
+test("断组：空 thinking 块不算 Think（deepseek-flash 每轮都带一个空 thinking 块）", { skip }, () => {
+	// 实测（2026-10-18）：`deepseek-flash` 走 DeepSeek 官方 anthropic 端点，开 thinking 后
+	// **每一轮**都开一个 thinking 块，没有推理时就是一个空块；而 pi 对「整段 thinking 全为空」
+	// 一个组件都不画（`assistant-message.js`），于是这个看不见的块把本该合并的连续探查拆成了
+	// 两个 Explored —— 用户看到的是「中间明明没有 Think 却没合并」。口径与空 text 一致：不断组。
+	reset();
+	replay([
+		{ type: "toolCall", id: "e1", name: "bash", arguments: BASH("grep -n a f1.ts") },
+		{ type: "thinking", text: "" },
+		{ type: "toolCall", id: "e2", name: "bash", arguments: BASH("grep -n b f2.ts") },
+	]);
+	assert.equal(registry!.groupOf("e2")?.leaderId, "e1", "空 thinking 不得断组");
+	assert.deepEqual(renderBlock("bash", "e1", BASH("grep -n a f1.ts")), [
+		"• Explored",
+		'  └ Search "a" in f1.ts',
+		'    Search "b" in f2.ts',
+	]);
+	// 真实消息里的字段是 `thinking`（夹具用的是 `text`），两种都要按「空」处理
+	reset();
+	replay([
+		{ type: "toolCall", id: "e3", name: "bash", arguments: BASH("grep -n a f1.ts") },
+		{ type: "thinking", thinking: "" },
+		{ type: "toolCall", id: "e4", name: "bash", arguments: BASH("grep -n b f2.ts") },
+	]);
+	assert.equal(registry!.groupOf("e4")?.leaderId, "e3", "真实 thinking 字段为空时同样不断组");
+});
+
+test("断组：thinking 块先空后来字 —— 真文本到达时必须补断（去重不得吞掉）", { skip }, () => {
+	// pi 在 `content_block_start` 就把 thinking 块塞进 content（`thinking: ""`），正文随后才到。
+	// 空块不断组 + 游标停在它身上 + 内容指纹带上正文长度，两者缺一不可：
+	//   - 拿空块断组 → 用户看到「没有 Think 却拆了组」（上一条用例守的就是这个）；
+	//   - 空块不断却不退回游标/不带长度 → 「空 → 有字」那一帧和上一帧指纹相同而被去重挡掉，
+	//     于是**看得见的 Think 也断不了组**，分组反而吞掉一段推理。
+	reset();
+	replay([{ type: "toolCall", id: "v1", name: "bash", arguments: BASH("grep -n a f1.ts") }]);
+	replayStreaming([{ type: "thinking", thinking: "" }]);
+	replayStreaming([{ type: "thinking", thinking: "hmm" }]);
+	replay([
+		{ type: "thinking", thinking: "hmm" },
+		{ type: "toolCall", id: "v2", name: "bash", arguments: BASH("grep -n b f2.ts") },
+	]);
+	assert.equal(registry!.groupOf("v2")?.leaderId, "v2", "非空 thinking 必须断组");
 });
 
 test("断组：旁白（非空 text）插在中间同样拆开", { skip }, () => {
@@ -608,6 +657,100 @@ test("标记：原生 read 的 `Read` 加粗，bash 转义的 Read 不加粗（�
 	assert.ok(!readVerbIsBold(bashRow), `bash 转义的 Read 不得加粗：${JSON.stringify(bashRow)}`);
 	// 两者去掉颜色后必须完全一致 —— 差别**只在**加粗这一个标记上
 	assert.equal(plain(singleNativeRow).trim(), plain(bashRow).trim());
+});
+
+test("标记：原生 grep / find / ls 的动词加粗，bash 转义的 Search / Find / List 不加粗", { skip }, () => {
+	// 用户 2026-10-07 定：**加粗 = 原生 pi 工具，不加粗 = Bash 工具折叠出来的形态**。
+	// 与 read 同一个道理 —— `grep -n a f1.ts` 与 `grep({pattern:"a", path:"f1.ts"})` 的短语
+	// 一模一样，屏幕上只能靠加粗分开。
+	const NATIVE = [
+		{ type: "toolCall", id: "g1", name: "grep", arguments: { pattern: "a", path: "f1.ts" } },
+		{ type: "toolCall", id: "F1", name: "find", arguments: { pattern: "*.ts", path: "src" } },
+		{ type: "toolCall", id: "L1", name: "ls", arguments: { path: "src" } },
+	];
+	reset();
+	replay(NATIVE);
+	const nativeLines = renderBlockRaw("grep", "g1", NATIVE[0]!.arguments);
+	assert.deepEqual(nativeLines.map(plain), [
+		"• Explored",
+		'  └ Search "a" in f1.ts',
+		"    Find *.ts in src",
+		"    List src",
+	]);
+	assert.ok(verbIsBold(nativeLines[1]!, "Search"), `原生 grep 的 Search 必须加粗：${JSON.stringify(nativeLines[1])}`);
+	assert.ok(verbIsBold(nativeLines[2]!, "Find"), `原生 find 的 Find 必须加粗：${JSON.stringify(nativeLines[2])}`);
+	assert.ok(verbIsBold(nativeLines[3]!, "List"), `原生 ls 的 List 必须加粗：${JSON.stringify(nativeLines[3])}`);
+	// **只加粗动词**：词后立刻关掉粗体，模式 / 路径不跟着变粗
+	for (const [row, verb] of [[nativeLines[1]!, "Search"], [nativeLines[2]!, "Find"], [nativeLines[3]!, "List"]] as const) {
+		const after = row.slice(row.indexOf(verb) + verb.length);
+		assert.ok(after.startsWith("\u001b[22m"), `粗体必须在 \`${verb}\` 之后立即关掉：${JSON.stringify(row)}`);
+		assert.ok(!after.includes("\u001b[1m"), `动词之后不得再开粗体：${JSON.stringify(row)}`);
+	}
+
+	// 同样三件事用 bash 做 —— 去掉颜色后逐字相同，只是不加粗
+	const BASHED = [
+		{ type: "toolCall", id: "c1", name: "bash", arguments: BASH("grep -n a f1.ts") },
+		{ type: "toolCall", id: "c2", name: "bash", arguments: BASH("find src -name '*.ts'") },
+		{ type: "toolCall", id: "c3", name: "bash", arguments: BASH("ls -la src") },
+	];
+	reset();
+	replay(BASHED);
+	const bashLines = renderBlockRaw("bash", "c1", BASHED[0]!.arguments);
+	assert.equal(verbIsBold(bashLines[1]!, "Search"), false, `bash 的 Search 不得加粗：${JSON.stringify(bashLines[1])}`);
+	assert.equal(verbIsBold(bashLines[2]!, "Find"), false, `bash 的 Find 不得加粗：${JSON.stringify(bashLines[2])}`);
+	assert.equal(verbIsBold(bashLines[3]!, "List"), false, `bash 的 List 不得加粗：${JSON.stringify(bashLines[3])}`);
+	// 差别**只在**加粗这一个标记上
+	assert.deepEqual(bashLines.map(plain), nativeLines.map(plain));
+});
+
+test("颜色：Search 行里的 `in` 用 dim（原生与 bash 折叠的 Search 都一样）", { skip }, () => {
+	// 用户 2026-10-07 定：`Search "pattern" in scope` 里只有 `in` 是虚词 —— 压暗它，
+	// 模式与范围两个实词就跳出来了。这是**句子层面**的排版，与来源无关（bash 版只是动词不加粗）。
+	pi!.initTheme("pi-coder-1337", false);
+	const DIM = "\u001b[38;2;109;109;109m"; // 1337 主题的 `dim` = vars.comment = #6d6d6d
+	const OFF = "\u001b[39m";
+
+	reset();
+	const args = { pattern: "auth", path: "proxy/" };
+	replay([{ type: "toolCall", id: "d1", name: "grep", arguments: args }]);
+	const line = renderBlockRaw("grep", "d1", args)[1]!;
+	assert.equal(plain(line), '  └ Search "auth" in proxy/');
+	assert.ok(line.includes(`${DIM}in${OFF}`), `原生 Search 的 in 应为 dim：${JSON.stringify(line)}`);
+	assert.equal(line.split(DIM).length - 1, 1, `dim 只该落在 \`in\` 一处：${JSON.stringify(line)}`);
+	assert.ok(verbIsBold(line, "Search"), `动词仍应加粗：${JSON.stringify(line)}`);
+
+	// bash 折叠出来的同一句话：`in` 一样是 dim，但动词不加粗
+	reset();
+	const cmd = BASH("grep -n auth proxy/");
+	replay([{ type: "toolCall", id: "d2", name: "bash", arguments: cmd }]);
+	const bashLine = renderBlockRaw("bash", "d2", cmd)[1]!;
+	assert.equal(plain(bashLine), '  └ Search "auth" in proxy/');
+	assert.ok(bashLine.includes(`${DIM}in${OFF}`), `bash 的 Search 同样该压暗 in：${JSON.stringify(bashLine)}`);
+	assert.equal(verbIsBold(bashLine, "Search"), false, `bash 的动词仍不加粗：${JSON.stringify(bashLine)}`);
+
+	// 模式里自带 ` in ` 时不认错分隔符（贪婪匹配最后一个 `" in `）
+	reset();
+	const tricky = { pattern: "foo in bar", path: "src" };
+	replay([{ type: "toolCall", id: "d3", name: "grep", arguments: tricky }]);
+	const trickyLine = renderBlockRaw("grep", "d3", tricky)[1]!;
+	assert.equal(plain(trickyLine), '  └ Search "foo in bar" in src');
+	assert.equal(trickyLine.split(DIM).length - 1, 1, `模式里的 in 不得被压暗：${JSON.stringify(trickyLine)}`);
+});
+
+test("标记：原生 Search 折行时只有第一行带动词，续行不加粗也不重画动词", { skip }, () => {
+	reset();
+	const args = {
+		pattern: "bashOutput",
+		path: "/Users/bachi/jaylli/litellm-any/clients/pi/extensions/explored-group/a-very-long-file-name-for-wrapping.ts",
+	};
+	replay([{ type: "toolCall", id: "w1", name: "grep", arguments: args }]);
+	const body = renderBlockRaw("grep", "w1", args, 60).slice(1);
+	assert.ok(body.length >= 2, `窄宽度下应折成多行：${JSON.stringify(body.map(plain))}`);
+	// search / list 条目**不重画动词**（与 read 的续行相反），所以整块只该有一行带加粗动词
+	assert.equal(body.filter((l) => verbIsBold(l, "Search")).length, 1, `只有第一行该带加粗动词：${JSON.stringify(body)}`);
+	for (const row of body.slice(1)) {
+		assert.ok(!plain(row).includes("Search"), `续行不得重画动词：${JSON.stringify(plain(row))}`);
+	}
 });
 
 test("回归：长文件名折行时，续行不重画 Read（用户 2026-10-07 报，width=79 实测）", { skip }, () => {

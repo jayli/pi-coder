@@ -19,13 +19,19 @@
  *   └ 日志：/…/bg_1.log
  * ```
  *
- * 终态通知（`✓ 后台任务 bg_1 结束` → 圆点顶格、对号移行末）：
+ * 终态通知（`✓ 后台任务 bg_1 结束` → 圆点顶格、对号移行末，标题改用英文
+ * `Background task bg_1 finished ✔` —— 用户 2026-10-17 定，与 dock 的 `running` / 结轮提示
+ * `Task is still running` / 表头同一种语言；正文那几行仍是中文通知原文）：
  *
  * ```
- * • 后台任务 bg_1 结束 ✔
+ * • Background task bg_1 finished ✔
  *   │ 后台任务 bg_1 已成功结束（exit 0），运行 5s。
- *   └ 完整日志：/…/bg_1.log
+ *   │ 完整日志：/…/bg_1.log
+ *   └ ┌──────┬────────────┬─────────┬──────┐
+ *     │ id   │ command    │ status  │ time │
  * ```
+ *
+ * （末尾那张任务总览表同时出现在 `run_in_background` 的结果块里 —— 用户 2026-10-18 定。）
  *
  * **标记只属于终态通知，且恒为 `✔`**（用户 2026-09-30 分三轮定下）：对号在这套界面语言里的
  * 意思是「任务跑完了」，而 `run_in_background` 成功恰恰意味着任务才刚开始；叉号对工具块
@@ -49,7 +55,7 @@
  * 左边界块与块才分得开），正文树前面挂 **2 列**缩进（`BODY_INDENT`），于是 `•` 在列 0、
  * `│` / `└` 在列 2、正文在列 4 —— `│` 正好落在 `run_in_background` 首字母 `r` 正下方。
  * 结构符 `│` / `└` 走 `muted` 槽且**自成一段 SGR**（不让后面正文的颜色透上来），正文走
- * **结果正文色**（`BODY_TEXT_SLOTS[0]` = `bashOutput`，主题没定义时退回 `toolOutput`；
+ * **结果正文色**（皮肤 `vars.bashOutput`，没定义时退回 `toolOutput` 槽；
  * 用户 2026-10-06 定：与 bash 工具调用后显示的输出结果同色，而不是 `text` 槽的 fg）。
  *
  * ## 预览截断（保留 pi 默认壳原有的行为）
@@ -73,22 +79,22 @@ export const BODY_INDENT = "  ";
 export const GUTTER_WIDTH = 2;
 
 /**
- * 正文正文用哪个颜色槽：**先 `bashOutput`，主题没定义时退回 `toolOutput`**。
+ * 正文色：**先看皮肤 `vars.bashOutput`，没有则用主题的 `toolOutput` 槽**。
  *
  * 用户 2026-10-06 定：后台任务（工具块与终态通知）的正文要**与 bash 工具调用后显示的
- * 输出结果同色**。那个颜色是扩展 token `bashOutput`（`bash-command-collapse.ts` 在委托
- * 内置 bash 渲染器的同步窗口里把 `toolOutput` 临时指向它）—— 本机两套皮肤下它都比 `text`
- * 暗（pi-coder-1337 `#999999` vs `#f8f8f2`），是「输出」而非「要逐字读的正文」的语义。
+ * 输出结果同色**。那个颜色是扩展自造的（本机四套皮肤下它都比 `text` 暗 —— pi-coder-1337
+ * `#999999` vs `#f8f8f2`，是「输出」而非「要逐字读的正文」的语义）。
  *
- * 回退的意义：pi 官方 schema 里没有 `bashOutput`（与 `toolDiffAddedBg` 那两个同一条路：
- * TypeBox 校验对未知 key 放行、`createTheme()` 把它们收进前景表），内置 dark / light 与
- * pi-coder-catppuccin 都没定义它，此时 pi 的 `theme.fg()`/`getFgAnsi()` 会抛
- * `Unknown theme color: bashOutput`。所以取色 MUST 加 try/catch，落到所有工具输出共用的
- * `toolOutput` —— 那些皮肤下 bash 输出本色也是 `toolOutput`，两边自动同色。
+ * 它以前是皮肤 `colors` 里的自定义 key（pi ≤ 1.1.0 对未知 key 放行），**pi 1.2.0 的 strict
+ * schema 把那条路断了**（多一个 key 整份皮肤作废、回退 system）—— 现在写在皮肤文件的
+ * `vars` 里，由 `../theme-extra/colors.ts` 读出来转成转义串（`index.ts` 的 `pickBodySlot`）。
  *
- * 顺序即优先级；`pickBodyColor` 断言第一个能取到 ANSI 的槽。
+ * 回退的意义：内置 dark / light 与 pi-coder-catppuccin 都没这个色，那时用所有工具输出共用的
+ * `toolOutput` —— 那些皮肤下 bash 输出本色也是它，两边自动同色。
  */
-export const BODY_TEXT_SLOTS = ["bashOutput", "toolOutput"] as const;
+export const BODY_TEXT_VAR = "bashOutput";
+/** 第一优先级取不到时用的**官方槽位名**（走 `theme.fg()`）。 */
+export const BODY_TEXT_TOKEN = "toolOutput" as const;
 
 /**
  * 非展开态下正文最多渲染的**视觉行**数（与 pi 默认壳的 `FALLBACK_PREVIEW_LINES` 同值，
@@ -212,12 +218,16 @@ export function bgNotificationTitleParts(outcome: BgToolOutcome): BgNotification
  * 0 行返回空数组（调用方据此不画正文），1 行返回 `["└ "]`（只有一行时它就是末行）。
  * 传入的行数是**折行 + 预览截断之后**的视觉行数 —— 折行碎片与截断提示行各算独立行，
  * 否则一个折成三行的长句会在第一片就画上 `└`，看起来像树提前结束了。
+ *
+ * `closeLast = false` 用于「这块正文后面还跟着别的东西」（`run_in_background` 与终态通知的任务
+ * 总览表，见 `table.ts`）：此时**每一行都挂 `│ `**，树的收口交给后面那个子块的首行
+ * （表格顶边框就是 `└ ┌──…`）。用户 2026-10-16 选的正是这个形态。
  */
-export function bgResultTreePrefixes(lineCount: number): string[] {
+export function bgResultTreePrefixes(lineCount: number, closeLast = true): string[] {
 	if (lineCount <= 0) return [];
 	const prefixes: string[] = [];
 	for (let index = 0; index < lineCount; index += 1) {
-		prefixes.push(index === lineCount - 1 ? TREE_LAST : TREE_PIPE);
+		prefixes.push(closeLast && index === lineCount - 1 ? TREE_LAST : TREE_PIPE);
 	}
 	return prefixes;
 }

@@ -1,5 +1,5 @@
 {
-  "$schema": "https://raw.githubusercontent.com/earendil-works/pi/main/packages/coding-agent/src/modes/interactive/theme/theme-schema.json",
+  "$schema": "https://pi.dev/schemas/theme.schema.json",
   "name": "pi-coder-catppuccin",
   "vars": {
     "mauve": "#CBA6F7",
@@ -70,8 +70,6 @@
     "toolDiffAdded": "green",
     "toolDiffRemoved": "red",
     "toolDiffContext": "subtext1",
-    "toolDiffAddedBg": "diffAddedBg",
-    "toolDiffRemovedBg": "diffRemovedBg",
     "syntaxComment": "subtext0",
     "syntaxKeyword": "mauve",
     "syntaxFunction": "sky",

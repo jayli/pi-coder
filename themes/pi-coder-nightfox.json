@@ -1,5 +1,5 @@
 {
-  "$schema": "https://raw.githubusercontent.com/earendil-works/pi/main/packages/coding-agent/src/modes/interactive/theme/theme-schema.json",
+  "$schema": "https://pi.dev/schemas/theme.schema.json",
   "name": "pi-coder-nightfox",
   "vars": {
     "bg": "#191919",
@@ -75,7 +75,6 @@
     "toolErrorBg": "errorCard",
     "toolTitle": "nfToolTitle",
     "toolOutput": "softFg",
-    "bashOutput": "bashOutput",
     "mdHeading": "nfMdHeading",
     "mdLink": "nfMdLink",
     "mdLinkUrl": "comment",
@@ -89,8 +88,6 @@
     "toolDiffAdded": "addedGreen",
     "toolDiffRemoved": "removedRed",
     "toolDiffContext": "softFg",
-    "toolDiffAddedBg": "addedLine",
-    "toolDiffRemovedBg": "removedLine",
     "syntaxComment": "nfSyntaxComment",
     "syntaxKeyword": "nfSyntaxKeyword",
     "syntaxFunction": "nfSyntaxFunction",

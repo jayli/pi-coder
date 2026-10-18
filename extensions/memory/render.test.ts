@@ -14,10 +14,14 @@ import { describe, it } from "node:test";
 import {
 	BODY_INDENT,
 	GUTTER_WIDTH,
+	MEMORY_META_KEYS,
 	PREVIEW_MAX_LINES,
 	TREE_LAST,
 	TREE_PIPE,
 	classifyMemoryToolOutcome,
+	memoryMetaKeyLength,
+	memoryPreviewRows,
+	memoryReadHeaderLineCount,
 	memoryResultTreePrefixes,
 	memoryToolTitleParts,
 	previewMoreLinesHint,
@@ -87,6 +91,55 @@ describe("几何常量（与 plan / 后台任务块同一张表）", () => {
 		assert.equal(GUTTER_WIDTH, 2, "树形 gutter 2 列（box-drawing 字符 + 空格）");
 		assert.equal(TREE_PIPE, "│ ");
 		assert.equal(TREE_LAST, "└ ");
+	});
+});
+
+describe("元信息字段名着色段（syntaxKeyword）", () => {
+	it("白名单就是结果头的那四个字段（顺序即渲染顺序）", () => {
+		assert.deepEqual([...MEMORY_META_KEYS], ["name", "type", "modified", "description"]);
+	});
+
+	it("四个字段名返回 key + 冒号的长度", () => {
+		assert.equal(memoryMetaKeyLength("name: one"), 5);
+		assert.equal(memoryMetaKeyLength("type: project"), 5);
+		assert.equal(memoryMetaKeyLength("modified: 2026-10-17T14:57:46.888Z"), 9);
+		assert.equal(memoryMetaKeyLength("description: 一句话说明"), 12);
+	});
+
+	it("非字段行返回 0（正文 / 单句结果 / 缩进过的同形行）", () => {
+		assert.equal(memoryMetaKeyLength("body line 1"), 0);
+		assert.equal(memoryMetaKeyLength('No memory named "x".'), 0);
+		assert.equal(memoryMetaKeyLength(""), 0);
+		assert.equal(memoryMetaKeyLength("  name: indented"), 0, "行首必须是字段名");
+		assert.equal(memoryMetaKeyLength("name = one"), 0, "必须是冒号");
+		assert.equal(memoryMetaKeyLength("names: one"), 0, "白名单整词匹配，不是前缀");
+		assert.equal(memoryMetaKeyLength("**Why:** 原因"), 0, "正文里别的同形行不入选");
+	});
+});
+
+describe("折叠态预览预算（读一条只到 description）", () => {
+	it("头行数 = 第一个空行之前的源行数", () => {
+		assert.equal(memoryReadHeaderLineCount(["name: x", "type: user", "modified: t", "description: d", "", "body"]), 4);
+		assert.equal(memoryReadHeaderLineCount(["name: x", "", "body"]), 1);
+	});
+
+	it("没有可分离的头 → 0（无空行 / 头前就是空行）", () => {
+		assert.equal(memoryReadHeaderLineCount(['No memory named "x".']), 0, "单句结果没有空行");
+		assert.equal(memoryReadHeaderLineCount(["", "name: x"]), 0, "第一个空行就在开头");
+		assert.equal(memoryReadHeaderLineCount(["name: x", "type: user", ""]), 2, "只有头没正文时仍返回头行数，由 preview 判断不裁");
+		assert.equal(memoryReadHeaderLineCount([]), 0);
+	});
+
+	it("头分离成立：预算 = 头行数，正文全算被裁", () => {
+		assert.deepEqual(memoryPreviewRows(12, 4), { visibleRows: 4, hiddenRows: 8 });
+		assert.deepEqual(memoryPreviewRows(12, 11), { visibleRows: 10, hiddenRows: 2 }, "头自己超上限时按上限裁头");
+	});
+
+	it("头分离不成立（headRows 为 0 / 等于总行数）：退回平铺口径", () => {
+		assert.deepEqual(memoryPreviewRows(12, 0), { visibleRows: 10, hiddenRows: 2 });
+		assert.deepEqual(memoryPreviewRows(3, 3), { visibleRows: 3, hiddenRows: 0 }, "只有头没正文：不裁、不出提示行");
+		assert.deepEqual(memoryPreviewRows(3, 0), { visibleRows: 3, hiddenRows: 0 });
+		assert.deepEqual(memoryPreviewRows(0, 0), { visibleRows: 0, hiddenRows: 0 });
 	});
 });
 

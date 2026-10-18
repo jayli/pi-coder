@@ -178,9 +178,37 @@
  *     结束时长不会与 spinner 最后一帧对不上。
  *   - 只认正常完成：结局在 `agent_before_settle` 记下（`agent_settled` 不带载荷），`aborted` /
  *     `error` 不画 —— ESC 打断保持现状，spinner 直接消失。
+ *   - **还有子代理在跑就不画**（用户 2026-10-08 要求，见下）。
  *   - 清理：`agent_start`（下一回合把位置让回给 spinner）、`session_shutdown`；会话替换时
  *     pi 的 `resetExtensionUI()` 也会清掉扩展 widget。
  *   - 开关 `PI_TURN_MARKER=off`。
+ *
+ * ## 为什么有子代理在跑时不画结束符（`subagentsBusy`）
+ *
+ * 病根：异步子代理是**脱离回合**的 —— `subagent({ async: true })` 发出去主回合就结束，
+ * 子代理还在后台跑几分钟，结果由被唤醒的**后续回合**带回。而 `agent_settled` 只看
+ * `outcome === "completed"`，于是主回合结束时照样画一行「✻ … · done 8:04 AM」，
+ * 它恰好紧贴在 pi-subagents 的 `async subagent · background` 块下面 —— 用户原文：
+ * 「我希望当有 subagent 进行的时候不要输出这个结束标记，因为还有 subagent 进行中」。
+ * 结束符断言的语义是「这一轮真做完了」，而那一刻并没有。
+ *
+ * 判据走**仓库里现成的探测**：`recap/subagents.ts` 的 `hasActiveSubagentWork(pi.events)`
+ * —— pi-subagents 的进程内事件总线 RPC（`subagents:rpc:v1:request` 的 `status` 方法 →
+ * `fleet.totalActive`，前台 / 异步 / 排队都算），`verify-loop` 已经这么用了。不新增文件、
+ * 不 import pi-subagents 的任何文件（它是独立安装的 npm 包，也可能压根没装）。
+ *
+ * 两条规则（用户 2026-10-08 选）：
+ *   - 探到有活 → 不画。子代理唤醒的那一轮结束时（若真跑完了）会画自己的结束符，语义
+ *     正好落回「这轮真做完了」。
+ *   - 探不到答案（没装 pi-subagents / 协议不认识 / 超时 / 抛异常）→ 当作没有，照常画
+ *     （fail-open，recap 的既定口径）。
+ *
+ * 代价：每个正常完成的回合多一次进程内 RPC。装了 pi-subagents 是毫秒级；没装的机器要
+ * 等一次超时 —— pi 的 `EventBus` 只暴露 `emit`/`on`/`clear`（`dist/core/event-bus.js`），
+ * **没有 listenerCount**，无法在「没对端」时零成本短路，所以超时值是这里唯一的成本旋钮
+ * （`PI_TURN_MARKER_PROBE_TIMEOUT_MS`，默认 300ms）。探测放在 completed 判断**之后**，
+ * 被打断 / 报错的回合一次都不问。
+ * 范围只算子代理：`run_in_background` 的后台 shell 仍照常出结束符（用户 2026-10-08 定）。
  */
 
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
@@ -206,10 +234,13 @@ import {
 } from "./spinner-frames.ts";
 import {
 	DEFAULT_TRIGGER_RATIO,
+	TARGET_WIDTH_RATIO,
 	buildSummaryRequestPrompt,
 	cleanSummaryText,
 	planSummaryRequest,
 } from "./summary-request.ts";
+import { buildContinuationSummaryPrompt, isContinuationPhrase } from "./summary-continuation.ts";
+import { hasActiveSubagentWork } from "../recap/subagents.ts";
 import {
 	TURN_MARKER_WIDGET_KEY,
 	formatEndClock,
@@ -262,6 +293,12 @@ const SUMMARY_ENABLED = (process.env.PI_WORKING_SUMMARY ?? "").toLowerCase() !==
  * `PI_WORKING_SUMMARY=off` 时整段摘要都不显示，自然也不用请求。
  */
 const SUMMARY_LLM_ENABLED = SUMMARY_ENABLED && (process.env.PI_WORKING_SUMMARY_LLM ?? "").toLowerCase() !== "off";
+/**
+ * 延续短语的摘要延续开关（`PI_WORKING_SUMMARY_CONTINUATION=off` 关掉，退回「短语原样显示」）。
+ * 依赖 LLM 摘要：关掉 `PI_WORKING_SUMMARY_LLM` 时这条路径自然也不存在。
+ */
+const SUMMARY_CONTINUATION_ENABLED =
+	SUMMARY_LLM_ENABLED && (process.env.PI_WORKING_SUMMARY_CONTINUATION ?? "").toLowerCase() !== "off";
 /**
  * 超过可用宽度的多少倍才请求摘要（`PI_WORKING_SUMMARY_TRIGGER`，默认 1）。
  * 1 = 只要放不下（哪怕只多一列）就请求；调大则先容忍截断：1.2 ≈ 截断丢掉近两成原文才压，
@@ -332,6 +369,20 @@ const TURN_MARKER_ENABLED = (process.env.PI_TURN_MARKER ?? "").toLowerCase() !==
  * （含行首 `✻`）一个色段，所以只有一个槽位。
  */
 const TURN_MARKER_COLOR = "dim";
+/**
+ * 结束符前那次「还有子代理在跑吗」探测的超时（`PI_TURN_MARKER_PROBE_TIMEOUT_MS`）。
+ *
+ * 装了 pi-subagents 时对端回的是内存快照、毫秒级就到，这个值只在**没装**的时候起作用：
+ * pi 的事件总线没有 listenerCount（见文件头），探不到对端时只能等满一次超时。300ms 够
+ * 拿到快照、又不至于让「多数回合」在这一格上有可感觉的停顿。测试用它把用例压快。
+ */
+export const DEFAULT_TURN_MARKER_PROBE_TIMEOUT_MS = 300;
+export const TURN_MARKER_PROBE_TIMEOUT_MS = (() => {
+	const raw = (process.env.PI_TURN_MARKER_PROBE_TIMEOUT_MS ?? "").trim();
+	if (raw === "") return DEFAULT_TURN_MARKER_PROBE_TIMEOUT_MS;
+	const value = Number(raw);
+	return Number.isFinite(value) && value > 0 ? value : DEFAULT_TURN_MARKER_PROBE_TIMEOUT_MS;
+})();
 /**
  * watchdog 提示开关（`PI_WORKING_INDICATOR_WATCHDOG=off` 关闭）。关掉后 spinner 在
  * watchdog 审查期间仍显示普通 Working，不做特殊提示。
@@ -471,15 +522,44 @@ function summaryRequestBudgetWidth(): number {
 	});
 }
 
-/** 从 assistant 响应里抽文本（只走了 thinking 的空回复会得到空串 → 放弃这次摘要）。 */
-function textFromAssistant(message: unknown): string {
-	const content = (message as { content?: unknown } | undefined)?.content;
+/** 从消息 content 里抽纯文本（string 或 text 块数组；其它块类型丢掉）。 */
+function textFromContent(content: unknown): string {
+	if (typeof content === "string") return content;
 	if (!Array.isArray(content)) return "";
 	return content
 		.filter((block) => (block as { type?: unknown; text?: unknown })?.type === "text")
 		.map((block) => (block as { text?: unknown }).text)
 		.filter((text): text is string => typeof text === "string")
 		.join("\n");
+}
+
+/** 从 assistant 响应里抽文本（只走了 thinking 的空回复会得到空串 → 放弃这次摘要）。 */
+function textFromAssistant(message: unknown): string {
+	return textFromContent((message as { content?: unknown } | undefined)?.content);
+}
+
+/**
+ * 从 session 分支里倒序取**上一条** user 文本消息（延续短语的上下文兜底，见 `input` 处理）。
+ * 时序上安全：`input` 事件在消息落盘之前触发（pi 的 `prompt()` 先跑 input handlers 再追加
+ * 消息），所以分支里最后一条 user 消息就是上一轮的，不会取到当前这条。工具结果是
+ * `toolResult` role，按 `role === "user"` 过滤天然排除。拿不到 / stale ctx 一律返回 null ——
+ * 上下文只是增强，缺了它退回现状（短语原样显示）。
+ */
+function previousUserPromptText(ctx: ExtensionContext): string | null {
+	try {
+		const branch = ctx.sessionManager?.getBranch?.() ?? [];
+		for (let index = branch.length - 1; index >= 0; index--) {
+			const entry = branch[index] as
+				| { type?: string; message?: { role?: string; content?: unknown } }
+				| undefined;
+			if (entry?.type !== "message" || entry.message?.role !== "user") continue;
+			const text = textFromContent(entry.message.content).trim();
+			if (text !== "") return text;
+		}
+	} catch {
+		// stale ctx / session manager 不可用：当没有上下文。
+	}
+	return null;
 }
 
 /** 读秒间隔。1s 足够 —— 显示精度就是秒，更密的 tick 只是白做渲染。 */
@@ -537,6 +617,12 @@ export default function (pi: ExtensionAPI) {
 	 * 一并清掉 —— 新提示词 / 回合结束 / 会话替换之后，那次重试已经没人要了。
 	 */
 	let summaryRetryTimer: ReturnType<typeof setTimeout> | null = null;
+	/**
+	 * 上一回合的模型摘要（`agent_settled` 时从 `promptSummaryText` 留存）。延续短语
+	 * （`继续` / `ok`）的摘要请求拿它当「上一任务」上下文 —— 它已经是浓缩的一句话，
+	 * 正是该携带的东西。`session_shutdown` 清掉：换会话后没有延续性可言。
+	 */
+	let lastTurnSummary: string | null = null;
 
 	/**
 	 * 按段类型分开的 token 估算计数器：宽字符（CJK，终端占 2 列）按 1 token 计，
@@ -948,6 +1034,20 @@ export default function (pi: ExtensionAPI) {
 		}
 	}
 
+	/**
+	 * 现在还有子代理在跑吗（探针细节见文件头）。
+	 *
+	 * 两层 fail-open：`hasActiveSubagentWork` 自己不抛（探不到就 false），这里再包一层
+	 * try/catch 兜住「事件总线本身坏了」—— 探测是结束符的修饰，不该因为它把回合收尾弄挂。
+	 */
+	async function subagentsBusy(): Promise<boolean> {
+		try {
+			return await hasActiveSubagentWork(pi.events, { timeoutMs: TURN_MARKER_PROBE_TIMEOUT_MS });
+		} catch {
+			return false;
+		}
+	}
+
 	/** 清掉结束符（下一回合开始；会话替换时 pi 的 `resetExtensionUI()` 也会清）。 */
 	function clearTurnMarker(ctx: ExtensionContext): void {
 		try {
@@ -1026,17 +1126,33 @@ export default function (pi: ExtensionAPI) {
 	 * 认出「已被取消」并放弃 —— 45s 超时虽然也 abort，但不碰 `summaryAbort`，所以那算
 	 * 失败、照常重试。
 	 */
-	function requestPromptSummary(ctx: ExtensionContext, prompt: string, seq: number, attempt = 0): void {
+	function requestPromptSummary(
+		ctx: ExtensionContext,
+		prompt: string,
+		seq: number,
+		attempt = 0,
+		continuationContext?: string,
+	): void {
 		if (ctx.mode !== "tui") return; // print / json / rpc 没有 working 行，白花请求。
 		const model = resolveSummaryModel(ctx);
 		if (model === undefined) return;
 
-		const plan = planSummaryRequest({
-			promptWidth: visibleWidth(prompt),
-			budgetWidth: summaryRequestBudgetWidth(),
-			triggerRatio: SUMMARY_TRIGGER_RATIO,
-		});
-		if (!plan.needed) return;
+		// 延续短语（`continuationContext` 非 undefined）宽度上放得下、但语义上值得压：
+		// 绕过宽度触发线，直接拿上一任务 + 短语去要一句融合后的标签。普通提示词仍走
+		// 「放不下才请求」的原判定。
+		let requestPromptText: string;
+		if (continuationContext !== undefined) {
+			const targetWidth = Math.max(1, Math.floor(summaryRequestBudgetWidth() * TARGET_WIDTH_RATIO));
+			requestPromptText = buildContinuationSummaryPrompt(prompt, continuationContext, targetWidth);
+		} else {
+			const plan = planSummaryRequest({
+				promptWidth: visibleWidth(prompt),
+				budgetWidth: summaryRequestBudgetWidth(),
+				triggerRatio: SUMMARY_TRIGGER_RATIO,
+			});
+			if (!plan.needed) return;
+			requestPromptText = buildSummaryRequestPrompt(prompt, plan.targetWidth);
+		}
 
 		const controller = new AbortController();
 		summaryAbort = controller;
@@ -1050,7 +1166,7 @@ export default function (pi: ExtensionAPI) {
 			if (seq !== promptSeq || promptText === null) return;
 			summaryRetryTimer = setTimeout(() => {
 				summaryRetryTimer = null;
-				requestPromptSummary(ctx, prompt, seq, attempt + 1);
+				requestPromptSummary(ctx, prompt, seq, attempt + 1, continuationContext);
 			}, SUMMARY_RETRY_DELAY_MS);
 			summaryRetryTimer.unref?.();
 		};
@@ -1066,7 +1182,7 @@ export default function (pi: ExtensionAPI) {
 						messages: [
 							{
 								role: "user",
-								content: [{ type: "text", text: buildSummaryRequestPrompt(prompt, plan.targetWidth) }],
+								content: [{ type: "text", text: requestPromptText }],
 								timestamp: Date.now(),
 							},
 						],
@@ -1116,7 +1232,16 @@ export default function (pi: ExtensionAPI) {
 		promptSummaryText = null;
 		promptText = SUMMARY_ENABLED ? flattenPrompt(event.text) : null;
 		if (SUMMARY_LLM_ENABLED && promptText !== null && promptText !== "") {
-			requestPromptSummary(ctx, promptText, promptSeq);
+			// 延续短语（`继续` / `ok` / `go ahead` …）单独看没有任务语义：带上上一任务的
+			// 上下文（上一回合的摘要优先，没有则退回分支里上一条 user 消息）让模型融合成
+			// 一句。上下文两者都拿不到时退回现状（短语原样显示，不发请求）。
+			const continuationContext =
+				SUMMARY_CONTINUATION_ENABLED && isContinuationPhrase(event.text)
+					? lastTurnSummary ?? previousUserPromptText(ctx)
+					: undefined;
+			if (continuationContext !== null) {
+				requestPromptSummary(ctx, promptText, promptSeq, 0, continuationContext);
+			}
 		}
 	});
 
@@ -1234,6 +1359,10 @@ export default function (pi: ExtensionAPI) {
 		const settledAt = Date.now();
 		const startedAt = turnStartedAt;
 		const completed = turnOutcome === "completed";
+		// 留存本回合的摘要给下一回合的延续短语用（`继续` 这类输入要带上「上一任务」才
+		// 有语义）。摘要没算成（短提示词 / 请求失败）就不动旧值 —— 宁可延续到更早的任务，
+		// 也不清空。回合被打断同样留存：下一句 `继续` 续的就是被打断的那件事。
+		if (promptSummaryText !== null) lastTurnSummary = promptSummaryText;
 		stopActivity();
 		turnStartedAt = null;
 		turnOutcome = null;
@@ -1249,6 +1378,14 @@ export default function (pi: ExtensionAPI) {
 		// 结束符：spinner 此刻已被 pi 清掉，原地留一行「跑了多久 · 几点结束」。
 		// 只认正常完成；`startedAt === null`（没见到 agent_start，比如中途重载）不画。
 		if (!TURN_MARKER_ENABLED || !completed || startedAt === null) return;
+		// 还有子代理在后台跑就不画（见文件头）：那行「done」此刻是假的，它正贴在
+		// pi-subagents 的 `async subagent` 块下面。探测放在上面两道判断之后，被
+		// 打断 / 报错的回合一次都不问。
+		if (await subagentsBusy()) return;
+		// 探测是异步的（最多一个超时），这中间可能已经有**新回合**起来了 —— 子代理完成会
+		// `triggerTurn` 唤醒一轮、用户也可能直接发了下一句。`agent_start` 清掉 widget 并
+		// 重开表，所以这里再验一次：表又被上过就不再画，否则结束符会盖在活 spinner 上方。
+		if (turnStartedAt !== null) return;
 		showTurnMarker(
 			ctx,
 			formatTurnMarker(pickTurnVerb(), formatDuration(settledAt - startedAt), formatEndClock(new Date(settledAt))),
@@ -1274,6 +1411,7 @@ export default function (pi: ExtensionAPI) {
 		turnOutcome = null;
 		promptText = null;
 		promptSummaryText = null;
+		lastTurnSummary = null;
 		// 去重键也要清：新会话里用户可能又敲一条与上一会话最后一条完全相同的提示词，
 		// 留着旧值会把它当成「重复的 input」直接跳过。
 		lastInputText = null;

@@ -110,7 +110,11 @@ export async function hasActiveSubagentWork(
 			const off = events.on(`${SUBAGENT_RPC_REPLY_PREFIX}${requestId}`, finish);
 			if (typeof off === "function") unsubscribe = off;
 			timer = setTimeout(() => finish(undefined), timeoutMs);
-			timer.unref?.();
+			// **不要 unref 这个定时器**（2026-10-18 实测）：在后台子代理里（pi-subagents 的
+			// runner 子进程）根本没有 RPC 应答方，这个超时就是唯一能把 Promise 解开的句柄；
+			// unref 掉之后事件循环会在超时前耗尽，Node 直接 exit 0 —— 子代理产出完整但结果
+			// 文件永远不写，父会话报 "exited with code 0 before writing a result"。
+			// 代价只是最坏多等一个 timeoutMs（对端在线时毫秒级就到）。
 			events.emit(SUBAGENT_RPC_REQUEST, {
 				version: SUBAGENT_RPC_VERSION,
 				requestId,

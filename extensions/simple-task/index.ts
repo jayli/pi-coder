@@ -51,7 +51,8 @@
 
 import { Type } from "typebox";
 import { Text } from "@earendil-works/pi-tui";
-import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { keyHint } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
 import {
 	cloneState,
 	countByStatus,
@@ -77,6 +78,48 @@ interface ToolDetails {
 }
 
 const STATUS_VALUES = ["pending", "in_progress", "done"] as const;
+
+// ── 失败结果的展示 ────────────────────────────────────────────────────────
+
+/**
+ * 失败结果自绘（用户 2026-10-13 定：错误文本不许顶格）。
+ *
+ * 校验失败（pi 在 execute 之前抛 `Validation failed for tool …`）或 execute 抛错时，
+ * 内核把错误包成 `{ content: [纯文本], details: {}, isError: true }` 交给 renderResult；
+ * 成功路径的 renderResult 读 `details.state` 会直接 TypeError（错误形状里 details 是空
+ * 对象），内核 catch 后退回自己的 fallback —— 那个 fallback 是 `new Text(text, 0, 0)`
+ * （paddingX = 0），错误文本从列 0 顶格画，与 self 壳「正文从列 1 起」的约定不一致。
+ * 三个工具的 renderResult 因此先判 isError（只能从第 4 参 render context 读 —— pi 传给
+ * renderResult 的 result 对象只有 `{ content, details }`，background-tasks 同款结论），
+ * 命中就走这里：形状照抄内核 fallback（非展开态裁到 10 行 + `... (N more lines,
+ * ctrl+o to expand)` 同款 keyHint 提示，展开态全文；颜色同为 toolOutput），只把 Text
+ * 的 paddingX 补成 1 —— 每行前置一个空格。
+ */
+const FAILURE_PREVIEW_LINES = 10;
+
+interface FailureResultLike {
+	content?: Array<{ type: string; text?: string }>;
+}
+
+function failureBodyText(result: FailureResultLike | undefined): string | undefined {
+	if (!result?.content) return undefined;
+	const text = result.content
+		.filter((block): block is { type: "text"; text: string } => block.type === "text" && typeof block.text === "string")
+		.map((block) => block.text)
+		.join("\n");
+	return text.length > 0 ? text : undefined;
+}
+
+function renderFailureResult(result: FailureResultLike | undefined, options: { expanded?: boolean }, theme: Theme): Text {
+	const lines = failureBodyText(result)?.split("\n") ?? [];
+	const shown = options?.expanded === true ? lines : lines.slice(0, FAILURE_PREVIEW_LINES);
+	const remaining = lines.length - shown.length;
+	let text = shown.map((line) => theme.fg("toolOutput", line)).join("\n");
+	if (remaining > 0) {
+		text += `${theme.fg("muted", `\n... (${remaining} more lines,`)} ${keyHint("app.tools.expand", "to expand")}${theme.fg("muted", ")")}`;
+	}
+	return new Text(text, 1, 0);
+}
 
 export default function simpleTaskExtension(pi: ExtensionAPI): void {
 	let state: State = emptyState();
@@ -226,6 +269,8 @@ export default function simpleTaskExtension(pi: ExtensionAPI): void {
 	// 下一条消息。renderCall / renderResult 返回的 Text 用 `new Text(…, 1, 0)`：
 	// **paddingX = 1** 补回默认壳 `Box(1, 1)` 原本提供的那一列左边距 —— 每行前置一个空格、
 	// 不顶格（用户 2026-09-26 定）；**paddingY = 0** 保持上下不留空行；无 bgFn，所以不包 Box。
+	// 失败结果（isError）同样从列 1 起：走模块顶部的 renderFailureResult —— pi 内核的
+	// fallback 是 paddingX = 0 的顶格文本，与 self 壳错位（用户 2026-10-13 定）。
 	pi.registerTool({
 		name: "task_set",
 		label: "Task Set",
@@ -279,9 +324,11 @@ export default function simpleTaskExtension(pi: ExtensionAPI): void {
 				0,
 			);
 		},
-		renderResult(result, _options, theme) {
+		renderResult(result, options, theme, context) {
+			if (context?.isError === true) return renderFailureResult(result, options, theme);
 			const data = result.details as ToolDetails | undefined;
-			const count = data?.state.tasks.length ?? 0;
+			const tasks = data?.state?.tasks;
+			const count = Array.isArray(tasks) ? tasks.length : 0;
 			const text = count === 0 ? "Task list cleared." : `Task list ready: ${count} task(s)`;
 			return new Text(theme.fg("success", "✔ ") + theme.fg("muted", text), 1, 0);
 		},
@@ -329,7 +376,8 @@ export default function simpleTaskExtension(pi: ExtensionAPI): void {
 				0,
 			);
 		},
-		renderResult(result, _options, theme) {
+		renderResult(result, options, theme, context) {
+			if (context?.isError === true) return renderFailureResult(result, options, theme);
 			// content 元素可能是 ImageContent，必须先判别再取 text
 			const first = result?.content?.[0];
 			const text =
@@ -357,10 +405,12 @@ export default function simpleTaskExtension(pi: ExtensionAPI): void {
 		renderCall(_args, theme) {
 			return new Text(theme.fg("toolTitle", theme.bold("task_get")), 1, 0);
 		},
-		renderResult(result, _options, theme) {
+		renderResult(result, options, theme, context) {
+			if (context?.isError === true) return renderFailureResult(result, options, theme);
 			const data = result.details as ToolDetails | undefined;
-			const count = data?.state.tasks.length ?? 0;
-			const { done } = data ? countByStatus(data.state) : { done: 0 };
+			const tasks = data?.state?.tasks;
+			const count = Array.isArray(tasks) ? tasks.length : 0;
+			const { done } = Array.isArray(tasks) ? countByStatus(data!.state) : { done: 0 };
 			return new Text(
 				theme.fg("success", "✔ ") + theme.fg("muted", count === 0 ? "No active task list" : `${done}/${count} done`),
 				1,

@@ -11,9 +11,9 @@
  *
  * 断言口径（用户 2026-09-21 定的形状）：
  *   - 命令首行 `• Run `（圆点按状态变色，见下）；最多 2 个视觉行；第 2 行末尾溢出换 `…`；
- *     更长时第 2 行下面一行 `… +N lines`；
- *   - 命令续行 / `… +N lines` 起始列 == `Run ` 的 `n` 列（第 3 列）：执行中是两格缩进，执行完是 `│ `；
- *   - 状态圆点 `•`（U+2022）**只挂在命令首行**（续行、`… +N lines`、整棵结果树前面都没有），
+ *     没有 `… +N lines` 标记行（用户 2026-10-16 要求去掉）；
+ *   - 命令续行起始列 == `Run ` 的 `n` 列（第 3 列）：执行中是两格缩进，执行完是 `│ `；
+ *   - 状态圆点 `•`（U+2022）**只挂在命令首行**（续行、整棵结果树前面都没有），
  *     颜色：执行中 `dim`、成功 `toolDiffAdded`、失败 `toolDiffRemoved`；
  *   - 正文整体右移一格（`• Run …`）：`Run` / `│` / `└` 同在列 2、所有正文同在列 4，
  *     命令行与结果树因此不会错开（用户 2026-09-21 第二轮定的）；
@@ -303,7 +303,7 @@ const LONG_COMMAND =
  * 同上，只是把命令名换成 `cd` —— **缩略用例专用**（新功能一期只对 `cat`/`cd`/`ls`/`ln` 动手）。
  *
  * 为什么几何类用例用 `cp` 而不用 `cd`：用户 2026-10-03 定的缩略一期把 `cd <长地址>` 缩成
- * `cd /Users/bachi…/pi-coding-agent`，于是它只占一行、不再产生续行与 `… +N lines` 标记 ——
+ * `cd /Users/bachi…/pi-coding-agent`，于是它只占一行、不再产生续行与行尾 `…` 标记 ——
  * 折行 / 列位 / 高亮那几条用例的观察对象（续行的列位、`│ ` 的颜色）就全没了。它们要的是
  * 「一条会折行的长命令」，命令名本身不重要，`cp` 与 `cd` 等宽、折行偏移一模一样。
  */
@@ -322,17 +322,32 @@ const body = (line: string): string => line.replace(/^\u2022/, " ").replace(/ +$
 test("命令行：`•Run ` 开头，最多两行，第二行溢出换 `…`", { skip }, () => {
 	const raw = renderBlock(LONG_COMMAND, { output: "a\nb\n" }).map(plain);
 	const lines = raw.map(body);
-	// 结构固定：命令首行 + 1 个续行 + `… +N lines` 标记，然后才是结果
+	// 结构固定：命令首行 + 1 个续行，然后才是结果（没有第三行 `… +N lines` 标记）
 	assert.equal(raw[0], "", "第 0 行是 pi self 模式的固定留白（不算在染色块里）");
 	assert.equal(raw[1]!.startsWith("• Run cp "), true, `块的第 1 行应当是圆点 + 空格 + Run 开头的命令：${raw[1]}`);
 	assert.equal(lines[2]!.startsWith("│ gent/"), true, `第 2 行应当是续行：${lines[2]}`);
 	assert.equal(lines[2]!.endsWith(ELLIPSIS_PLAIN), true, `溢出的行尾必须换成 …：${lines[2]}`);
-	assert.equal(lines[3], "│ … +1 lines", `第 3 行应当是折叠标记：${lines[3]}`);
-	// 命令正文精确两行（Run 行 + 1 续行），第三条命令行是折叠标记而不是正文
+	// 命令正文精确两行（Run 行 + 1 续行），下面直接就是结果 —— 行尾 `…` 就是“还有内容”
+	// 的全部陈述（用户 2026-10-16 去掉了 `… +N lines` 标记行）
 	assert.equal(lines[2]!.includes("0.86.0"), true, "续行必须接着放命令正文");
-	assert.equal(lines[4]!.startsWith("└ "), true, `第 4 行开始应当是结果：${lines[4]}`);
+	assert.equal(lines.length, 5, `命令段只占两行：${JSON.stringify(lines)}`);
+	assert.equal(lines[3]!.startsWith("└ "), true, `第 3 行开始应当是结果：${lines[3]}`);
 	// 不再有旧的 token 提示
 	assert.equal(lines.some((line) => line.includes("tokens hidden")), false);
+});
+
+test("命令行：多行命令只留前两行，第三行起直接不画（没有 `… +N lines`）", { skip }, () => {
+	// 用户 2026-10-16 定：行尾那个 `…` 已经说了“还有内容没显示”，再补一行数字是重复。
+	// 多源行命令（heredoc 之类）就是这条规则的主动例子：第 1、2 条源行都完整画出来，
+	// 第 3 条起既不画也不计数。
+	const lines = renderBlock(`echo one\necho two\necho three\necho four`, { output: "ok\n" }).map(plain).map(body);
+	assert.equal(lines[1], "Run echo one", `第 1 条源行：${JSON.stringify(lines)}`);
+	assert.equal(lines[2], `│ echo two${ELLIPSIS_PLAIN}`, `第 2 条源行（已溢出，行尾换 …）：${JSON.stringify(lines)}`);
+	assert.equal(lines.some((line) => line.includes("three") || line.includes("four")), false, `第 3 条起不该出现在屏幕上：${JSON.stringify(lines)}`);
+	assert.equal(lines.some((line) => /\+\d+ lines/.test(line)), false, `不该有折叠标记行：${JSON.stringify(lines)}`);
+	// 行尾 `…` 是“还有内容”唯一的陈述，且它坐在命令的最后一行上
+	assert.equal(lines[2]!.endsWith(ELLIPSIS_PLAIN), true, `最后一行命令行必须带 …：${JSON.stringify(lines)}`);
+	assert.equal(lines[3]!.startsWith("└ "), true, `结果紧跟在后面：${JSON.stringify(lines)}`);
 });
 
 test("命令行：没溢出的短命令不画 `…`，也不画折叠标记", { skip }, () => {
@@ -341,7 +356,7 @@ test("命令行：没溢出的短命令不画 `…`，也不画折叠标记", { 
 	assert.equal(lines[1]!.trimEnd(), "• Run echo hello", "首行是圆点 + 空格 + Run + 命令");
 	assert.equal(widthOf(lines[1]!), 79, `首行仍然占满整宽：${JSON.stringify(lines[1])}`);
 	assert.equal(lines.some((line) => line.includes(ELLIPSIS_PLAIN)), false, "短命令不该有 …");
-	assert.equal(lines.some((line) => line.includes("lines")), false, "短命令不该有 … +N lines");
+	assert.equal(lines.some((line) => /\+\d+ lines/.test(line)), false, "不该再有 … +N lines 标记行");
 });
 
 test("状态圆点：只挂在命令首行，颜色按状态走（dim / 绿 / 红）", { skip }, () => {
@@ -368,7 +383,7 @@ test("状态圆点：只挂在命令首行，颜色按状态走（dim / 绿 / �
 	const failedLine = renderBlock("false", { output: "boom\n", isError: true })[1]!;
 	assert.equal(bar(failedLine), `${REMOVED_ANSI}${BAR}\u001b[39m`, `失败该是红色：${JSON.stringify(failedLine)}`);
 
-	// **只有首行有**：长命令的续行、`… +N lines` 标记、整棵结果树都没有圆点
+	// **只有首行有**：长命令的续行、整棵结果树都没有圆点
 	const long = renderBlock(LONG_COMMAND, { output: "a\nb\n", isError: true });
 	const plainLines = long.map(plain);
 	assert.equal(plainLines.filter((line) => line.includes(BAR)).length, 1, `整块只能有一根圆点：${JSON.stringify(plainLines)}`);
@@ -378,27 +393,27 @@ test("状态圆点：只挂在命令首行，颜色按状态走（dim / 绿 / �
 test("状态圆点：颜色是从主题现取的（改主题 → 圆点跟着变）", { skip }, () => {
 	// 断言的是「每次渲染都从主题现取」这件事本身，而不是写死三个色值：临时把 dark 皮肤的
 	// 两个槽位指到别的色上再渲染，圆点必须跟着变 —— 缓存住了色值就会漏掉这条。
-	// `theme.getFgAnsi` 与 pi 自己渲染用的单例读的是同一张 `fgColors` 表（见源文件里
-	// withBashOutputColor 那条注释），所以直接改单例就是改扩展看到的色。
+	// 改的是 `fgAnsi`（已解析的 SGR 表）：0.99.1 起 pi 的 `Theme` 只剩 `fgAnsi` / `bgAnsi`
+	// （`fgColors` 那份色值表已经不存在），扩展与 pi 自己的渲染都从它取。
 	const singleton = (globalThis as Record<symbol, unknown>)[Symbol.for("@earendil-works/pi-coding-agent:theme")] as
-		| { fgColors?: Map<string, string> }
+		| { fgAnsi?: Map<string, string> }
 		| undefined;
-	assert.ok(singleton?.fgColors?.set, "pi 的 theme 单例该在（initTheme 已调过）");
-	const fgColors = singleton!.fgColors!;
-	const dimBefore = fgColors.get("dim");
-	const addedBefore = fgColors.get("toolDiffAdded");
+	assert.ok(singleton?.fgAnsi?.set, "pi 的 theme 单例该在（initTheme 已调过）");
+	const fgAnsi = singleton!.fgAnsi!;
+	const dimBefore = fgAnsi.get("dim");
+	const addedBefore = fgAnsi.get("toolDiffAdded");
 	try {
-		fgColors.set("dim", "\u001b[38;2;1;2;3m");
-		fgColors.set("toolDiffAdded", "\u001b[38;2;4;5;6m");
+		fgAnsi.set("dim", "\u001b[38;2;1;2;3m");
+		fgAnsi.set("toolDiffAdded", "\u001b[38;2;4;5;6m");
 		const pendingBar = /\u001b\[38;2;\d+;\d+;\d+m\u2022/.exec(renderBlock("x", { noResult: true })[1]!)?.[0];
 		assert.equal(pendingBar, "\u001b[38;2;1;2;3m\u2022", "执行中的圆点该跟着新的 dim 走");
 		const okBar = /\u001b\[38;2;\d+;\d+;\d+m\u2022/.exec(renderBlock("x", { output: "ok\n" })[1]!)?.[0];
 		assert.equal(okBar, "\u001b[38;2;4;5;6m\u2022", "成功的圆点该跟着新的 toolDiffAdded 走");
 	} finally {
-		if (dimBefore === undefined) fgColors.delete("dim");
-		else fgColors.set("dim", dimBefore);
-		if (addedBefore === undefined) fgColors.delete("toolDiffAdded");
-		else fgColors.set("toolDiffAdded", addedBefore);
+		if (dimBefore === undefined) fgAnsi.delete("dim");
+		else fgAnsi.set("dim", dimBefore);
+		if (addedBefore === undefined) fgAnsi.delete("toolDiffAdded");
+		else fgAnsi.set("toolDiffAdded", addedBefore);
 	}
 });
 
@@ -451,20 +466,17 @@ test("无边界空行：上下都没有空行（命令是第一行、结果是�
 	}
 });
 
-test("命令行：续行与折叠标记的正文列 == `Run ` 的 n 列", { skip }, () => {
-	// 续行 / 折叠标记的前缀是 `│ `（2 列），所以它们的**正文**落在第 3 列（0 基的 2）——
+test("命令行：续行的正文列 == `Run ` 的 n 列", { skip }, () => {
+	// 续行的前缀是 `│ `（2 列），所以它的**正文**落在第 3 列（0 基的 2）——
 	// 正是 `Run ` 里 `n` 那一列。用户样例里的两行就是这么对齐的。
 	const lines = text(LONG_COMMAND, { output: "a\n" }).map(body);
 	const run = lines.find((line) => line.startsWith("Run "))!;
 	const continuation = lines[lines.indexOf(run) + 1]!;
-	const marker = lines.find((line) => line.includes("+1 lines"))!;
 	const nColumn = "Run ".indexOf("n");
 	// 圆点在**列 0**（顶掉原本 Box 的那格左内边距），所以 `Run ` 的正文起点仍是列 2
 	assert.equal(nColumn, 2, "`Run ` 的 n 在第 3 列（0 基 2）—— 断言口径的前提");
 	assert.equal(continuation.slice(0, 2), `${PIPE} `, `续行应当带 2 列前缀：${continuation}`);
 	assert.equal(continuation.slice(2).length > 0, true);
-	assert.equal(marker.slice(0, 2), `${PIPE} `, `折叠标记应当带 2 列前缀：${marker}`);
-	assert.equal(marker.indexOf(ELLIPSIS_PLAIN), nColumn, `折叠标记的 … 列不对：${marker}`);
 	assert.equal(run.indexOf("Run "), 0, `Run 该在列 0（body 已经剥掉块左边距）：${run}`);
 });
 
@@ -503,12 +515,10 @@ test("命令行：命令还在跑（没有任何结果）用空格缩进，结�
 	// 纯执行中（`renderCall` 独舞、`updateResult` 还没被调过）：整块都是纯缩进，一根竖线都没有
 	const running = text(LONG_COMMAND, { noResult: true }).map(body);
 	assert.equal(running[2]!.startsWith("  gent/"), true, `执行中续行应当是空格缩进：${running[2]}`);
-	assert.equal(running.find((line) => line.includes("+1 lines"))!.startsWith("  …"), true, "执行中的折叠标记也只用缩进");
 	assert.equal(running.some((line) => line.startsWith(`${PIPE} `) || line.startsWith("└ ")), false, "执行中不该出现树形符号");
-	// 结果一到（哪怕还是 partial 快照），命令续行与折叠标记就换成 `│ `，树接上
+	// 结果一到（哪怕还是 partial 快照），命令续行就换成 `│ `，树接上
 	const withOutput = text(LONG_COMMAND, { output: "a\n", partial: true }).map(body);
 	assert.equal(withOutput[2]!.startsWith(`${PIPE} gent/`), true, `出结果后续行应当是 │ ：${withOutput[2]}`);
-	assert.equal(withOutput.find((line) => line.includes("+1 lines"))!.startsWith(`${PIPE} …`), true, "折叠标记也挂 │");
 });
 
 test("结果：`└ ` 在整块里恰好出现一次，就在第一行实质输出上", { skip }, () => {
@@ -587,9 +597,8 @@ test("展开态：结果不裁行、不挂 gutter（命令自己的续行前缀�
 	// 左边距那 1 列仍挂着（`body` 只剥 2 列，所以这里还剩 1 格），正文列与折叠态一致
 	for (const line of ["1", "2", "8"]) assert.equal(lines.includes(line), true, `展开态应当原样输出 ${line}：${JSON.stringify(lines)}`);
 	assert.equal(lines.some((line) => line === " 1"), false, "展开态的输出也不该多留左边距（`body` 只剥 1 列）");
-	// 命令段：不截断、没有 `… +N lines` 标记（但还是命令自己的续行前缀）
+	// 命令段：不截断、没有行尾 `…`（但还是命令自己的续行前缀）
 	assert.equal(lines.some((line) => line.endsWith(ELLIPSIS_PLAIN)), false, "展开态命令不截断");
-	assert.equal(lines.some((line) => line.includes("+") && line.includes("lines")), false, "展开态不该有 … +N lines 标记");
 	// 页脚也不在树里：顶格、没有 `│ ` / `└ `
 	assert.equal(lines.find((line) => line.includes("Took "))!.startsWith("Took "), true);
 });

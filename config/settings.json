@@ -1,6 +1,5 @@
 {
-  "lastChangelogVersion": "0.99.1",
-  "theme": "pi-coder-1337",
+  "theme": "pi-coder-nightfox",
   "defaultThinkingLevel": "xhigh",
   "compaction": {
     "enabled": true,
@@ -11,8 +10,8 @@
     "pnpm",
     "--config.node-linker=hoisted"
   ],
-  "extensions": ["-builtin:codemode"],
-  "defaultTools": ["read", "bash", "edit", "write", "grep", "find", "ls", "codemode"],
+  "extensions": ["-builtin:codemode", "-builtin:tool-search"],
+  "defaultTools": ["read", "bash", "edit", "write", "grep", "find", "ls", "codemode", "tool_search"],
   "tuiMode": "regular",
   "packages": [
     {
@@ -42,7 +41,14 @@
     },
     "agentOverrides": {
       "researcher": {
-        "tools": "inherit"
+        "tools": [
+          "read",
+          "write",
+          "pi_web_search",
+          "fetch_content",
+          "get_search_content",
+          "source_check"
+        ]
       },
       "delegate": {
         "tools": "inherit"

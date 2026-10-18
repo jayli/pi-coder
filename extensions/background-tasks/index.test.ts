@@ -406,8 +406,19 @@ test("任务结束：注入 <background-task-notification> 并 triggerTurn 唤�
 	assert.match(sent.message.content, /<background-task-notification>/);
 	assert.match(sent.message.content, /bg_1/);
 	assert.match(sent.message.content, /成功结束（exit 0）/);
-	assert.match(sent.message.content, /不需要再调 background_output 确认状态/, "要告诉模型别为了确认状态而轮询");
 	assert.equal(sent.options?.triggerTurn, true, "必须触发一轮模型跟进");
+	// 通知正文不再重复「这是终态事实，不需要再调 background_output 确认状态」（用户 2026-10-18 定：
+	// 同一句话已在 run_in_background 的 description / promptGuidelines 里）。
+	assert.doesNotMatch(sent.message.content, /不需要再调 background_output/, "通知里不该再重复「别轮询」那句");
+	// 终态报告末尾的总览表：快照跟着通知一起落地（与 run_in_background 同一份形状）。
+	const details = sent.message.details as any;
+	assert.ok(Array.isArray(details.tasks), "通知的 details 要带任务快照（渲染器靠它画表）");
+	assert.deepEqual(
+		details.tasks.map((task: any) => [task.id, task.status, task.exitCode]),
+		[["bg_1", "exited", 0]],
+		"快照应当是任务终态后的样子",
+	);
+	assert.equal(typeof details.tableNow, "number", "快照要带算时长的时刻");
 	assert.equal(sent.options?.deliverAs, undefined, "空闲时直接起新一轮");
 	await h.shutdown();
 });
@@ -779,6 +790,43 @@ const paintedTheme = {
 };
 
 /**
+ * 带颜色槽定义的**真主题形状**：`bashOutput` 自 pi 1.2.0 起从皮肤文件的 `vars` 里读（不是主题的
+ * fg 表），所以这里用一份**临时皮肤文件**喂 `sourcePath`/`getColorMode`；官方槽位仍走假 `fg`。
+ * 这样测的是真实读取路径（读文件 → pi-tui 转义），而不只是换个假对象。
+ */
+function skinTheme(vars: Record<string, string> = {}): Theme & { cleanup: () => void } {
+	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-bg-skin-"));
+	const file = path.join(dir, "skin.json");
+	fs.writeFileSync(file, JSON.stringify({ name: "bg-test-skin", vars, colors: {} }));
+	const fgColors: Record<string, string> = {
+		text: "#111111",
+		toolOutput: "#222222",
+		muted: "#444444",
+		success: "#55aa55",
+		error: "#cc5555",
+		warning: "#ccaa55",
+		accent: "#7777cc",
+		toolTitle: "#888888",
+		dim: "#999999",
+		mdCode: "#00aaaa",
+	};
+	return {
+		sourcePath: file,
+		getColorMode: () => "truecolor",
+		fg: (color: string, text: string) => {
+			const value = fgColors[color];
+			if (value === undefined) throw new Error(`Unknown theme color: ${color}`);
+			return `${value}(${text})`;
+		},
+		bold: (text: string) => text,
+		cleanup: () => fs.rmSync(dir, { recursive: true, force: true }),
+	} as unknown as Theme & { cleanup: () => void };
+}
+
+/** `vars.bashOutput` 的期望转义（`#333333` 在 truecolor 下）。 */
+const BASH_OUTPUT_ANSI = "\u001b[38;2;51;51;51m";
+
+/**
  * 带颜色槽定义的**真主题实例**：`bashOutput` 有定义时正文走它，没定义时回退 `toolOutput`。
  * 用真 `Theme` 类而不是假对象，才能覆盖「未知槽位抛异常 → 回退」这条分支。
  */
@@ -805,12 +853,12 @@ function renderContext(overrides: { isPartial?: boolean; isError?: boolean } = {
 	};
 }
 
-/** run_in_background 成功那条的真实形状（五行，宽 80 下不折行）。 */
+/** run_in_background 成功那条的真实形状（三行，宽 80 下不折行；无任务快照 → 不画表）。 */
 const RUN_RESULT = {
 	content: [
 		{
 			type: "text",
-			text: "已在后台启动 bg_1（pid 12345）。\n命令：npm test\n日志：/tmp/bg_1.log\n它会自己跑。\n需要中途看输出用 background_output。",
+			text: "已在后台启动 bg_1（pid 12345）。\n命令：npm test\n日志：/tmp/bg_1.log",
 		},
 	],
 	details: { ok: true, task: { id: "bg_1", status: "running" } },
@@ -875,14 +923,14 @@ test("正文：结果全文折行挂树，除末行外 │、末行 └，正文
 		.renderResult(RUN_RESULT, { expanded: false, isPartial: false }, plainTheme, renderContext())
 		.render(80)
 		.map(plain);
-	assert.equal(lines.length, 5, `五行正文（宽 80 不折行、不超预览上限）：${JSON.stringify(lines)}`);
+	assert.equal(lines.length, 3, `三行正文（宽 80 不折行、不超预览上限）：${JSON.stringify(lines)}`);
 	assert.ok(lines[0]!.startsWith("  │ "), `首行挂 │（2 列缩进）：${JSON.stringify(lines[0])}`);
-	assert.ok(lines[4]!.startsWith("  └ "), `末行挂 └：${JSON.stringify(lines[4])}`);
+	assert.ok(lines[2]!.startsWith("  └ "), `末行挂 └：${JSON.stringify(lines[2])}`);
 	assert.equal(lines.filter((line: string) => line.includes("└")).length, 1, "└ 只能出现一次");
 	// 树符在列 2（`run_in_background` 首字母 r 正下方），正文从列 4 起
 	assert.equal(lines[0]!.indexOf("│"), 2, `│ 在列 2：${JSON.stringify(lines[0])}`);
 	assert.equal(lines[0]!.indexOf("已在后台启动"), 4, `正文列：${JSON.stringify(lines[0])}`);
-	assert.equal(lines[4]!.indexOf("需要中途"), 4, `末行正文列：${JSON.stringify(lines[4])}`);
+	assert.equal(lines[2]!.indexOf("日志："), 4, `末行正文列：${JSON.stringify(lines[2])}`);
 	await h.shutdown();
 });
 
@@ -907,8 +955,240 @@ test("正文：长行折行后 └ 仍只在最后一个视觉行（碎片也算
 	await h.shutdown();
 });
 
-test("预览截断：超过 10 行只画 10 行 + 提示行，展开态（ctrl+o）不裁", { skip }, async () => {
+test("总览表：run_in_background 结果块末尾挂当前任务表（首行 └、正文不闭合）", { skip }, async () => {
 	const h = await loadHarness();
+	const definition = h.extension.tools.get("run_in_background")!.definition as any;
+	const now = 1_000_000;
+	const result = {
+		content: [{ type: "text", text: "已在后台启动 bg_2。\n命令：sleep 2" }],
+		details: {
+			ok: true,
+			tableNow: now,
+			tasks: [
+				{ id: "bg_1", command: "npm test", status: "exited", startedAt: now - 12_000, endedAt: now - 2_000, exitCode: 0 },
+				{ id: "bg_2", command: "sleep 2; echo helloworld", status: "running", startedAt: now - 1_000, endedAt: undefined },
+			],
+		},
+	};
+	const lines = definition
+		.renderResult(result, { expanded: false, isPartial: false }, plainTheme, renderContext())
+		.render(80)
+		.map(plain);
+
+	// 正文两行都不闭合（全 `│ `），`└ ` 让给表格首行
+	assert.ok(lines[0]!.startsWith("  │ 已在后台启动"), `正文首行挂 │：${JSON.stringify(lines[0])}`);
+	assert.ok(lines[1]!.startsWith("  │ 命令："), `正文末行也是 │（不闭合）：${JSON.stringify(lines[1])}`);
+	// 表格首行挂 └
+	assert.ok(lines[2]!.startsWith("  └ ┌"), `表格顶边框挂 └：${JSON.stringify(lines[2])}`);
+	assert.match(lines[3]!, /^ {4}│ id +│ command +│ status +│ time +│$/, `表头对齐列 4：${JSON.stringify(lines[3])}`);
+	const joined = lines.join("\n");
+	assert.match(joined, /bg_1 +│ npm test +│ exit 0 +│ +10s/);
+	assert.match(joined, /bg_2 +│ sleep 2; echo helloworld +│ running +│ +1s/);
+	assert.ok(lines[lines.length - 1]!.startsWith("    └"), `底边框在列 4：${JSON.stringify(lines[lines.length - 1])}`);
+	// 右侧留 4 列（用户 2026-10-17 定）：表格行止于列 76，而不是顶到 width=80
+	for (const line of lines.slice(2)) {
+		assert.equal(line.length, 80 - 4, `表格行右侧应留 4 列（到列 ${80 - 4}）：${JSON.stringify(line)}`);
+	}
+	// 表格左边界在列 4（与正文同列）：首行的表格部分是 `┌`，其余行是 `│` / `└`
+	assert.equal(lines[2]!.indexOf("┌"), 4, `表格左竖线应在列 4：${JSON.stringify(lines[2])}`);
+	for (const line of lines.slice(3)) {
+		assert.equal(line.slice(0, 4), "    ", `表格行左边界应缩进到列 4：${JSON.stringify(line)}`);
+	}
+	await h.shutdown();
+});
+
+test("总览表：只有 run_in_background 带，output / kill 不带", { skip }, async () => {
+	const h = await loadHarness();
+	const snapshot = { tableNow: 1_000_000, tasks: [{ id: "bg_1", command: "npm test", status: "running", startedAt: 999_000, endedAt: undefined }] };
+	for (const name of ["background_output", "background_kill"]) {
+		const definition = h.extension.tools.get(name)!.definition as any;
+		const lines = definition
+			.renderResult(
+				{ content: [{ type: "text", text: "line-1\nline-2" }], details: { ok: true, ...snapshot } },
+				{ expanded: false, isPartial: false },
+				plainTheme,
+				renderContext(),
+			)
+			.render(80)
+			.map(plain);
+		assert.ok(!lines.join("\n").includes("┌"), `${name} 不该画总览表：${JSON.stringify(lines)}`);
+		assert.ok(lines[lines.length - 1]!.includes("└"), `${name} 的正文树仍然闭合`);
+	}
+	await h.shutdown();
+});
+
+test("总览表：右侧留 4 列，右边框不顶到行尾", { skip }, async () => {
+	const h = await loadHarness();
+	const definition = h.extension.tools.get("run_in_background")!.definition as any;
+	const result = {
+		content: [{ type: "text", text: "已在后台启动 bg_1。" }],
+		details: { ok: true, tableNow: 1_000_000, tasks: [{ id: "bg_1", command: "npm test", status: "running", startedAt: 999_000, endedAt: undefined }] },
+	};
+	// 几何：正文 2 列缩进 + 2 列树符 = 列 4 起画，可用宽 80-4 = 76，表宽 76-4 = 72，整行 4+72 = 76
+	const wide = definition
+		.renderResult(result, { expanded: false, isPartial: false }, plainTheme, renderContext())
+		.render(80)
+		.map(plain);
+	// 头部一行正文，之后全是表格行（顶框 / 表头 / 分隔 / 任务行 / 底框）。
+	// 不能用 `│` 过滤：正文行自己也挂 `│`，会把正文算进来。
+	const tableRows = wide.slice(1);
+	assert.equal(tableRows.length, 5, `顶框 / 表头 / 分隔 / 任务行 / 底框：${JSON.stringify(wide)}`);
+	assert.ok(tableRows[0]!.startsWith("  └ ┌"), `表格顶边框挂 └：${JSON.stringify(tableRows[0])}`);
+	for (const line of tableRows) {
+		assert.equal(line.length, 80 - 4, `表格行应止于列 ${80 - 4}（右侧留 4 列）：${JSON.stringify(line)}`);
+	}
+	// 左边界：首行的树符位是 `└ `，其余行是等宽空白（两者都占 2 列）
+	for (const line of tableRows.slice(1)) {
+		assert.equal(line.slice(0, 4), "    ", `表格行左边界应在列 4：${JSON.stringify(line)}`);
+	}
+	// 表宽 = 可用宽 - 留白，且每行等宽（右边框对齐）
+	const widths = new Set(tableRows.map((line: string) => line.length));
+	assert.equal(widths.size, 1, `表格各行等宽：${JSON.stringify([...widths])}`);
+	// 正文不扣留白：它按字符折行，行尾自然参差，不强行补齐到 76
+	assert.ok(wide[0]!.startsWith("  │ 已在后台启动"), `正文照旧挂树：${JSON.stringify(wide[0])}`);
+	await h.shutdown();
+});
+
+test("总览表：展开态（ctrl+o）不重复贴表，且超过 5 个任务时折叠", { skip }, async () => {
+	const h = await loadHarness();
+	const definition = h.extension.tools.get("run_in_background")!.definition as any;
+	const now = 1_000_000;
+	const tasks = Array.from({ length: 8 }, (_unused, index) => ({
+		id: `bg_${index + 1}`,
+		command: `cmd-${index + 1}`,
+		status: "exited",
+		startedAt: now - (8 - index) * 1_000,
+		endedAt: now - (8 - index) * 1_000 + 500,
+		exitCode: 0,
+	}));
+	const result = { content: [{ type: "text", text: "已在后台启动 bg_8。" }], details: { ok: true, tasks, tableNow: now } };
+	for (const expanded of [false, true]) {
+		const lines = definition
+			.renderResult(result, { expanded, isPartial: false }, plainTheme, renderContext())
+			.render(80)
+			.map(plain);
+		const body = lines.filter((line: string) => /│ bg_\d/.test(line));
+		assert.equal(body.length, 5, `表恒为 5 行任务（expanded=${expanded}）：${JSON.stringify(lines)}`);
+		assert.match(lines.join("\n"), /…3 background tasks earlier/, `折叠提示（expanded=${expanded}）`);
+	}
+	await h.shutdown();
+});
+
+test("总览表：快照渲染到 details 里，且不含 worktree / 日志路径这类大字段", { skip }, async () => {
+	const h = await loadHarness();
+	const started = await h.tool("run_in_background", { command: "sleep 5" });
+	assert.ok(Array.isArray(started.details.tasks), "execute 要把任务快照写进 details.tasks");
+	assert.equal(started.details.tasks.length, 1);
+	const [entry] = started.details.tasks;
+	assert.equal(entry.id, "bg_1");
+	assert.equal(entry.status, "running");
+	assert.equal(typeof entry.startedAt, "number");
+	assert.equal(typeof started.details.tableNow, "number", "快照要带算时长的时刻");
+	// 表格用不到的字段不进 details（它们是给模型读的，不是给渲染器读的）
+	assert.equal(entry.logPath, undefined);
+	assert.equal(entry.worktree, undefined);
+
+	// 第二次启动后快照里有两行，且旧行仍在（快照是完整的当前列表）
+	const second = await h.tool("run_in_background", { command: "sleep 5" });
+	assert.deepEqual(second.details.tasks.map((task: any) => task.id), ["bg_1", "bg_2"]);
+	await h.shutdown();
+});
+
+test("总览表：窄终端整张表不画，正文树恢复闭合", { skip }, async () => {
+	const h = await loadHarness();
+	const definition = h.extension.tools.get("run_in_background")!.definition as any;
+	const result = {
+		content: [{ type: "text", text: "已在后台启动 bg_1。" }],
+		details: { ok: true, tableNow: 1_000_000, tasks: [{ id: "bg_1", command: "npm test", status: "running", startedAt: 999_000, endedAt: undefined }] },
+	};
+	const lines = definition
+		.renderResult(result, { expanded: false, isPartial: false }, plainTheme, renderContext())
+		.render(30)
+		.map(plain);
+	assert.ok(!lines.join("\n").includes("┌"), `太窄时不该画表：${JSON.stringify(lines)}`);
+	assert.ok(lines[lines.length - 1]!.startsWith("  └"), `正文树仍要闭合：${JSON.stringify(lines)}`);
+	await h.shutdown();
+});
+
+test("总览表：边框走 bash 输出色，其余：id accent / 状态按结局 / 表头时长命令走 text", { skip }, async () => {
+	const h = await loadHarness();
+	const definition = h.extension.tools.get("run_in_background")!.definition as any;
+	const now = 1_000_000;
+	const result = {
+		content: [{ type: "text", text: "已在后台启动 bg_2。" }],
+		details: {
+			ok: true,
+			tableNow: now,
+			tasks: [
+				{ id: "bg_1", command: "npm test", status: "exited", startedAt: now - 5_000, endedAt: now - 1_000, exitCode: 0 },
+				{ id: "bg_2", command: "sleep 2", status: "running", startedAt: now - 2_000, endedAt: undefined },
+				{ id: "bg_3", command: "exit 3", status: "exited", startedAt: now - 9_000, endedAt: now - 1_000, exitCode: 3 },
+			],
+		},
+	};
+	const painted = definition
+		.renderResult(result, { expanded: false, isPartial: false }, paintedTheme, renderContext())
+		.render(80);
+	const row1 = painted.find((line: string) => line.includes("accent(bg_1)"))!;
+	const row2 = painted.find((line: string) => line.includes("accent(bg_2)"))!;
+	const row3 = painted.find((line: string) => line.includes("accent(bg_3)"))!;
+	assert.ok(row1 && row2 && row3);
+	// 行序：最旧在上（bg_3 先启动 → 排第一行）
+	assert.ok(
+		painted.findIndex((line: string) => line.includes("accent(bg_3)")) <
+			painted.findIndex((line: string) => line.includes("accent(bg_2)")),
+		"最旧的任务在上、最新的在下",
+	);
+	assert.match(row1, /accent\(bg_1\)/, "id 走 accent");
+	assert.match(row1, /success\(exit 0\s*\)/, "exit 0 走 success");
+	assert.match(row2, /warning\(running\)/, "running 走 warning");
+	assert.match(row3, /error\(exit=3\s*\)/, "非 0 退出走 error");
+	assert.match(row1, /text\(\s*4s\)/, "时长走 text 前景色");
+	assert.match(row1, /text\(npm test/, "命令走 text 前景色");
+	assert.match(painted.find((line: string) => line.includes("┌"))!, /toolOutput\(┌/, "边框走 bash 输出色（皮肤没定义 bashOutput 时回退 toolOutput）");
+	assert.match(painted.find((line: string) => line.includes("mdCode(id"))!, /mdCode\(id\s*\)/, "表头走 mdCode");
+	// 表格格子里不再出现 muted（首行的 `└ ` 属于正文树连接符，不算表格格子）
+	const tableLines = painted.slice(painted.findIndex((line: string) => line.includes("┌")));
+	assert.ok(tableLines.length > 0);
+	const cellsOnly = tableLines.map((line: string, index: number) => (index === 0 ? line.slice(line.indexOf("┌")) : line));
+	assert.ok(!cellsOnly.join("\n").includes("muted("), `表格格子不该再用 muted：${JSON.stringify(cellsOnly)}`);
+	await h.shutdown();
+});
+
+test("总览表：边框走皮肤 vars.bashOutput 的真转义，与正文同色", { skip }, async () => {
+	const h = await loadHarness();
+	const definition = h.extension.tools.get("run_in_background")!.definition as any;
+	const now = 1_000_000;
+	const result = {
+		content: [{ type: "text", text: "已在后台启动 bg_1。" }],
+		details: {
+			ok: true,
+			tableNow: now,
+			tasks: [
+				{ id: "bg_1", command: "npm test", status: "exited", startedAt: now - 5_000, endedAt: now - 1_000, exitCode: 0 },
+			],
+		},
+	};
+	const theme = skinTheme({ bashOutput: "#333333" });
+	try {
+		const lines = definition.renderResult(result, { expanded: false, isPartial: false }, theme, renderContext()).render(80);
+		const border = lines.find((line: string) => line.includes("┌"))!;
+		// 边框与上面那些正文行同一个色：皮肤 vars.bashOutput 的真转义
+		assert.ok(
+			border.includes(`${BASH_OUTPUT_ANSI}┌`),
+			`边框走 vars.bashOutput 的转义：${JSON.stringify(border)}`,
+		);
+		// 其余格子不受影响：id 仍是 accent、表头仍是 text
+		assert.ok(!border.includes("text(┌"), "边框不该走 text 槽");
+		assert.match(lines.find((line: string) => line.includes("npm test"))!, /#7777cc\(bg_1\)/, "id 仍走 accent");
+		assert.match(lines.find((line: string) => line.includes("id  "))!, /#00aaaa\(id/, "表头走 mdCode");
+	} finally {
+		theme.cleanup();
+	}
+	await h.shutdown();
+});
+
+test("预览截断：超过 10 行只画 10 行 + 提示行，展开态（ctrl+o）不裁", { skip }, async () => {	const h = await loadHarness();
 	const definition = h.extension.tools.get("background_output")!.definition as any;
 	// 14 行真输出（background_output 一次可返回 30000 字符，不裁就平铺满屏）
 	const many = Array.from({ length: 14 }, (_unused, index) => `line-${index + 1}`).join("\n");
@@ -994,14 +1274,52 @@ test("终态通知：圆点顶格 + 对号在行末 + 树形正文，无底色�
 	};
 	const lines = renderer(message, { expanded: false, outputPad: 1 }, plainTheme).render(80).map(plain);
 
-	assert.equal(lines[0], "• 后台任务 bg_1 结束 ✔", `标题行（圆点顶格、对号行末）：${JSON.stringify(lines[0])}`);
+	assert.equal(lines[0], "• Background task bg_1 finished ✔", `标题行（圆点顶格、对号行末）：${JSON.stringify(lines[0])}`);
 	assert.ok(!lines[0]!.includes("✓"), "旧的 ✓ 前缀已移走");
 	assert.ok(!lines[0]!.includes(":"), "旧的冒号已去掉");
-	// 正文挂树：包裹标签不显示，两行正文 → 一行 │ + 一行 └
+	// 正文挂树：包裹标签不显示，两行正文 → 一行 │ + 一行 └（无快照 → 表不画，仍闭合）
 	assert.equal(lines.length, 3, `标题 + 两行正文：${JSON.stringify(lines)}`);
 	assert.ok(lines[1]!.startsWith("  │ 后台任务 bg_1 已成功结束"), `首行挂 │：${JSON.stringify(lines[1])}`);
 	assert.ok(lines[2]!.startsWith("  └ 完整日志"), `末行挂 └：${JSON.stringify(lines[2])}`);
 	assert.ok(!lines.join("\n").includes("background-task-notification>"), "包裹标签不该显示");
+	await h.shutdown();
+});
+
+test("终态通知：末尾贴任务总览表（与 run_in_background 同一张表），正文不闭合", { skip }, async () => {
+	const h = await loadHarness();
+	const renderer = h.extension.messageRenderers.get("background-task") as any;
+	const now = 1_000_000;
+	const message = {
+		customType: "background-task",
+		content:
+			"<background-task-notification>\n后台任务 bg_3 已成功结束（exit 0），运行 8s。\n命令：echo hi\n完整日志：/tmp/bg_3.log\n</background-task-notification>",
+		display: true,
+		details: {
+			kind: "terminal",
+			task: { id: "bg_3", status: "exited", exitCode: 0 },
+			tableNow: now,
+			tasks: [
+				{ id: "bg_1", command: "npm test", status: "exited", startedAt: now - 12_000, endedAt: now - 2_000, exitCode: 0 },
+				{ id: "bg_3", command: "echo hi", status: "exited", startedAt: now - 9_000, endedAt: now - 1_000, exitCode: 0 },
+			],
+		},
+	};
+	const lines = renderer(message, { expanded: false, outputPad: 1 }, plainTheme).render(80).map(plain);
+
+	assert.equal(lines[0], "• Background task bg_3 finished ✔", `标题行：${JSON.stringify(lines[0])}`);
+	// 正文三行都不闭合（全 `│ `），`└ ` 让给表格首行
+	for (let index = 1; index <= 3; index += 1) {
+		assert.ok(lines[index]!.startsWith("  │ "), `第 ${index} 行正文不闭合：${JSON.stringify(lines[index])}`);
+	}
+	assert.ok(lines[4]!.startsWith("  └ ┌"), `表格顶边框挂 └：${JSON.stringify(lines[4])}`);
+	const joined = lines.join("\n");
+	assert.match(joined, /bg_1 +│ npm test +│ exit 0 +│ +10s/);
+	assert.match(joined, /bg_3 +│ echo hi +│ exit 0 +│ +8s/);
+	assert.ok(lines[lines.length - 1]!.startsWith("    └"), `底边框在列 4：${JSON.stringify(lines[lines.length - 1])}`);
+	// 同一套几何：右侧留 4 列、左边界在列 4
+	for (const line of lines.slice(4)) {
+		assert.equal(line.length, 80 - 4, `表格行右侧应留 4 列：${JSON.stringify(line)}`);
+	}
 	await h.shutdown();
 });
 
@@ -1016,12 +1334,12 @@ test("终态通知：失败 / 被 kill 也是行末 ✔（只要结束就是 ✔
 	// 可见文本（plainTheme）：三种结局的行末都是 ✔ —— ✔ 断言的是「结束」而非「成功」。
 	assert.equal(
 		plain(renderer(failedMsg, { expanded: false, outputPad: 1 }, plainTheme).render(80)[0]!),
-		"• 后台任务 bg_1 结束 ✔",
+		"• Background task bg_1 finished ✔",
 		"非 0 退出也是 ✔",
 	);
 	assert.equal(
 		plain(renderer(killedMsg, { expanded: false, outputPad: 1 }, plainTheme).render(80)[0]!),
-		"• 后台任务 bg_2 结束 ✔",
+		"• Background task bg_2 finished ✔",
 		"被 kill 也是 ✔",
 	);
 	for (const msg of [failedMsg, killedMsg, okMsg]) {
@@ -1043,58 +1361,83 @@ test("终态通知：失败 / 被 kill 也是行末 ✔（只要结束就是 ✔
 	await h.shutdown();
 });
 
-test("正文颜色：工具块正文走 bash 输出色（bashOutput），不是 text 槽", { skip }, async () => {
+test("正文颜色：工具块正文走 bash 输出色（皮肤 vars.bashOutput），不是 text 槽", { skip }, async () => {
 	const h = await loadHarness();
 	const definition = h.extension.tools.get("background_output")!.definition as any;
 	const result = { content: [{ type: "text", text: "line-1\nline-2" }], details: { ok: true } };
-	const lines = definition.renderResult(result, { expanded: false, isPartial: false }, paintedTheme, renderContext()).render(80);
-	// 正文与 bash 工具调用后的输出同色：bashOutput（本机皮肤里的 bash 输出正文槽）
-	assert.match(lines[0]!, /bashOutput\(line-1\)/, `首行正文走 bashOutput 槽：${JSON.stringify(lines[0])}`);
-	assert.match(lines[1]!, /bashOutput\(line-2\)/, `末行正文走 bashOutput 槽：${JSON.stringify(lines[1])}`);
-	// 不再走 text 槽（那是 fg —— 改成 bash 输出色前的旧行为，也是本条的回归点）
-	assert.ok(!lines.join("\n").includes("text(line-1)"), "正文不该再走 text 槽");
-	// 结构符仍是 muted，不受影响
-	assert.match(lines[0]!, /muted\(\u2502 \)/, "│ 仍单独取 muted 槽");
-	assert.match(lines[1]!, /muted\(\u2514 \)/, "└ 仍单独取 muted 槽");
+	const theme = skinTheme({ bashOutput: "#333333" });
+	try {
+		const lines = definition.renderResult(result, { expanded: false, isPartial: false }, theme, renderContext()).render(80);
+		// 正文与 bash 工具调用后的输出同色：皮肤 vars.bashOutput（读文件 + pi-tui 转义）
+		assert.ok(
+			lines[0]!.includes(`${BASH_OUTPUT_ANSI}line-1\u001b[39m`),
+			`首行正文走 vars.bashOutput 的转义：${JSON.stringify(lines[0])}`,
+		);
+		assert.ok(
+			lines[1]!.includes(`${BASH_OUTPUT_ANSI}line-2\u001b[39m`),
+			`末行正文走 vars.bashOutput 的转义：${JSON.stringify(lines[1])}`,
+		);
+		// 不再走 text 槽（那是改成 bash 输出色前的旧行为，也是本条的回归点）
+		assert.ok(!lines.join("\n").includes("text(line-1)"), "正文不该再走 text 槽");
+		// 结构符仍是 muted，不受影响
+		assert.match(lines[0]!, /#444444\(\u2502 \)/, "│ 仍单独取 muted 槽");
+		assert.match(lines[1]!, /#444444\(\u2514 \)/, "└ 仍单独取 muted 槽");
+	} finally {
+		theme.cleanup();
+	}
 	await h.shutdown();
 });
 
-test("正文颜色：主题没定义 bashOutput 时回退 toolOutput（不抛异常、不留无色的裸文本）", { skip }, async () => {
+test("正文颜色：皮肤没定义 vars.bashOutput 时回退 toolOutput（不抛异常、不留无色的裸文本）", { skip }, async () => {
 	const h = await loadHarness();
 	const definition = h.extension.tools.get("background_output")!.definition as any;
 	const result = { content: [{ type: "text", text: "line-1" }], details: { ok: true } };
+	const withVar = skinTheme({ bashOutput: "#333333" });
+	const withoutVar = skinTheme({});
+	try {
+		// 有定义：vars.bashOutput 赢
+		const withSlot = definition
+			.renderResult(result, { expanded: false, isPartial: false }, withVar, renderContext())
+			.render(80);
+		assert.ok(withSlot[0]!.includes(`${BASH_OUTPUT_ANSI}line-1`), `有 vars.bashOutput 时用它：${JSON.stringify(withSlot[0])}`);
 
-	// 有定义：bashOutput 赢
-	const withSlot = definition
-		.renderResult(result, { expanded: false, isPartial: false }, realTheme({ bashOutput: "#333333" }), renderContext())
-		.render(80);
-	assert.match(withSlot[0]!, /#333333\(line-1\)/, `有 bashOutput 时用它：${JSON.stringify(withSlot[0])}`);
-
-	// 无定义（抛 Unknown theme color）：回退 toolOutput —— pi 的官方皮肤就没这个 token
-	const withoutSlot = definition
-		.renderResult(result, { expanded: false, isPartial: false }, realTheme(), renderContext())
-		.render(80);
-	assert.match(withoutSlot[0]!, /#222222\(line-1\)/, `无 bashOutput 时回退 toolOutput：${JSON.stringify(withoutSlot[0])}`);
+		// 无定义（内置 dark / light 与 pi-coder-catppuccin 都没这个色）：回退 toolOutput
+		const withoutSlot = definition
+			.renderResult(result, { expanded: false, isPartial: false }, withoutVar, renderContext())
+			.render(80);
+		assert.match(withoutSlot[0]!, /#222222\(line-1\)/, `无 vars.bashOutput 时回退 toolOutput：${JSON.stringify(withoutSlot[0])}`);
+	} finally {
+		withVar.cleanup();
+		withoutVar.cleanup();
+	}
 	await h.shutdown();
 });
 
 test("终态通知：无底色，正文走 bash 输出色、结构符走 muted 槽", { skip }, async () => {
 	const h = await loadHarness();
 	const renderer = h.extension.messageRenderers.get("background-task") as any;
-	const lines = renderer(
-		{
-			customType: "background-task",
-			content: "后台任务 bg_1 已成功结束（exit 0）。",
-			display: true,
-			details: { task: { id: "bg_1", status: "exited", exitCode: 0 } },
-		},
-		{ expanded: false, outputPad: 1 },
-		paintedTheme,
-	).render(80);
-	// 不再套 customMessageBg：整块不该出现任何背景槽
-	assert.ok(!lines.join("\n").includes("customMessageBg"), "不该再套 customMessageBg 底色");
-	assert.match(lines[1]!, /muted\(\u2514 \)/, "└ 单独取 muted 槽（树前缀含尾空格，与 plan 块同形）");
-	assert.match(lines[1]!, /bashOutput\(后台任务 bg_1/, "正文走 bashOutput 槽（与 bash 输出正文同色）");
+	const theme = skinTheme({ bashOutput: "#333333" });
+	try {
+		const lines = renderer(
+			{
+				customType: "background-task",
+				content: "后台任务 bg_1 已成功结束（exit 0）。",
+				display: true,
+				details: { task: { id: "bg_1", status: "exited", exitCode: 0 } },
+			},
+			{ expanded: false, outputPad: 1 },
+			theme,
+		).render(80);
+		// 不再套 customMessageBg：整块不该出现任何背景槽
+		assert.ok(!lines.join("\n").includes("customMessageBg"), "不该再套 customMessageBg 底色");
+		assert.match(lines[1]!, /#444444\(\u2514 \)/, "└ 单独取 muted 槽（树前缀含尾空格，与 plan 块同形）");
+		assert.ok(
+			lines[1]!.includes(`${BASH_OUTPUT_ANSI}后台任务 bg_1`),
+			`正文走 vars.bashOutput（与 bash 输出正文同色）：${JSON.stringify(lines[1])}`,
+		);
+	} finally {
+		theme.cleanup();
+	}
 	await h.shutdown();
 });
 

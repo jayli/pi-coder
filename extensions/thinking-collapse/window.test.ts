@@ -17,12 +17,18 @@ import {
 	ITALIC_OFF,
 	buildThinkingWindow,
 	clipToTail,
+	countMarkdownHooks,
+	escapeMarkdownHooks,
 	findCodeSpanEnd,
+	hookAwareWidth,
 	joinAllLines,
 	normalizeTabs,
 	stripUnpairedBackticks,
 	truncateTail,
 } from "./window.ts";
+
+/** 一条真的 truecolor CSI（彩虹色的形状）：转义必须整条跳过它，不能往里面插反斜杠。 */
+const CSI = "\u001b[38;2;149;174;43m";
 
 /** 假宽度函数：CJK 常见全角区间按 2 列，其余按 1 列。 */
 function widthOf(text: string): number {
@@ -149,6 +155,102 @@ describe("stripUnpairedBackticks", () => {
 	it("handles multi-backtick runs with the same rule as marked", () => {
 		assert.equal(stripUnpairedBackticks("``a`` `b"), "``a`` b");
 		assert.equal(stripUnpairedBackticks("`a`` b`"), "`a`` b`");
+	});
+});
+
+describe("escapeMarkdownHooks", () => {
+	it("escapes an email-looking token so marked cannot eat the preceding escape tail", () => {
+		// 根因：marked 的 email 自动链接把 CSI 尾巴的 `43m` 当成邮箱用户名的一部分吞掉
+		assert.equal(escapeMarkdownHooks("pi-web-access@0.39.0"), "pi-web-access\\@0.39.0");
+		assert.equal(escapeMarkdownHooks(`${CSI}pi-web-access@0.39.0`), `${CSI}pi-web-access\\@0.39.0`);
+	});
+
+	it("escapes an unmatched closing bracket but keeps a real link intact", () => {
+		// 未配对的 `](` 会让 CSI 的 `[` 变成链接左括号
+		assert.equal(escapeMarkdownHooks("see foo](bar) here"), "see foo\\](bar) here");
+		// 配对的 `[a](b)` 是真链接：转义它会把可见文字从 `a` 改成 `[a](b)`（失真）
+		assert.equal(escapeMarkdownHooks("a [label](http://x.dev) b"), "a [label](http://x.dev) b");
+	});
+
+	it("counts brackets over ANSI escapes, so a colored link is still a link", () => {
+		assert.equal(escapeMarkdownHooks(`a ${CSI}[label${CSI}](http://x.dev) b`), `a ${CSI}[label${CSI}](http://x.dev) b`);
+	});
+
+	it("treats an unmatched bracket as unmatched once the opener is clipped away", () => {
+		// 头部截断可能把 `[` 挤掉，窗口里只剩 `](` —— 此时它确实未配对
+		assert.equal(escapeMarkdownHooks("label](http://x.dev) b"), "label\\](http://x.dev) b");
+	});
+
+	it("does not escape an at-sign inside a bare URL", () => {
+		// URL 里插的反斜杠 marked 不会吃掉，渲染出来就成了带反斜杠的假 URL
+		assert.equal(escapeMarkdownHooks("curl https://user:pass@localhost:8002/x"), "curl https://user:pass@localhost:8002/x");
+		assert.equal(escapeMarkdownHooks("see www.example.com/a@b"), "see www.example.com/a@b");
+		assert.equal(escapeMarkdownHooks("ftp://u:p@h/f"), "ftp://u:p@h/f");
+	});
+
+	it("still recognises a URL when a colour escape sits inside or before it", () => {
+		// 彩虹着色给**每个单位**都前置一条颜色转义：按原始下标切片会把转义也算进词里，
+		// `https://` 就永远匹配不上 —— URL 判词必须走**可见**字符（实测过的 bug）。
+		assert.equal(
+			escapeMarkdownHooks(`curl ${CSI}https://user:pass@localhost:8002/x`),
+			`curl ${CSI}https://user:pass@localhost:8002/x`,
+		);
+		assert.equal(
+			escapeMarkdownHooks(`curl https://${CSI}user:pass@localhost:8002/x`),
+			`curl https://${CSI}user:pass@localhost:8002/x`,
+		);
+		assert.equal(escapeMarkdownHooks(`see ${CSI}www.example.com/a@b`), `see ${CSI}www.example.com/a@b`);
+		// 对照组：转义开头的**普通** email 仍然要转义（不能因为前面有转义就误当成 URL）
+		assert.equal(escapeMarkdownHooks(`${CSI}pi-web-access@0.39.0`), `${CSI}pi-web-access\\@0.39.0`);
+	});
+
+	it("escapes an at-sign when the URL's scheme was clipped away", () => {
+		// 头部截断把 `https://` 挤掉、只剩 `pass@x.com/path` 时，email 规则照样会吃掉颜色转义的
+		// 尾巴（实测），所以这种 `@` 仍要转义 —— “URL 开头完整”是必要条件。
+		assert.equal(escapeMarkdownHooks(`${CSI}pass@x.com/path`), `${CSI}pass\\@x.com/path`);
+		assert.equal(escapeMarkdownHooks("://user:pass@x.com/p"), "://user:pass\\@x.com/p");
+	});
+
+	it("leaves code span content alone", () => {
+		// marked 对 code span 不做 escape 处理，那里的 `\@` 会原样显示成反斜杠加 at
+		assert.equal(escapeMarkdownHooks("`a@b.com` and x@y.com"), "`a@b.com` and x\\@y.com");
+	});
+
+	it("is idempotent", () => {
+		// 重复转义会把 `\@` 变成 `\\@`，渲染出来就成了反斜杠加 at
+		const once = escapeMarkdownHooks("mail foo@bar.com and x](y");
+		assert.equal(escapeMarkdownHooks(once), once);
+	});
+
+	it("counts the source's own escaped hooks as already escaped", () => {
+		// 原文里本来就有 `\@` 时不该再插一个
+		assert.equal(escapeMarkdownHooks("a\\@b.com"), "a\\@b.com");
+		assert.equal(escapeMarkdownHooks("a\\\\@b.com"), "a\\\\\\@b.com", "偶数个反斜杠 = 未转义");
+	});
+
+	it("returns the input unchanged when there is nothing to escape", () => {
+		assert.equal(escapeMarkdownHooks("plain text 中文 123"), "plain text 中文 123");
+	});
+
+	it("counts exactly the backslashes it inserts", () => {
+		assert.equal(countMarkdownHooks("no hooks here"), 0);
+		assert.equal(countMarkdownHooks("a@b.com"), 1);
+		assert.equal(countMarkdownHooks("foo](bar"), 1);
+		assert.equal(countMarkdownHooks("[a](b) c@d.com"), 1, "配对的 `]` 不计数");
+		assert.equal(countMarkdownHooks("`a@b.com`"), 0, "code span 内不计数");
+		assert.equal(countMarkdownHooks("https://u:p@h/x"), 0, "URL 内不计数");
+		assert.equal(countMarkdownHooks(`curl ${CSI}https://u:p@h/x`), 0, "转义夹在 URL 里也不计数");
+		assert.equal(countMarkdownHooks(`${CSI}pass@x.com/p`), 1, "scheme 被截掉就要计数");
+		// 计数与转义结果必须同源：差值正好是插入的反斜杠数
+		const text = "mixed a@b.com [x](y) z](w `c@d` https://u:p@h";
+		assert.equal(escapeMarkdownHooks(text).length - text.length, countMarkdownHooks(text));
+	});
+
+	it("reserves the same width the escape pass will actually add", () => {
+		const text = "mail foo@bar.com then see](bar";
+		assert.equal(hookAwareWidth(text, widthOf), widthOf(text) + 2);
+		assert.equal(hookAwareWidth(text, widthOf), widthOf(escapeMarkdownHooks(text)), "预留口径 = 转义后的实际宽度");
+		assert.equal(hookAwareWidth("plain", widthOf), widthOf("plain"), "无钩子字符时与 widthOf 等价");
 	});
 });
 
@@ -317,5 +419,92 @@ describe("buildThinkingWindow", () => {
 		const line = render("x".repeat(60) + "\n\nshort", 40);
 		assert.ok(line.startsWith(HEADER_LABEL), `标签必须顶格：${JSON.stringify(line)}`);
 		assert.ok(!line.includes("│"), `不该有竖线：${JSON.stringify(line)}`);
+	});
+});
+
+/**
+ * 着色钩子（`/rainbow` 的接缝）。
+ *
+ * 这里用**假着色器**：只往每个字符前面插一个标记转义，不真算颜色 —— 本文件要钉的是窗口层
+ * 与着色层的**合约**，不是颜色值：
+ *
+ *   1. 着色后可见文本与不着色时逐字相同（否则宽度、截断、折行全部会变）；
+ *   2. 窗口截断**先**算完，着色只拿得到窗口范围（所以色相才能按绝对序号算）；
+ *   3. 着色拿到的 `dropped` 要在结果里真不见（被删的反引号不能又冒出来）。
+ */
+describe("buildThinkingWindow colorize hook", () => {
+	/** 假着色器：把窗口范围内的可见字符逐字包上 `«»`，并回报它收到的坐标。 */
+	function makeColorizer() {
+		const calls: Array<{ from: number; to: number; dropped: number[] }> = [];
+		const fn = (line: string, from: number, to: number, dropped: readonly number[]): string => {
+			calls.push({ from, to, dropped: [...dropped] });
+			let out = "";
+			for (let i = from; i < to; i++) {
+				if (dropped.includes(i)) continue;
+				out += `«${line[i]}»`;
+			}
+			return out;
+		};
+		return { fn, calls };
+	}
+
+	const strip = (text: string): string => text.replace(/\u00ab|\u00bb/g, "");
+
+	it("keeps the visible text identical to the uncolored output", () => {
+		const cases: Array<{ text: string; width: number }> = [
+			{ text: "alpha beta gamma", width: 40 },
+			{ text: "中文思考内容", width: 30 },
+			{ text: "x".repeat(200), width: 24 },
+			{ text: "head `span` tail\n\n尾", width: 28 },
+		];
+		for (const { text, width } of cases) {
+			const plain = render(text, width);
+			const { fn } = makeColorizer();
+			const colored = buildThinkingWindow(text, width, widthOf, false, fn);
+			assert.equal(strip(colored), plain, `可见文本变了：${JSON.stringify(colored)}`);
+			assert.equal(colored.split("\n").length, 1, "仍然只能是一行");
+			assert.ok(widthOf(strip(colored)) <= width, "宽度不受着色影响");
+		}
+	});
+
+	it("passes the window range, not the whole line, once the head is clipped", () => {
+		const text = "one two three four five six seven eight nine ten";
+		const width = 24;
+		const { fn, calls } = makeColorizer();
+		buildThinkingWindow(text, width, widthOf, false, fn);
+		assert.equal(calls.length, 1, "着色器只应被调一次");
+		// 截断发生在**着色之前**：着色拿到的是窗口区间，不是整行
+		assert.ok(calls[0].from > 0, `被截断时 from 应大于 0：${JSON.stringify(calls)}`);
+		assert.ok(calls[0].from < calls[0].to, "区间不该为空");
+	});
+
+	it("gives the full range when nothing is clipped", () => {
+		const { fn, calls } = makeColorizer();
+		buildThinkingWindow("short text", 40, widthOf, false, fn);
+		assert.deepEqual(calls, [{ from: 0, to: "short text".length, dropped: [] }]);
+	});
+
+	it("reports dropped backticks whose characters must not reappear", () => {
+		// 头部截断会切在 code span 中间，切出来的落单反引号会被删；
+		// 着色器必须收到这些下标，并在结果里略过它们。
+		const text = "aaaa `inline code` bbbb cccc `another` dddd";
+		const { fn, calls } = makeColorizer();
+		const colored = buildThinkingWindow(text, 24, widthOf, false, fn);
+		assert.equal(calls.length, 1);
+		assert.ok(strip(colored).split("\n").length === 1, "仍然只能是一行");
+		assert.equal(strip(colored).replace(/[^`]/g, "").length % 2, 0, `反引号必须配对（or 全无）：${JSON.stringify(strip(colored))}`);
+	});
+
+	it("falls back to uncolored text when the colorizer breaks the width contract", () => {
+		// 着色器是外部注入的：万一它多插了可见字符，宁可这一帧不着色也不能被 pi 折行。
+		const bad = () => "X".repeat(500);
+		const out = buildThinkingWindow("short text", 40, widthOf, false, bad);
+		assert.equal(strip(out), render("short text", 40));
+	});
+
+	it("returns the original markdown when there is nothing to colorize", () => {
+		const { fn, calls } = makeColorizer();
+		assert.equal(buildThinkingWindow("   \n\n ", 40, widthOf, false, fn), "   \n\n ");
+		assert.equal(calls.length, 0, "空内容不该调着色器");
 	});
 });

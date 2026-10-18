@@ -8,22 +8,19 @@
  * ## 目标形状（用户给的样例）
  *
  * `Run ` 替代 pi 内置的 `$ `；命令最多 **2 个视觉行**，第 2 行**不管溢出多少字符都只把
- * 末尾换成 `…`**（不推进第 3 行）；命令本身更长时在第 2 行下面补一行 `… +N lines`。
- * 这两行的起始列都对齐 `Run ` 里 `n` 那一列（第 3 列）。
+ * 末尾换成 `…`**（不推进第 3 行）。这两行的起始列都对齐 `Run ` 里 `n` 那一列（第 3 列）。
  *
  * ```
  * Run cd /Users/bachi/Library/pnpm/store/v11/links/@earendil-works/pi-cod
- *   ing-agent/0.86.0/5813aee6dbf81477902199f3db54e13ab115c8902b3ab00a
- *   … +1 lines
+ *   ing-agent/0.86.0/5813aee6dbf81477902199f3db54e13ab115c8902b3ab00a…
  * ```
  *
- * 这是**执行中**的形态：续行与 `… +N lines` 用等宽空格缩进。命令一执行完，这些行的
- * 前缀就换成 `│ `（树接上了），并在 `Run ` 下面开始挂结果：
+ * 这是**执行中**的形态：续行用等宽空格缩进。命令一执行完，这些行的前缀就换成 `│ `
+ *（树接上了），并在 `Run ` 下面开始挂结果：
  *
  * ```
  * Run cd /Users/bachi/Library/pnpm/store/v11/links/@earendil-works/pi-cod
- * │ ing-agent/0.86.0/5813aee6dbf81477902199f3db54e13ab115c8902b3ab00a
- * │ … +1 lines
+ * │ ing-agent/0.86.0/5813aee6dbf81477902199f3db54e13ab115c8902b3ab00a…
  * │ … (20 earlier lines, ctrl+o to expand)
  * └ 第一行实质输出
  *   第二行输出
@@ -48,7 +45,7 @@
  * `renderCommandLines` 的 `firstRowBudget` 与续行缩进都从 `COMMAND_PROMPT` /
  * `COMMAND_CHAIN` 现算，别写死数字。
  *
- * ## 折叠视图：break-all 硬折行 + 行尾 `…` + `… +N lines`
+ * ## 折叠视图：break-all 硬折行 + 行尾 `…`
  *
  * 折行规则是 CSS `word-break: break-all` 那一套：按列预算逐个 grapheme 填充，**装满到
  * 恰好放不下为止再断**，断点就在行末，不管它落在单词/路径中间。实现见 `hardWrapRows`。
@@ -59,15 +56,17 @@
  * 样子），命令和它的参数还被拆开。硬折行则把每行填满。
  *
  * 中间试过第三条路（commit 9024c26）：不折行、装不下就把行尾截成 `…`。它不提前折行，
- * 但一条长命令只剩一行可见内容、后面全丢；现在这条“2 行 + 行尾 `…` + `… +N lines`”
+ * 但一条长命令只剩一行可见内容、后面全丢；现在这条“2 行 + 行尾 `…`”
  * 是用户指定的折中：**溢出多少都只吃最后 1 行**，行数恒定可预期。
  *
  * 行数预算（`limit`，`DEFAULT_LINES = 2`）按**视觉行**算而不是源行：一条超长单行命令占满
  * 整个预算而不是刷十几行，而短行的多行命令（heredoc 等）仍然显示前 2 条源行 —— 两种情况
- * 都不会失控。`… +N lines` 里的 N 只数**整条源行**（第 2 行之后每条还没轮到的源行算 1，
- * 已经折出来但没放下的碎片也各算 1），不做 token 估算 —— 精确、一眼能对上行数。
- * 展开态（ctrl+o）用同一套硬折行规则，只是不限行数 —— 折行规则必须一致，否则展开态又会
- * 出现“提前折行”。
+ * 都不会失控。展开态（ctrl+o）用同一套硬折行规则，只是不限行数 —— 折行规则必须一致，否则
+ * 展开态又会出现“提前折行”。
+ *
+ * **没有 `… +N lines` 标记行**（用户 2026-10-16 定）：命令行尾那个 `…` 已经说明「还有内容
+ * 没显示」，再补一行数字说的是同一件事，用户明确不要。`renderCommandLines` 因此只返回
+ * 排好的行、不再回报隐藏行数。
  *
  * 语法高亮（`styleCommandLine`）跟着折行走：token 偏移是**源行坐标**，折行碎片也带自己在
  * 源行里的起点偏移（`WrappedRow.start`，前缀不参与折行、所以不用换算），两边同坐标直接
@@ -212,7 +211,7 @@
  *     会按命令行上色 —— 无害，只是不准。
  *   ③ 被折叠掉的行不参与上色（也根本不进渲染路径）。
 
-## 输出正文的独立颜色（扩展 token `bashOutput`）
+## 输出正文的独立颜色（皮肤 `vars` 里的 `bashOutput`）
 
 pi 的内置 bash 结果渲染器把输出正文写死成 `theme.fg("toolOutput", line)` —— 那是**所有
 工具输出共用的槽**（read / grep / ls 的正文、`…` 占位符都吃它），想只调 bash 输出的颜色
@@ -224,13 +223,16 @@ pi 的内置 bash 结果渲染器把输出正文写死成 `theme.fg("toolOutput"
 注意**传给 `renderResult` 的那个 theme 参数是没用的**：pi 的 bash 渲染器签名把第二个
 theme 参数写成 `_theme` 后根本不用它，输出行是用**模块级 theme 单例**上的色。
 那个单例（`Proxy` → `globalThis[Symbol.for("@earendil-works/pi-coding-agent:theme")]`）
-与扩展拿到的渲染器参数是同一个对象，所以改它的 `fgColors` 表就是改渲染器看到的色值。
+与扩展拿到的渲染器参数是同一个对象，所以改它的转义表就是改渲染器看到的色值
+（填的是 `fgAnsi` 表；2026-10-12 前写成 `fgColors`，那个字段从 pi 0.99.1 起就不存在了 ——
+上面那个 `typeof … .set` 守卫把它变成静默 no-op，所以这个特性一直静默无效，直到本次一并修掉）。
 
-`bashOutput` 是本仓库自造的 token（pi 官方 schema 里没有，与 `toolDiffAddedBg` 那两个
-同一条路：TypeBox 校验对未知 key 放行、`createTheme()` 把它们收进前景表）。**主题没定义它
-就什么都不做**（探测方式是真调一次 `getFgAnsi()`，pi 对未知 token 抛
-`Unknown theme color: …`），所以内置主题与 pi-coder-summer-night / pi-coder-catppuccin 照旧走 `toolOutput`，
-目前只有 `pi-coder-ayu.json` 定义了这个 token。展开态（ctrl+o）同样是输出正文，一并生效。
+这个色是**本仓自造**的（pi 官方 schema 里没有），pi ≤ 1.1.0 写在皮肤 `colors` 里当自定义 key；
+**pi 1.2.0 把主题 schema 改成 strict 后那条路断了**（多一个 key 整份皮肤作废、回退 system 主题）
+—— 现在它写在皮肤文件的 `vars.bashOutput` 里，扩展自己读（见 `theme-extra/colors.ts`）。
+**主题没定义它就什么都不做**：本机五套皮肤四套定义了这个灰（ayu / 1337 / coffee / nightfox），
+catppuccin 与 pi 内置 dark / light 没有，照旧走 `toolOutput`。
+展开态（ctrl+o）同样是输出正文，一并生效。
 
 ## 整块没有底色、没有 boundary 空行
  *
@@ -272,7 +274,7 @@ theme 参数写成 `_theme` 后根本不用它，输出行是用**模块级 them
  *   - **执行成功** → `toolDiffAdded`（diff 新增行的绿）
  *   - **执行失败** → `toolDiffRemoved`（diff 删除行的红）
  *
- * **只有 `Run ` 这一行前面有**：续行（`│ ` / 两格缩进）、`… +N lines` 标记、以及整棵结果树
+ * **只有 `Run ` 这一行前面有**：续行（`│ ` / 两格缩进）、以及整棵结果树
  *（`└ ` / 两格缩进）前面都不画 —— 圆点是「这一次 bash 调用」的状态灯，不是整块的边框。
  *
  * 挂法：调用侧的 `Box` 用 `paddingX: 0`，左边距那两格**由扩展自己画**（`withHeadBar`）：
@@ -298,7 +300,7 @@ theme 参数写成 `_theme` 后根本不用它，输出行是用**模块级 them
  *   /bash-preview off         恢复 pi 内置的 5 行预览
  *   /bash-timeout             查看 bash 执行期限（默认 / 上限 / env 覆盖）
  *
- * 折叠固定开启、保留 2 个视觉行 + 行尾 `…` / `… +N lines`（原先的 `/bash-collapse`
+ * 折叠固定开启、保留 2 个视觉行 + 行尾 `…`（原先的 `/bash-collapse`
  * 指令已删除）；树形缩进固定开启（`PI_BASH_TREE` 已废弃），流式只剩 `PI_BASH_STREAM=on`。
  *
  * 附带第五个职责：**短命令不画耗时页脚** —— 默认执行时长 < 2s 就把 `Took 0.1s` 那一行
@@ -378,9 +380,12 @@ theme 参数写成 `_theme` 后根本不用它，输出行是用**模块级 them
 import type { BashToolOptions, ExtensionAPI, ThemeColor, ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { createBashToolDefinition, getAgentDir } from "@earendil-works/pi-coding-agent";
 import { Box, truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
+import * as piTui from "@earendil-works/pi-tui";
 import { readFileSync, realpathSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
+// 输出正文的独立色（`vars.bashOutput`）与 pi 1.2.0 的 strict schema —— 见 theme-extra/colors.ts。
+import { colorOpsFrom, type ColorOps, themeVarAnsi } from "./theme-extra/colors.ts";
 import {
 	ESCALATION_TITLE,
 	boundaryFromEnv,
@@ -408,8 +413,8 @@ import { EMPTY_COMPONENT, createGroupTree } from "./explored-group/render.ts";
 /**
  * 命令行**折叠态**保留的**视觉行**数（硬折行后一条超长单行命令也最多占这么多行）。
  *
- * 2 是用户定的观感：第 1 行装到满，第 2 行溢出多少都截成 `…`；命令本身更长时
- * 第 2 行下面再补一行 `… +N lines` 标记。详见文件头「命令行：2 行 + `Run ` 前缀」一节。
+ * 2 是用户定的观感：第 1 行装到满，第 2 行溢出多少都截成 `…`；没有额外的标记行
+ *（`… +N lines` 已于 2026-10-16 按用户要求去掉）。详见文件头「命令行：2 行 + `Run ` 前缀」。
  */
 const DEFAULT_LINES = 2;
 
@@ -435,7 +440,7 @@ const COMMAND_CHAIN_COLOR = "muted";
 const COMMAND_CHAIN = "│ ";
 /** 纯缩进（2 列）：命令执行中还没接上树时的续行、结果树里 `└ ` 之后的正文续行。 */
 const COMMAND_INDENT = "  ";
-/** 行尾溢出标记（命令行最后一行末尾、截断提示行行首共用）。 */
+/** 行尾溢出标记（命令行最后一行末尾）；输出截断提示也用它起头。 */
 const ELLIPSIS = "…";
 
 /**
@@ -621,12 +626,11 @@ interface PendingRow {
 }
 
 /**
- * 一条命令的渲染结果。`hiddenLines` 是**整个视觉行**没显示的条数（`0` 就没有标记行），
- * 被行尾 `…` 吃掉的那一行也计在内。
+ * 一条命令的渲染结果：排好的视觉行（已上色）。命令有没有被截断不再回报 ——
+ * 判据就是最后一行末尾那个 `…`（2026-10-16 去掉了 `… +N lines` 标记行）。
  */
 interface CommandRender {
 	lines: string[];
-	hiddenLines: number;
 }
 
 function tokenizeShellLine(line: string, openQuote: string | null): { tokens: ShellToken[]; openQuote: string | null } {
@@ -799,7 +803,7 @@ function ellipsizeTail(prefix: string, text: string, budget: number): string {
 }
 
 /**
- * 渲染一条命令（可能多源行）：折行到 `limit` 个视觉行，装不下的归 `hiddenLines`。
+ * 渲染一条命令（可能多源行）：折行到 `limit` 个视觉行，装不下的丢掉（行尾已换成 `…`）。
  *
  * 前缀：第 1 条源行用 `firstPrefix`（`Run `）起头，它折出来的续行、以及后面每条源行都用
  * `linePrefix`（`│ ` 或两格缩进）—— 于是续行的正文对齐到 `Run ` 的 `n` 列（见文件头）。
@@ -807,8 +811,8 @@ function ellipsizeTail(prefix: string, text: string, budget: number): string {
  * 规则（详见文件头「命令行：2 行 + `Run ` 前缀」）：
  *   ① **只要有溢出**，最后保留的那个视觉行末尾就换成 `…`（不管溢出的是一行的尾巴
  *      还是后面几行）；没溢出就一个 `…` 也不画；
- *   ② `hiddenLines` = 最后保留行**之后**还剩多少个视觉行：本条源行折到但没显示的碎片各
- *      算 1 行，后面每条没轮到的源行再各算 1 行。
+ *   ② 装不下的部分（本条源行折出来没放下的碎片、后面还没轮到的源行）直接丢弃 ——
+ *      不再数它们有几行，也不再补 `… +N lines` 标记行。
  *
  * 折行、截断都在**纯文本**上做（`hardWrapRows` / `ellipsizeTail` 负责自带前缀的宽度），
  * 最后才逐行上色 —— 反过来会把 SGR 序列从中间切断。
@@ -827,14 +831,13 @@ function renderCommandLines(
 	// 先全部按**纯文本**摆好（前缀 + 折行 + 行尾 `…`），最后一步再上色 —— 行尾 `…`
 	// 必须在纯文本上放，否则会把 SGR 序列从中间切断
 	const pending: PendingRow[] = [];
-	let hiddenLines = 0;
-	let hiddenTail = 0;
 	let quote = openQuote;
+	let truncated = false;
 
 	for (let index = 0; index < lines.length; index++) {
+		// 预算用完了：后面的源行一律不画（`…` 由末尾那段统一补）
 		if (pending.length >= limit) {
-			// 后面每条源行都算一行没显示（它自己折几行不改变这个事实）
-			hiddenLines += lines.length - index;
+			truncated = true;
 			break;
 		}
 		const line = lines[index]!;
@@ -857,24 +860,20 @@ function renderCommandLines(
 				budget: row.prefix === firstPrefix ? firstRowBudget : restRowBudget,
 			});
 		}
+		// 本条源行还有碎片没放下 → 预算已用完，同样不再往下走
 		if (rows.length > take) {
-			// 本条源行还有碎片没放下：它们就是“没显示的视觉行”
-			hiddenTail = rows.length - take;
+			truncated = true;
 			break;
 		}
 	}
 
-	hiddenLines += hiddenTail;
-	if (hiddenLines > 0 && pending.length > 0) {
+	if (truncated && pending.length > 0) {
 		// 还剩内容没显示：最后保留的那行末尾换成 `…`（宽度不变）
 		const last = pending[pending.length - 1]!;
 		last.text = ellipsizeTail(last.prefix, last.text, last.budget);
 	}
 
-	return {
-		lines: pending.map((row) => styleCommandLine(row.prefix, row.text, row.tokens, row.sourceStart, theme)),
-		hiddenLines,
-	};
+	return { lines: pending.map((row) => styleCommandLine(row.prefix, row.text, row.tokens, row.sourceStart, theme)) };
 }
 
 type ShellTokenKind = "space" | "comment" | "operator" | "command" | "flag" | "string" | "path" | "variable" | "word";
@@ -1125,7 +1124,7 @@ const GUTTER_WIDTH = 2;
  * 两边同宽才不会让命令与结果错开 —— 改一边必须改另一边。
  */
 const INDENT_WIDTH = 1;
-/** 树里“还有下文”的行：命令续行、命令折叠标记、输出的截断提示。 */
+/** 树里“还有下文”的行：命令续行、输出的截断提示。 */
 const GUTTER_PIPE = COMMAND_CHAIN;
 /** 树里“正文内容”的续行缩进（与 `└ ` 等宽 + 块左边距，正文对齐）。 */
 const GUTTER_BODY = COMMAND_INDENT + " ".repeat(INDENT_WIDTH);
@@ -1469,47 +1468,48 @@ function isBlankResultLine(line: string): boolean {
 }
 
 /**
- * 在**同步窗口**内把主题的 `toolOutput` 临时换成 `bashOutput`，让 pi 内置 bash 结果渲染器
- * 画出来的输出正文用上自己的颜色槽（详见文件头「输出正文的独立颜色」一节）。
+ * 在**同步窗口**内把主题的 `toolOutput` 转义临时换成皮肤 `vars.bashOutput` 的，让 pi 内置
+ * bash 结果渲染器画出来的输出正文用上自己的颜色（详见文件头「输出正文的独立颜色」一节）。
  *
- * 为什么必须是「换主题表」而不是「把主题对象换给渲染器」：pi 的 bash 渲染器**根本不看传进去
- * 的那个 theme 参数**（`renderResult(result, options, _theme, context)`），它用的是模块级的
- * `theme` 单例（`Proxy` → `globalThis[Symbol.for("@earendil-works/pi-coding-agent:theme")]`）。
+ * 为什么必须是「换主题的转义表」而不是「把主题对象换给渲染器」：pi 的 bash 渲染器**根本不看
+ * 传进去的那个 theme 参数**（`renderResult(result, options, _theme, context)`），它用的是
+ * 模块级的 `theme` 单例（`Proxy` → `globalThis[Symbol.for("@earendil-works/pi-coding-agent:theme")]`）。
  * 那个单例与传给扩展的渲染器参数**是同一个对象**（单例就是为跨 loader 共用而设计的），
- * 所以直接改它的 `fgColors` 表，渲染器下一次 `theme.fg("toolOutput", line)` 就会命中新色值。
+ * 所以直接改它的 `fgAnsi` 表，渲染器下一次 `theme.fg("toolOutput", line)` 就会命中新转义。
  *
  * 四个要点：
  *   ① **只在同步窗口内换**：`base.renderResult()` 是同步的，输出行（含展开态那份）全部在
  *      这次调用里 `theme.fg("toolOutput", …)` 烘焙成字符串，所以 try/finally 里换进换出
  *      不会有第二个渲染插进来；换颜色也**不会**泄漏给其他工具（read / grep 的输出是它们
  *      自己的渲染器画的，不在这个窗口里）。
- *   ② **主题里没有 `bashOutput` 就什么都不做**（内置主题与 pi-coder-summer-night / pi-coder-catppuccin 都没
- *      这个 token）—— 探测方式是真调一次 `theme.getFgAnsi()`，pi 对未知 token 抛
- *      `Unknown theme color: …`。
- *   ③ `fgColors` 是 pi `Theme` 类的公开字段（`Map<string, string>`，存的是**已解析的
- *      SGR 前缀**）；哪天 pi 把它藏起来/改名，这里就自动退化成原样调用（返回前那个
- *      `typeof … .set` 判定），不会抛异常、只是颜色不生效。
+ *   ② **皮肤没定义 `vars.bashOutput` 就什么都不做**（内置 dark / light 与 pi-coder-catppuccin
+ *      都没这个色）—— 取不到 `undefined` 就原样调用。
+ *   ③ 直接改的是 `fgAnsi`（pi `Theme` 的公开字段，`Map<string, string>`，存的是**已解析的
+ *      SGR 前缀**）—— 0.99.1 起 `fgColors` 就已经不存在了（存的是色值、再配 `fgAnsi` 表），
+ *      旧代码一直改的那个字段到这个版本是 `undefined`，于是整个特性静默 no-op；本次改为
+ *      `fgAnsi` 优先、`fgColors` 兼容。两个都没有（pi 把它藏起来/改名）就自动退化成原样
+ *      调用，不抛异常、只是颜色不生效。
  *   ④ 只动 `toolOutput`：命令标题 / `... (N earlier lines …)` 提示 / `Took Xs` 页脚走的是
  *      `toolTitle` / `muted`，命令行与折叠提示是扩展自绘的，一律不受影响。
  */
 function withBashOutputColor<T>(theme: any, render: () => T): T {
-	const fgColors = theme?.fgColors;
-	if (typeof fgColors?.set !== "function" || typeof fgColors?.get !== "function") return render();
-	let override: string;
-	try {
-		override = theme.getFgAnsi("bashOutput");
-	} catch {
-		return render();
-	}
-	const previous = fgColors.get("toolOutput");
-	fgColors.set("toolOutput", override);
+	const fgAnsi = theme?.fgAnsi;
+	const valueTable = typeof fgAnsi?.set === "function" && typeof fgAnsi?.get === "function" ? fgAnsi : undefined;
+	if (valueTable === undefined) return render();
+	const override = themeVarAnsi(theme, "bashOutput", "fg", SKIN_OPS);
+	if (override === undefined) return render();
+	const previous = valueTable.get("toolOutput");
+	valueTable.set("toolOutput", override);
 	try {
 		return render();
 	} finally {
-		if (previous === undefined) fgColors.delete("toolOutput");
-		else fgColors.set("toolOutput", previous);
+		if (previous === undefined) valueTable.delete("toolOutput");
+		else valueTable.set("toolOutput", previous);
 	}
 }
+
+/** 给 `theme-extra/colors.ts` 的转换函数（与 pi 内部生成 token 转义用的同一对）。 */
+const SKIN_OPS: ColorOps | undefined = colorOpsFrom(piTui);
 
 export default function (pi: ExtensionAPI) {
 	// 折叠固定开启、保留 DEFAULT_LINES 个视觉行（原先的 `/bash-collapse` 指令已删除）。
@@ -2129,7 +2129,7 @@ export default function (pi: ExtensionAPI) {
 						// 执行中续行只用等宽缩进，`│ ` 是“命令已结束”的信号（用户定的观感，
 						// 见文件头「命令行：2 行 + `Run ` 前缀」）
 						const linePrefix = resultSeen ? COMMAND_CHAIN : COMMAND_INDENT;
-						const { lines, hiddenLines } = renderCommandLines(
+						const { lines } = renderCommandLines(
 							commandLines,
 							COMMAND_PROMPT,
 							linePrefix,
@@ -2141,11 +2141,6 @@ export default function (pi: ExtensionAPI) {
 							theme,
 						);
 						result = lines.map((row, idx) => row + (idx === 0 ? timeoutSuffix : ""));
-						// 命令本身没显示完 → `… +N lines`（执行中不挂 `│ `，与续行一致）
-						if (hiddenLines > 0) {
-							const hint = theme.fg("muted", `${linePrefix}${ELLIPSIS} +${hiddenLines} lines`);
-							result = [...result, truncateToWidth(hint, wrapWidth, ELLIPSIS)];
-						}
 					} else if (invalid || !command) {
 						// invalid（args.command 不是字符串）/ 空命令：文本固定是 `Run [invalid arg]`
 						// / `Run ...`，短到根本不会折行，而折行分支能原样保留嵌套样式
@@ -2162,7 +2157,7 @@ export default function (pi: ExtensionAPI) {
 						const firstRowBudget = suffixWidth > 0 ? Math.max(4, wrapWidth - suffixWidth) : wrapWidth;
 						// 执行中续行用等宽缩进，完成后才换成 `│ `（与折叠态同一条规则）
 						const linePrefix = resultSeen ? COMMAND_CHAIN : COMMAND_INDENT;
-						// 与折叠态共用同一套摆行逻辑，只把行数预算放开（`hiddenLines` 必为 0）
+						// 与折叠态共用同一套摆行逻辑，只把行数预算放开（不会截断）
 						const { lines } = renderCommandLines(
 							commandLines,
 							COMMAND_PROMPT,

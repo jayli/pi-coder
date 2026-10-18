@@ -1,6 +1,6 @@
 # Themes
 
-Five themes ship with this package: `pi-coder-1337` (the one `config/settings.json` selects), `pi-coder-catppuccin`, `pi-coder-ayu`, `pi-coder-coffee` and `pi-coder-nightfox`. All five carry the `pi-coder-` prefix, so their names cannot collide with themes from another installed package. Before 2.0.0 they shipped as `summer-night`, `catppuccin` and `ayu`; `pi-coder-summer-night` (an iceberg.vim palette) existed through 2.0.5 and was replaced by `pi-coder-1337`. The last two were added in 2.4.0, both produced by the [`pi-theme-from-palette`](../skills/pi-theme-from-palette/) skill that ships with this package.
+Five themes ship with this package: `pi-coder-nightfox` (the one `config/settings.json` selects), `pi-coder-1337`, `pi-coder-catppuccin`, `pi-coder-ayu` and `pi-coder-coffee`. All five carry the `pi-coder-` prefix, so their names cannot collide with themes from another installed package. Before 2.0.0 they shipped as `summer-night`, `catppuccin` and `ayu`; `pi-coder-summer-night` (an iceberg.vim palette) existed through 2.0.5 and was replaced by `pi-coder-1337`. The last two were added in 2.4.0, both produced by the [`pi-theme-from-palette`](../skills/pi-theme-from-palette/) skill that ships with this package.
 
 ## Switching themes
 
@@ -23,7 +23,7 @@ The copy commands in [installation.md](installation.md#apply-the-global-config-f
 
 ### `pi-coder-1337`
 
-The current default and the thinnest port: it takes Codex CLI's built-in syntax theme `1337` (Mark Herpich's Sublime palette, one of the 32 themes two-face bundles into the Codex binary; `[tui] theme = "1337"` in `~/.codex/config.toml` selects it). It was re-derived from the theme blob embedded in the local codex executable (a zlib-compressed scope→color table) and reconciled scope by scope against upstream's `1337.tmTheme`: all 48 named scopes matched, 37 of them byte-identical, and the remaining 11 are Codex merging a scope into `None` — neither side ever held two different values for one scope. **It is also the reference all the other themes are built against**: the skill copies the 37 secondary slots from this file byte-for-byte.
+The reference theme every other theme is built against, and the thinnest port: it takes Codex CLI's built-in syntax theme `1337` (Mark Herpich's Sublime palette, one of the 32 themes two-face bundles into the Codex binary; `[tui] theme = "1337"` in `~/.codex/config.toml` selects it). It was re-derived from the theme blob embedded in the local codex executable (a zlib-compressed scope→color table) and reconciled scope by scope against upstream's `1337.tmTheme`: all 48 named scopes matched, 37 of them byte-identical, and the remaining 11 are Codex merging a scope into `None` — neither side ever held two different values for one scope. **It is also the reference all the other themes are built against**: the skill copies the 37 secondary slots from this file byte-for-byte.
 
 1337 defines **code syntax only** — `background` `#191919`, `foreground` `#f8f8f2`, `caret`, `selection` `#515151`, `lineHighlight`, `invisibles` `#3b3a32`, plus those 48 named scope entries in 28 distinct foreground colors. It has no UI slots at all, so of pi's 59 colors the syntax slots translate directly and the UI slots are picked from the same 28 values:
 
@@ -42,13 +42,13 @@ Two merges are deliberate. 1337 splits function/class names (`#8cdaff`) from lib
 
 The remaining UI slots come from 1337's own palette: `border` / `selectedBg` ← `selection`, `borderMuted` ← `invisibles`, `warning` ← `constant.numeric`, `success` ← git-gutter's insertion green `#a6e22e`, `toolTitle` sharing `#8cdaff`, `toolOutput` ← `variable.parameter.function`, `mdListBullet` ← `storage.type` `#fbdfb5`, `bashMode` ← `variable.parameter`, `customMessageLabel` ← the PHP namespace pink `#ffb2f9`. The thinking ladder follows 1337's own cool→warm order, with the top two levels locked (below).
 
-**Six values are locked to the removed `pi-coder-summer-night`**, not to 1337: `toolDiffAdded` / `toolDiffRemoved` / `toolDiffAddedBg` / `toolDiffRemovedBg` (the diff foregrounds and the full-line backgrounds) and `thinkingXhigh` / `thinkingMax`. One consequence is worth stating: those two line backgrounds were picked for summer-night's `#161616` card (1.14 / 1.12:1) and against this theme's `#202020` success card they are 1.02 / 1.01:1 — nearly flat, so the line background adds almost nothing inside a dark diff block (the foreground green is unaffected at 7.83:1). Making them visible again means changing either `toolSuccessBg` or the two backgrounds; it is not an oversight.
+**Four values are locked to the removed `pi-coder-summer-night`**, not to 1337: `toolDiffAdded` / `toolDiffRemoved` (the diff foregrounds) and `thinkingXhigh` / `thinkingMax`. The diff line backgrounds are no longer slots of their own: they live in `vars.addedLine` / `vars.removedLine` and [`tool-diff.ts`](../extensions/tool-diff.ts) reads them from there (see [Custom tokens](#custom-tokens)). The old `toolDiffAddedBg` / `toolDiffRemovedBg` colors keys were dropped when pi 1.2.0 made the schema strict; the values did not move. Making the line backgrounds more visible means changing `vars.addedLine` / `vars.removedLine`, not `toolSuccessBg`.
 
 `error` is deliberately **not** 1337's `markup.deleted` (`#f92672`): it shares one `vars.removedRed` (`#e27878`) with `toolDiffRemoved`, so editing one place changes both — 6.02:1 on `#191919` and 6.43:1 on `toolErrorBg`. `#f92672` and 1337's `support.constant` `#ecfdb9` are the only two 1337 values this theme gives up. `accent` / `borderAccent` are `#8cdaff`, the same value as `vars.funcBlue` but a **separate** variable, so tuning the accent does not repaint `syntaxFunction` / `syntaxType` / `toolTitle` with it. `mdCode` is the deep cyan `#0d92c1` (accent's previous value, 4.94:1), kept in its own `vars.mdCodeCyan`.
 
 Four backgrounds are specified rather than derived: `userMessageBg` / `customMessageBg` `#242424`, `toolSuccessBg` `#202020`, `toolErrorBg` `#171010`, and `export.cardBg` `#181825` with `export.pageBg` `#111111`. `toolPendingBg` points at the same `vars.successCard` as `toolSuccessBg`, so a pending card and a finished one share one background — see [pending and success share a background](#pending-and-success-share-a-background).
 
-The file has 35 `vars` and 59 colors, with no `#` literal in `colors` and no empty value. It also defines `bashOutput` (`#999999`, its own variable) where `pi-coder-catppuccin` does not.
+The file has 35 `vars` and 56 colors, with no `#` literal in `colors` and no empty value. It also defines `vars.bashOutput` (`#999999`, its own variable) where `pi-coder-catppuccin` does not.
 
 ### `pi-coder-catppuccin`
 
@@ -58,7 +58,7 @@ One deliberate deviation from upstream beyond the layout: `thinkingXhigh` and `t
 
 ### `pi-coder-ayu`
 
-A port of the official `ayu-dark` palette from [iodic/pi-ayu-themes](https://github.com/iodic/pi-ayu-themes), reformatted to the same four-section shape as `pi-coder-catppuccin.json` and with all 55 colors going through `vars`. Like `pi-coder-1337` — and unlike `pi-coder-catppuccin` — it defines `bashOutput`.
+A port of the official `ayu-dark` palette from [iodic/pi-ayu-themes](https://github.com/iodic/pi-ayu-themes), reformatted to the same four-section shape as `pi-coder-catppuccin.json` and with all 52 colors going through `vars`. Like `pi-coder-1337` — and unlike `pi-coder-catppuccin` — it defines `vars.bashOutput`.
 
 Four deliberate deviations from upstream:
 
@@ -86,38 +86,32 @@ All five themes point `toolPendingBg` at the same variable as `toolSuccessBg` (`
 - Every non-`#` value in `colors` is looked up in `vars`. A missing reference throws `Variable reference not found`, **the whole theme fails to load**, and pi falls back to the built-in `dark` theme without an error message. This is the single most common way to break a theme.
 - An empty string means "terminal default foreground" — used by `text` and, in pi-coder-catppuccin, `syntaxVariable`.
 - `export` only affects HTML produced by `/export`; when it is missing, pi derives those colors from `userMessageBg`. In these files it is set explicitly, and through `vars` references like every other color.
-- **`vars` holds only variables a slot still uses**: blanking a color to `""` leaves the variable it pointed at referenced by nothing, and those entries are deleted rather than kept as spares (they cannot break loading either way, but they do read as if something used them). The single exception is `pi-coder-catppuccin`'s `pendingPanel` (`#0b151f`), kept whole as a ready value should the pending background ever come back. So the five files carry 35 / 31 / 27 / 45 / 45 `vars` for 59 / 54 / 55 / 59 / 59 colors.
+- **`vars` holds only variables a slot still uses**: blanking a color to `""` leaves the variable it pointed at referenced by nothing, and those entries are deleted rather than kept as spares (they cannot break loading either way, but they do read as if something used them). The single exception is `pi-coder-catppuccin`'s `pendingPanel` (`#0b151f`), kept whole as a ready value should the pending background ever come back. So the five files carry 35 / 31 / 27 / 45 / 45 `vars` for 56 / 52 / 52 / 56 / 56 colors.
 
 ## Custom tokens
 
-Three tokens in these files are **not** part of pi's official theme schema:
+Three extension-owned colors are **not** part of pi's official theme schema. Since pi **1.2.0** the schema is strict (`additionalProperties: false` on `colors`, `export` and the top level), so they cannot live in `colors` any more — one unknown key invalidates the **whole theme** and pi silently falls back to `system`. They live in `vars` instead, which has no key-name restriction:
 
-| Token | Read by | Effect |
+| Variable | Read by | Effect |
 | --- | --- | --- |
-| `toolDiffAddedBg` | `tool-diff.ts` | Full-line background of added diff lines. |
-| `toolDiffRemovedBg` | `tool-diff.ts` | Full-line background of removed diff lines. |
+| `addedLine` | `tool-diff.ts` | Full-line background of added diff lines. |
+| `removedLine` | `tool-diff.ts` | Full-line background of removed diff lines. |
 | `bashOutput` | `bash-command-collapse.ts` | Foreground of bash output text only. |
 
-All five themes define the two diff backgrounds. All but `pi-coder-catppuccin` also define `bashOutput`.
+`tool-diff` also accepts `diffAddedBg` / `diffRemovedBg`, the naming `pi-coder-ayu` and `pi-coder-catppuccin` use; both spellings are tried in that order. All five themes define the two diff backgrounds (as `addedLine` / `removedLine` in 1337, coffee and nightfox, as `diffAddedBg` / `diffRemovedBg` in ayu and catppuccin). All but `pi-coder-catppuccin` also define `vars.bashOutput`.
 
-### Why they work at all
+### How `vars` are read
 
-Three things line up:
+`vars` is documented by pi for custom values, but `createTheme()` only registers `colors` entries in the lookup table — `getFgAnsi()` / `theme.colors` cannot see a `vars` entry at all (measured 2026-10-12). So [`extensions/theme-extra/colors.ts`](../extensions/theme-extra/colors.ts) reads the active theme's **source file** (`theme.sourcePath`, available for user themes and the built-in dark / light alike), parses `vars`, and converts the value with pi-tui's own `foregroundAnsi` / `backgroundAnsi` — the same pair pi uses internally, so the SGR bytes match `getFgAnsi()` for the same value in both `truecolor` and `256color` mode. The file is cached by mtime and the theme object by `WeakMap`, so `/theme` and `/reload` pick up a changed skin.
 
-1. Theme validation uses TypeBox's `Compile().Check()`, which **allows unknown keys** — the `additionalProperties: false` in pi's `theme-schema.json` is not on the executed path.
-2. `createTheme()` puts any color that is not one of the seven known background tokens into the `fgColors` table.
-3. `getFgAnsi()` looks colors up **by key**, without checking the key against the union type. Since a background SGR is a foreground SGR with `38` replaced by `48`, an unknown token can be resolved and used as a background.
-
-If pi ever validates strictly, these tokens stop resolving. Nothing breaks loudly: `tool-diff` silently falls back to the much flatter `toolSuccessBg` / `toolErrorBg`, and `bash-command-collapse` falls back to `toolOutput`.
+Fallbacks are unchanged: a theme without `vars.bashOutput` (including pi's built-ins and `pi-coder-catppuccin`) leaves bash output on `toolOutput`; a theme without a diff background name leaves `tool-diff` on `toolSuccessBg` / `toolErrorBg`. A value that is not a real color (a chained name, a typo) is caught and falls back the same way. `PI_THEME_VARS=off` disables the whole `vars` read — the escape hatch for a new extension paired with an old skin that still carries the deleted names.
 
 ### `bashOutput` in detail
 
-pi's built-in bash renderer hardcodes output text to `toolOutput`, a slot shared by every tool (`read`, `grep`, `ls` all use it). To give bash output its own color, `bash-command-collapse.ts` temporarily swaps that one key in the module-level theme singleton while it delegates to the built-in renderer — the swap window must be synchronous, and it can only touch this one key.
+pi's built-in bash renderer hardcodes output text to `toolOutput`, a slot shared by every tool (`read`, `grep`, `ls` all use it). To give bash output its own color, `bash-command-collapse.ts` temporarily swaps that one key in the module-level theme singleton while it delegates to the built-in renderer — the swap window must be synchronous, and it can only touch this one key. The value comes from `vars.bashOutput` through `themeVarAnsi()`; when the theme does not define it, nothing is swapped.
 
-The extension probes for the token by calling `getFgAnsi("bashOutput")` and does nothing if it throws `Unknown theme color: ...`. So:
-
-- Themes without `bashOutput` (including pi's built-ins and `pi-coder-catppuccin`) are unaffected — bash output simply uses `toolOutput`.
-- To split the color out for any theme, add one `vars` entry and one `colors` line, exactly as `pi-coder-ayu` does.
+- Themes without the variable are unaffected — bash output simply uses `toolOutput`.
+- To split the color out for any theme, add one **`vars`** entry; there is no `colors` line to add, and adding one now breaks the theme on pi 1.2.0+.
 - `bashOutput` does not appear in the `/theme` preview swatches, which only draw pi's standard token list.
 
 ## Editing or porting a theme

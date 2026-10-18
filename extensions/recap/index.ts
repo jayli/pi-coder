@@ -83,8 +83,14 @@ const SUBAGENT_WAIT_MS = 10_000;
 const GENERATE_TIMEOUT_MS = 30_000;
 /** 摘要上限：单行、120 字符以内（"一眼可扫"）。 */
 const MAX_RECAP_CHARS = 120;
-/** 摘要模型的最大输出 token。 */
-const MAX_TOKENS = 96;
+/**
+ * 摘要模型的最大输出 token。**必须同时容得下思考与正文**：claude 路由在
+ * `gateway/config.yaml` 里钉了 `thinking: { type: enabled }` + `reasoning_effort: max`，摘要请求
+ * 即使不传 thinking 也会先思考，而 Anthropic 的 `max_tokens` 是两者共享的预算。本机实测
+ * 96 时 17 次里 6 次以 `stop_reason=max_tokens` 收场（4 次思考吃光、正文 0 字符，2 次只剩半句），
+ * 512 时 8/8 完整结束；同目录 `working-indicator/` 的长思考实测到 1400 token，所以照它的结论取 1024。
+ */
+const MAX_TOKENS = 1024;
 /** 喂给摘要模型的对话片段上限，避免把整段长回复塞进提示词。 */
 const EXCHANGE_CLIP_CHARS = 4000;
 /** widget key。pi-recap 已卸载，所以直接用 "recap"。 */
@@ -316,7 +322,8 @@ export default function (pi: ExtensionAPI) {
 					headers: auth.headers,
 					signal: controller.signal,
 					maxTokens: MAX_TOKENS,
-					temperature: 0,
+					// **不传 temperature**：这些 max 档路由在 0 温度下会退化成停不下来的长思考
+					// （`working-indicator/` 实测 2048 额度也被吃光且零正文，默认温度 3s 正常返回）。
 					cacheRetention: "none",
 				},
 			);
@@ -324,7 +331,7 @@ export default function (pi: ExtensionAPI) {
 			// 被中断 / 被新一轮取代：丢弃结果，绝不覆盖更新的摘要。
 			if (controller.signal.aborted) return;
 
-			const text = cleanRecapText(textFromAssistant(response));
+			const text = cleanRecapText(textFromAssistant(response), response.stopReason === "length");
 			if (!text) return;
 
 			completedKey = key;
@@ -469,8 +476,14 @@ export default function (pi: ExtensionAPI) {
 			.join("\n");
 	}
 
-	/** 清洗模型输出：只留第一行，去掉引号 / markdown 包裹 / 冗余前缀，超长截断。 */
-	function cleanRecapText(raw: string): string {
+	/**
+	 * 清洗模型输出：只留第一行，去掉引号 / markdown 包裹 / 冗余前缀，超长截断。
+	 *
+	 * `truncated` = 模型是被 `max_tokens` 切断的（`stop_reason=length`）：这时正文本就是半句，
+	 * 字符数往往还不到 120，光靠长度判断看不出来 —— 必须补一个省略号，别把半句话
+	 * 当成完整摘要显示。
+	 */
+	function cleanRecapText(raw: string, truncated = false): string {
 		let text = (raw ?? "").trim();
 		if (!text) return "";
 
@@ -490,6 +503,7 @@ export default function (pi: ExtensionAPI) {
 		text = text.replace(/^(recap|summary|session recap|current recap|摘要)\s*[:：]\s*/i, "").trim();
 
 		if (!text) return "";
+		if (truncated && !text.endsWith("…")) text = `${text.slice(0, MAX_RECAP_CHARS - 1)}…`;
 		return text.length > MAX_RECAP_CHARS ? `${text.slice(0, MAX_RECAP_CHARS - 1)}…` : text;
 	}
 }

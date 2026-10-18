@@ -88,8 +88,11 @@ import path from "node:path";
 
 import { Type } from "typebox";
 import { wrapTextWithAnsi } from "@earendil-works/pi-tui";
+import * as piTui from "@earendil-works/pi-tui";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import type { ExtensionAPI, ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
+// 正文色 `bashOutput` 自 pi 1.2.0 起写在皮肤 `vars` 里，见 theme-extra/colors.ts。
+import { colorOpsFrom, themeVarAnsi } from "../theme-extra/colors.ts";
 
 import {
 	MAX_READ_CHARS,
@@ -113,9 +116,11 @@ import {
 } from "./worktree.ts";
 import {
 	BODY_INDENT,
-	BODY_TEXT_SLOTS,
+	BODY_TEXT_TOKEN,
+	BODY_TEXT_VAR,
 	GUTTER_WIDTH,
 	PREVIEW_MAX_LINES,
+	TREE_LAST,
 	TREE_PIPE,
 	bgNotificationTitleParts,
 	bgResultTreePrefixes,
@@ -125,6 +130,7 @@ import {
 	previewMoreLinesHint,
 	type BgToolOutcome,
 } from "./render.ts";
+import { renderTaskTable, TABLE_RIGHT_MARGIN, type TaskTableRole, type TaskTableRow } from "./table.ts";
 
 const CUSTOM_TYPE = "background-task";
 
@@ -161,7 +167,13 @@ function taskDetails(task: BackgroundTask, now: number) {
 	};
 }
 
-/** 终态通知正文（模型看到的就是这段）。`extraLines` 放 worktree 的处置结果。 */
+/**
+ * 终态通知正文（模型看到的就是这段）。`extraLines` 放 worktree 的处置结果。
+ *
+ * **没有「这是终态事实，不需要再调 background_output 确认状态」那句**（用户 2026-10-18 定）：
+ * 同一句话已经写在 `run_in_background` 的 description / promptGuidelines 里，通知里每次重复
+ * 一遍是纯冗余。「别为了确认状态而轮询」这条纪律仍由工具描述承载。
+ */
 function buildNotification(task: BackgroundTask, now: number, extraLines: readonly string[] = []): string {
 	const outcome =
 		task.status === "killed"
@@ -174,10 +186,31 @@ function buildNotification(task: BackgroundTask, now: number, extraLines: readon
 		`后台任务 ${task.id} 已${outcome}，运行 ${formatElapsed((task.endedAt ?? now) - task.startedAt)}。`,
 		`命令：${truncateCommand(task.command, 120)}`,
 		...extraLines,
-		`这是终态事实，不需要再调 background_output 确认状态；只有需要看输出内容时才调它（id: ${task.id}）。`,
 		`完整日志：${task.logPath}`,
 		"</background-task-notification>",
 	].join("\n");
+}
+
+/**
+ * 任务总览表的**快照**（`run_in_background` 的结果与终态通知共用同一份形状）。
+ *
+ * 用户 2026-10-16 选「快照而非实时视图」：渲染器只读这份，不读注册表，所以历史块永不重绘。
+ * `tableNow` 是算时长用的时刻（已结束任务用 `endedAt`）。表格用不到的字段（日志路径 /
+ * worktree）不进快照 —— 它们是给模型读的，不是给渲染器读的。
+ */
+function taskSnapshotDetails(registry: Registry, now: number): { tasks: Array<Record<string, unknown>>; tableNow: number } {
+	return {
+		tasks: registry.listTasks().map((entry) => ({
+			id: entry.id,
+			command: truncateCommand(entry.command, 200),
+			status: entry.status,
+			startedAt: entry.startedAt,
+			endedAt: entry.endedAt,
+			exitCode: entry.exitCode,
+			signal: entry.signal,
+		})),
+		tableNow: now,
+	};
 }
 
 // =============================================================================
@@ -212,32 +245,37 @@ interface BgToolResultLike {
 }
 
 /**
- * 正文用哪个色槽：按 `BODY_TEXT_SLOTS` 的顺序取**第一个主题里真实存在的** ——
- * `bashOutput`（与 bash 工具调用后的输出同色，用户 2026-10-06 定），没定义时退回
- * `toolOutput`（所有工具输出共用的槽；那些皮肤下 bash 输出本色也是它，两边自动同色）。
+ * 正文用哪个色：**先看皮肤 `vars.bashOutput`，没有则用主题的 `toolOutput` 槽**。
  *
- * 探测方式是**真调一次** `theme.fg(slot, "")`：pi 对未知槽位抛 `Unknown theme color: …`
- * （官方 schema 里没有 `bashOutput`，内置 dark / light 与 pi-coder-catppuccin 都没定义），
- * 而 `bash-command-collapse.ts` 的 `withBashOutputColor` 用的是同一条探测口径。每次
- * 填缓存（即每个 width 一次）探测一次即可 —— 不逐行 try/catch，不把异常当控制流。
+ * 用户 2026-10-06 定：后台任务（工具块与终态通知）的正文要**与 bash 工具调用后显示的
+ * 输出结果同色**，而不是 `text` 槽的 fg。
+ *
+ * `bashOutput` 自 pi 1.2.0 起写在皮肤文件的 `vars` 里（strict schema 之后不能再当自定义
+ * colors key），所以它取到的是**拼好的转义串**（读文件 + pi-tui 转）；`toolOutput` 是官方
+ * 槽位，仍走 `theme.fg()`。两种形状不同，在 `paintBodyRow` 里各走各的分支。
  */
 function pickBodySlot(theme: Theme): string | undefined {
-	for (const slot of BODY_TEXT_SLOTS) {
-		try {
-			// 空串只是探测：抛 = 这套主题没这个槽
-			theme.fg(slot as Parameters<Theme["fg"]>[0], "");
-			return slot;
-		} catch {
-			// 试下一个
-		}
+	const extra = themeVarAnsi(theme as unknown as Parameters<typeof themeVarAnsi>[0], BODY_TEXT_VAR, "fg", SKIN_OPS);
+	if (extra !== undefined) return extra;
+	// 官方槽位也假设不了不抛（皮肤可能写坏）—— 抛就当成没有。
+	try {
+		theme.fg(BODY_TEXT_TOKEN, "");
+		return BODY_TEXT_TOKEN;
+	} catch {
+		return undefined;
 	}
-	return undefined;
 }
 
-/** 把一行正文染成**结果正文色**（一个槽都取不到时原样返回，不抛）。 */
+/** 把一行正文染成**结果正文色**：`vars` 取到的是转义串，槽名走 `theme.fg()`；都拿不到就原样返回。 */
 function paintBodyRow(theme: Theme, row: string, slot: string | undefined): string {
-	return slot === undefined ? row : theme.fg(slot as Parameters<Theme["fg"]>[0], row);
+	if (slot === undefined) return row;
+	// `vars` 路径返回的是已经拼好的 SGR 前缀（`\x1b[38;…m`），与 pi 自己上色同一套转义。
+	if (slot.startsWith("\u001b[")) return `${slot}${row}\u001b[39m`;
+	return theme.fg(slot as Parameters<Theme["fg"]>[0], row);
 }
+
+/** 给 `theme-extra/colors.ts` 的转换函数（与 pi 内部生成 token 转义用的同一对）。 */
+const SKIN_OPS = colorOpsFrom(piTui);
 
 /** 把结果里的所有 text 块拼成全文（按块顺序，块之间换行）。 */
 function bgResultText(result: BgToolResultLike): string {
@@ -246,6 +284,74 @@ function bgResultText(result: BgToolResultLike): string {
 		.filter((block) => block?.type === "text" && typeof block.text === "string")
 		.map((block) => block.text as string)
 		.join("\n");
+}
+
+/**
+ * 从结果 `details` 里取出**任务快照**（`run_in_background` 的 execute 写进去的）。
+ *
+ * 形状不对就当没有：表格是不画就退化成旧形态的增强，不为它抛异常。
+ * 这份快照是**渲染时刻冻结的内容**（用户 2026-10-16 选「快照而非实时视图」）—— 历史块
+ * 不随任务状态变化重绘，实时进度由 statusline 的 dock 行负责。
+ */
+function taskSnapshot(details: unknown): { tasks: ReadonlyArray<Record<string, unknown>>; now: number } | undefined {
+	if (details === null || typeof details !== "object") return undefined;
+	const record = details as { tasks?: unknown; tableNow?: unknown };
+	if (!Array.isArray(record.tasks) || record.tasks.length === 0) return undefined;
+	const now = typeof record.tableNow === "number" ? record.tableNow : Date.now();
+	return { tasks: record.tasks as Array<Record<string, unknown>>, now };
+}
+
+/**
+ * 表格拿到的宽度：正文宽度再扣掉右侧留白（用户 2026-10-17 定的 4 列）。
+ *
+ * `renderTaskTable` 的契约是「给多少宽就填满多少」，扣留白属于接线层的几何决策，所以工具块
+ * 与终态通知两处接线共用这一个函数，免得同一张表在两处宽度不一致。
+ */
+function tableWidthFor(bodyWidth: number): number {
+	return Math.max(1, bodyWidth - TABLE_RIGHT_MARGIN);
+}
+
+/**
+ * 表格一格的色槽（用户 2026-10-17 定，三轮）：
+ *
+ * - **列标题走 `mdCode`**（行内代码色）—— 列名是字段名，与正文里反引号包住的标识符同一个观感；
+ * - **边框走 bash 工具调用的正文输出色**（`bashOutput` → `toolOutput`，即 `pickBodySlot`）——
+ *   表格就是挂在正文树尾的延续，框线与上面那几行输出同一个色；
+ * - 其余无色的格子（表头以外的时长 / 命令 / 折叠提示）走 `text` 前景色；
+ * - 原本带语义色的格子保持不变 —— `id` 走 `accent`，状态词按结局 `warning` / `success` / `error`。
+ */
+function paintTableCell(theme: Theme, role: TaskTableRole, text: string, bodySlot: string | undefined): string {
+	switch (role) {
+		case "border":
+			return paintBodyRow(theme, text, bodySlot);
+		case "header":
+			return theme.fg("mdCode", text);
+		case "id":
+			return theme.fg("accent", text);
+		case "status-running":
+			return theme.fg("warning", text);
+		case "status-success":
+			return theme.fg("success", text);
+		case "status-error":
+			return theme.fg("error", text);
+		default:
+			return theme.fg("text", text);
+	}
+}
+
+/**
+ * 把表格行数组上色并挂树：**首行挂 `└ `**（用户 2026-10-16 选的形态），其余行挂 2 列空白。
+ *
+ * 这里的 2 列空白不是随手写的：正文行的几何是 `BODY_INDENT(2) + 树符(2) + 正文`，正文落在
+ * 列 4；表格就是正文的替代品，所以它的首行用 `└ ` 顶替树符、其余行用等宽空白顶替，
+ * 整张表的左竖线始终在列 4。
+ */
+function paintTableRows(rows: readonly TaskTableRow[], theme: Theme, bodySlot: string | undefined): string[] {
+	return rows.map((row, index) => {
+		const gutter = index === 0 ? theme.fg("muted", TREE_LAST) : "  ";
+		const painted = row.map((segment) => paintTableCell(theme, segment.role, segment.text, bodySlot)).join("");
+		return BODY_INDENT + gutter + painted;
+	});
 }
 
 /**
@@ -285,8 +391,28 @@ function bgResultText(result: BgToolResultLike): string {
  * 后这条裁剪会消失，所以这里自己补回来（`PREVIEW_MAX_LINES` + `previewMoreLinesHint`），
  * 否则 `background_output` 一次 30000 字符的返回会平铺满屏。展开态（ctrl+o，`expanded`）
  * 不裁，与 bash / tool-diff 块一致。截断按**折行之后**的视觉行数算（与树前缀同口径）。
+ *
+ * ## 任务总览表（`run_in_background` 带，用户 2026-10-16 定）
+ *
+ * `run_in_background` 的结果块末尾多一张当前全部任务的小表（形态在 `table.ts`）。它**不走
+ * 正文那 10 行预览预算** —— 否则六行正文 + 七八行表必被裁掉下半截。所以顺序是：先把正文
+ * 按预览预算裁好，再把表整块追加在后面（表自身靠行数上限收口，上限 5 行任务）。
+ *
+ * 同一个「带表」开关（`config.taskTable`）**不给 `background_output` / `background_kill`**
+ * ——它们的正文已点明是哪个任务，再贴表会把增量读的输出推后。终态通知在自己的渲染器里
+ * 贴同一张表（用户 2026-10-18 定），不走这里。
+ *
+ * **右侧留 4 列**（用户 2026-10-17 定）：表格是这块里唯一撑满可用宽度的东西，右边框顶到
+ * 行尾会显得贴屏幕；字宽从 `bodyWidth` 里先扣 `TABLE_RIGHT_MARGIN` 再交给
+ * `renderTaskTable`（它自己的契约是「给多少填满多少」，扣留白属于接线层的几何决策）。
+ * 正文不扣 —— 按字符折行自然有参差的右边缘。
+ *
+ * 表只读结果 `details` 里的**快照**，不读实时注册表：历史块永不重绘。
+ *
+ * 有表时正文的树**不闭合**（全行 `│ `，`bgResultTreePrefixes(count, false)`），`└ ` 交给
+ * 表格首行 —— 用户 2026-10-16 选的形态。
  */
-function bgToolRenderers(toolName: string) {
+function bgToolRenderers(toolName: string, config: { taskTable?: boolean } = {}) {
 	return {
 		renderShell: "self" as const,
 		renderCall(_args: unknown, theme: Theme, context: BgToolRenderContext) {
@@ -316,6 +442,11 @@ function bgToolRenderers(toolName: string) {
 			}
 			const sourceLines = bgResultText(result ?? {}).split("\n");
 			const expanded = options?.expanded === true;
+			// 快照在这里取一次：它是**冻结的**内容（用户 2026-10-16 选快照而非实时视图），
+			// 所以按 width 缓存排版仍然安全。
+			const snapshot = config.taskTable === true ? taskSnapshot(result?.details) : undefined;
+			const tableTasks = snapshot?.tasks ?? [];
+			const tableNow = snapshot?.now ?? 0;
 			// 结果是静态的，按 width 缓存排版（同 plan 块 / tool-diff 的 DiffCard）
 			const cache = new Map<number, string[]>();
 			return {
@@ -344,8 +475,25 @@ function bgToolRenderers(toolName: string) {
 					// 否则一个折成三行的长句会在第一片就画上 `└`，看着像树提前结束了。
 					// 正文颜色：与 bash 工具调用后的输出同色（bashOutput，没定义时 toolOutput）
 					const bodySlot = pickBodySlot(theme);
+					// 总览表**在预览预算之外**：正文先裁好，表整块接在后面（表自己最多 5 行任务）。
+					// 表格先算：它是「画得出来」还是「太窄放不下」决定了正文树要不要闭合 ——
+					// `└ ` 得接在**最后一个真正画出来的**东西后面，不能为一张没画的表提前收口。
+					const tableLines =
+						tableTasks.length > 0
+							? paintTableRows(
+									renderTaskTable(tableTasks as unknown as Parameters<typeof renderTaskTable>[0], {
+										// 右侧留白在这里扣：表格是这块里唯一撑满可用宽度的东西，右边框不顶到行尾
+										width: tableWidthFor(bodyWidth),
+										now: tableNow,
+										widthOf: (text: string) => piTui.visibleWidth(text),
+									}),
+									theme,
+									bodySlot,
+								)
+							: [];
 					const lineCount = visible.length + (hidden > 0 ? 1 : 0);
-					const prefixes = bgResultTreePrefixes(lineCount);
+					// 有表时正文树**不闭合**（`└ ` 交给表格首行）；没表时保持旧形态（末行 `└ `）。
+					const prefixes = bgResultTreePrefixes(lineCount, tableLines.length === 0);
 					const lines = visible.map(
 						(row, index) =>
 							BODY_INDENT +
@@ -359,6 +507,7 @@ function bgToolRenderers(toolName: string) {
 								theme.fg("muted", previewMoreLinesHint(hidden)),
 						);
 					}
+					lines.push(...tableLines);
 					cache.set(width, lines);
 					return lines;
 				},
@@ -519,12 +668,21 @@ export default function backgroundTasks(pi: ExtensionAPI): void {
 			// 只认当前 registry 的任务：会话替换后新建了 registry，
 			// 旧会话被 killAll 的任务的迟到 exit 不该注入新会话。
 			if (disposed || reg !== registry) return;
+			// 终态报告的末尾也贴一张任务总览表（用户 2026-10-18 定：与 `run_in_background`
+			// 的块同一张表、同一份快照形状）。快照在**这个时刻**冻结 —— 通知落地后其他任务
+			// 的状态变化不会重绘这张表，与工具块的口径一致（`table.ts` 决定 1）。
+			const now = Date.now();
 			pi.sendMessage(
 				{
 					customType: CUSTOM_TYPE,
-					content: buildNotification(task, Date.now(), notice ? [notice] : []),
+					content: buildNotification(task, now, notice ? [notice] : []),
 					display: true,
-					details: { kind: "terminal", task: taskDetails(task, Date.now()), worktreeNotice: notice },
+					details: {
+						kind: "terminal",
+						task: taskDetails(task, now),
+						worktreeNotice: notice,
+						...taskSnapshotDetails(reg, now),
+					},
 				},
 				// 空闲 → 直接起一轮；流式中 → 排到本轮结束后（不打断当前推理）
 				{ triggerTurn: true, deliverAs: lastCtx?.isIdle?.() ? undefined : "followUp" },
@@ -555,7 +713,7 @@ export default function backgroundTasks(pi: ExtensionAPI): void {
 	pi.registerTool({
 		name: "run_in_background",
 		label: "Run In Background",
-		...bgToolRenderers("run_in_background"),
+		...bgToolRenderers("run_in_background", { taskTable: true }),
 		description: [
 			"Start a shell command in the background and return immediately with a task id and log path.",
 			"Use it instead of bash for anything expected to outlive one tool call: test suites, builds, dev servers, watchers, long downloads.",
@@ -617,6 +775,8 @@ export default function backgroundTasks(pi: ExtensionAPI): void {
 				return textResult(`启动失败：${task.spawnError}`, { ok: false, task: taskDetails(task, Date.now()) });
 			}
 			bumpDock();
+			// 总览表的**快照**（用户 2026-10-16 选「快照而非实时」）：渲染器只读这份，不读注册表。
+			const now = Date.now();
 			return textResult(
 				[
 					`已在后台启动 ${task.id}（pid ${task.pid ?? "?"}）。`,
@@ -624,10 +784,8 @@ export default function backgroundTasks(pi: ExtensionAPI): void {
 					...(created ? [`隔离工作区：${created.path}（从 HEAD 新建的 git worktree，未提交的改动不在里面）`] : []),
 					...(isolationNote ? [isolationNote] : []),
 					`日志：${task.logPath}`,
-					"它会自己跑；终态时你会收到 <background-task-notification> 并被叫醒。现在去做别的不依赖它的工作，或者结束本轮 —— 不要 sleep 或轮询等它。",
-					`需要中途看输出用 background_output（id: ${task.id}），要停掉用 background_kill。`,
 				].join("\n"),
-				{ ok: true, task: taskDetails(task, Date.now()) },
+				{ ok: true, task: taskDetails(task, now), ...taskSnapshotDetails(reg, now) },
 			);
 		},
 	});
@@ -788,9 +946,12 @@ export default function backgroundTasks(pi: ExtensionAPI): void {
 	 * 改成与三个工具块、plan 块同一张表的树形：
 	 *
 	 * ```
-	 * • 后台任务 bg_1 结束 ✔
+	 * • Background task bg_1 finished ✔
 	 *   │ 后台任务 bg_1 已成功结束（exit 0），运行 5s。
-	 *   └ 完整日志：/…/bg_1.log
+	 *   │ 完整日志：/…/bg_1.log
+	 *   └ ┌──────┬────────────┬─────────┬──────┐
+	 *     │ id   │ command    │ status  │ time │
+	 *     …
 	 * ```
 	 *
 	 * 标题文字走 `toolTitle` 槽（与工具名同一个 Title 色）；**只要任务结束就打 `✔`**（用户
@@ -802,18 +963,34 @@ export default function backgroundTasks(pi: ExtensionAPI): void {
 	 * 结构符 `│` / `└`
 	 * 走 `muted`。
 	 *
+	 * **末尾贴任务总览表**（用户 2026-10-18 定）：与 `run_in_background` 的块用同一种表
+	 * （`table.ts`）、同一份快照形状（`details.tasks` / `details.tableNow`）、同一条几何规则 ——
+	 * 右侧留 `TABLE_RIGHT_MARGIN`，正文树**不闭合**、`└ ` 交给表格顶边框。读快照不读注册表，
+	 * 所以这条历史消息永不重绘。表格画不出来（宽度不够）时退回旧形态（正文末行挂 `└ `）。
+	 *
 	 * 不套 Box 也意味着不再用 `outputPad` 做水平内边距：圆点**顶格**（列 0），与 self 壳的
 	 * 工具块对齐 —— 两种块相邻时树才对得上。上方仍有一行空行，那是 `CustomMessageComponent`
 	 * 构造时写死的 `Spacer(1)`（去不掉，pi 的 self 壳工具块同样留一行）。
 	 */
-	pi.registerMessageRenderer<{ kind: string; task: Record<string, unknown> }>(CUSTOM_TYPE, (message, _options, theme) => {
+	pi.registerMessageRenderer<{
+		kind: string;
+		task: Record<string, unknown>;
+		/** 任务总览表的快照（旧消息没有这两个字段，那就退回旧形态）。 */
+		tasks?: unknown;
+		tableNow?: unknown;
+	}>(CUSTOM_TYPE, (message, _options, theme) => {
 		const body = typeof message.content === "string" ? message.content : message.content.map((part) => part.text ?? "").join("\n");
-		const task = message.details?.task;
+		const details = message.details;
+		const task = details?.task;
 		const outcome = classifyBgNotificationOutcome(task);
 		const parts = bgNotificationTitleParts(outcome);
-		const title = `后台任务 ${String(task?.id ?? "")} 结束`;
+		const title = `Background task ${String(task?.id ?? "")} finished`;
 		// 正文里的 <background-task-notification> 包裹标签是写给模型的，界面上不重复显示
 		const sourceLines = body.replace(/<\/?background-task-notification>/g, "").trim().split("\n");
+		// 总览表快照（与 `run_in_background` 的块同一份形状）。旧消息 / 没快照 → 不画表。
+		const snapshot = taskSnapshot(details);
+		const tableTasks = snapshot?.tasks ?? [];
+		const tableNow = snapshot?.now ?? 0;
 		// 通知是静态的，按 width 缓存排版（与工具块同一套做法）
 		const cache = new Map<number, string[]>();
 		return {
@@ -832,16 +1009,34 @@ export default function backgroundTasks(pi: ExtensionAPI): void {
 					rows.push(...wrapTextWithAnsi(line, bodyWidth));
 				}
 				// 通知正文恒为四行量级，不做预览截断（它是要用户读的事实陈述）
-				const prefixes = bgResultTreePrefixes(rows.length);
 				// 正文颜色：与 bash 工具调用后的输出同色（bashOutput，没定义时 toolOutput）
 				const bodySlot = pickBodySlot(theme);
+				// 表格先算：它在不在决定正文树要不要闭合 —— `└ ` 得接在最后一个**真正画出来**的
+				// 东西后面，不能为一张没画的表提前收口（与工具块同一条规则）。
+				const tableLines =
+					tableTasks.length > 0
+						? paintTableRows(
+								renderTaskTable(tableTasks as unknown as Parameters<typeof renderTaskTable>[0], {
+									width: tableWidthFor(bodyWidth),
+									now: tableNow,
+									widthOf: (text: string) => piTui.visibleWidth(text),
+								}),
+								theme,
+								bodySlot,
+							)
+						: [];
+				const prefixes = bgResultTreePrefixes(rows.length, tableLines.length === 0);
 				for (let index = 0; index < rows.length; index += 1) {
 					lines.push(
 						BODY_INDENT +
+							// 不闭合时**每一行**都是 `│ `（包括末行），`└ ` 交给表格首行。
+							// 行数算错（比如把折行碎片漏算）会让树提前收口，所以行数交给
+							// `bgResultTreePrefixes`，索引超出范围时兜底 `│ `。
 							theme.fg("muted", prefixes[index] ?? TREE_PIPE) +
 							paintBodyRow(theme, rows[index]!, bodySlot),
 					);
 				}
+				lines.push(...tableLines);
 				cache.set(width, lines);
 				return lines;
 			},

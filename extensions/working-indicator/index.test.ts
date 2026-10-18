@@ -45,6 +45,15 @@ process.env.PI_WORKING_SUMMARY_RETRY_MS = String(RETRY_DELAY_MS);
 const WATCHDOG_DELAY_MS = 200;
 process.env.PI_WORKING_INDICATOR_WATCHDOG_DELAY_MS = String(WATCHDOG_DELAY_MS);
 
+/**
+ * 结束符前那次子代理探测的超时（同样是模块级常量，必须在加载前设）。
+ *
+ * 本文件里**只有一个**用例真的等它：`subagentBus(0, { reply: false })` 那一条
+ * （"没对端时不卡住"）。其余用例喂的假总线都秒回，超时值对它们没影响。
+ */
+const PROBE_TIMEOUT_MS = 300;
+process.env.PI_TURN_MARKER_PROBE_TIMEOUT_MS = String(PROBE_TIMEOUT_MS);
+
 const EXTENSION_PATH = path.join(path.dirname(fileURLToPath(import.meta.url)), "index.ts");
 const SKIP = "找不到本机 pi 的库入口（装过 pi 才有）";
 
@@ -152,6 +161,11 @@ interface ContextOptions {
 	onIndicator?: (options: { frames?: string[]; intervalMs?: number } | undefined) => void;
 	/** 每次 `setWidget` 记一条（`content === undefined` = 清掉这个 key）。 */
 	onWidget?: (key: string, content: unknown) => void;
+	/**
+	 * `sessionManager.getBranch()` 的返回值（延续短语的上下文兜底路径要读它）。
+	 * 缺省空数组 = 「分支里没有任何历史」。
+	 */
+	sessionBranch?: unknown[];
 }
 
 /** 取请求上下文里的 user 文本（请求体形状由 `summary-request.ts` 决定）。 */
@@ -165,6 +179,7 @@ function createContext(recorder: Recorder, options: ContextOptions = {}): unknow
 		mode: "tui",
 		hasUI: true,
 		model: { provider: "test", id: "test-model" },
+		sessionManager: { getBranch: () => options.sessionBranch ?? [] },
 		modelRegistry: {
 			find: () => undefined,
 			getApiKeyAndHeaders: async () => ({ ok: true, apiKey: "test", headers: {} }),
@@ -223,8 +238,17 @@ interface LoadedExtension {
 	errors: Array<{ path: string; error: string }>;
 }
 
-/** 用 pi 自己的加载器加载本扩展（`./summary-request.ts` 等 import 也一起验证）。 */
-async function loadExtension(workspace: { agentDir: string; projectDir: string }): Promise<LoadedExtension> {
+/**
+ * 用 pi 自己的加载器加载本扩展（`./summary-request.ts` 等 import 也一起验证）。
+ *
+ * `bus` 是 pi 的事件总线：本扩展用它做「还有子代理在跑吗」的探测（`../recap/subagents.ts`）。
+ * 不传就是 `createTestBus()` —— **没有对端应答**，正是「没装 pi-subagents」的形态；
+ * 要摆出「有子代理在跑」就传一个会应答 `status` 的假总线（见下面的 `subagentBus`）。
+ */
+async function loadExtension(
+	workspace: { agentDir: string; projectDir: string },
+	bus: TestBus = createTestBus(),
+): Promise<LoadedExtension> {
 	const pi = (await import(pathToFileURL(piEntry as string).href)) as {
 		discoverAndLoadExtensions: (
 			configuredPaths: string[],
@@ -237,13 +261,57 @@ async function loadExtension(workspace: { agentDir: string; projectDir: string }
 		[EXTENSION_PATH],
 		workspace.projectDir,
 		workspace.agentDir,
-		createTestBus(),
+		bus,
 	);
 	assert.deepEqual(loaded.errors, [], "pi 的扩展加载器不应该报错");
 	assert.equal(loaded.extensions.length, 1);
 	const extension = loaded.extensions[0];
 	assert.ok(extension);
 	return extension;
+}
+
+/**
+ * 会应答子代理探测的假总线：收到 `status` 请求就按 `totalActive` 回一条 fleet 状态。
+ * 频道名与回包形状照 `../recap/subagents.test.ts` 的 `fakeBus`（协议版本 1）。
+ *
+ * 顺带把请求记下来（`requests`），好用例断言「探测真的发过 / 压根没发」。
+ */
+function subagentBus(totalActive: number, options: { reply?: boolean; delayMs?: number } = {}): TestBus & {
+	requests: Array<Record<string, unknown>>;
+} {
+	const handlers = new Map<string, Set<(data: unknown) => void>>();
+	const requests: Array<Record<string, unknown>> = [];
+	return {
+		requests,
+		on(channel, handler) {
+			const set = handlers.get(channel) ?? new Set<(data: unknown) => void>();
+			handlers.set(channel, set);
+			set.add(handler);
+			return () => {
+				set.delete(handler);
+			};
+		},
+		emit(channel, data) {
+			if (channel !== "subagents:rpc:v1:request") return;
+			const request = data as Record<string, unknown>;
+			requests.push(request);
+			if (options.reply === false) return;
+			const reply = {
+				version: 1,
+				requestId: request.requestId,
+				method: "status",
+				success: true,
+				data: { text: "…", fleet: { version: 1, entries: [], totalActive, omitted: 0 } },
+			};
+			const deliver = () => {
+				const replyChannel = `subagents:rpc:v1:reply:${String(request.requestId)}`;
+				for (const handler of [...(handlers.get(replyChannel) ?? [])]) handler(reply);
+			};
+			// delayMs > 0：把回包推后，好把「探测进行中」那段窗口搬进用例。
+			if (options.delayMs !== undefined && options.delayMs > 0) setTimeout(deliver, options.delayMs);
+			else deliver();
+		},
+	};
 }
 
 function handlersOf(extension: LoadedExtension): {
@@ -1097,6 +1165,422 @@ test("无 UI（print / json 模式）不画结束符", { skip, timeout: 30_000 }
 
 		assert.equal(widgets.length, 0, "无 UI 时不该碰任何 widget");
 		await shutdown({}, headless);
+	} finally {
+		workspace.cleanup();
+	}
+});
+
+/**
+ * 有子代理在跑时不画结束符（用户 2026-10-08 要求）。
+ *
+ * 病根：异步子代理脱离回合，主回合结束那一刻它还在后台跑，而结束符那行 `· done 8:04 AM`
+ * 恰好贴在 pi-subagents 的 `async subagent · background` 块下面 —— 它断言「这轮真做完了」，
+ * 但并没有。判据是 `../recap/subagents.ts` 的进程内 RPC 探测（`fleet.totalActive`）。
+ */
+test("还有子代理在跑：不画结束符（探测走 pi-subagents 的 RPC）", { skip, timeout: 30_000 }, async () => {
+	const workspace = makeWorkspace();
+	try {
+		const bus = subagentBus(1);
+		const extension = await loadExtension(workspace, bus);
+		const { agentStart, agentBeforeSettle, agentSettled, shutdown } = handlersOf(extension);
+		const recorder: Recorder = { completes: [], workingMessages: [], resets: 0 };
+		const widgets: Array<{ key: string; content: unknown }> = [];
+		const ctx = createContext(recorder, { onWidget: (key, content) => widgets.push({ key, content }) });
+
+		await agentStart({}, ctx);
+		await agentBeforeSettle({ outcome: "completed" }, ctx);
+		await agentSettled({}, ctx);
+
+		assert.equal(bus.requests.length, 1, "settle 时应真的问过一次「还有子代理吗」");
+		assert.equal(bus.requests[0]?.method, "status", "探测走 status 方法");
+		assert.equal(
+			widgets.filter((w) => w.content !== undefined).length,
+			0,
+			"子代理还在跑就不该出现结束符（那行 done 此刻是假的）",
+		);
+		await shutdown({}, ctx);
+	} finally {
+		workspace.cleanup();
+	}
+});
+
+test("子代理都跑完了：照常画结束符", { skip, timeout: 30_000 }, async () => {
+	const workspace = makeWorkspace();
+	try {
+		// totalActive = 0：对端在线但没活。
+		const bus = subagentBus(0);
+		const extension = await loadExtension(workspace, bus);
+		const { agentStart, agentBeforeSettle, agentSettled, shutdown } = handlersOf(extension);
+		const recorder: Recorder = { completes: [], workingMessages: [], resets: 0 };
+		const widgets: Array<{ key: string; content: unknown }> = [];
+		const ctx = createContext(recorder, { onWidget: (key, content) => widgets.push({ key, content }) });
+
+		await agentStart({}, ctx);
+		await agentBeforeSettle({ outcome: "completed" }, ctx);
+		await agentSettled({}, ctx);
+
+		assert.equal(bus.requests.length, 1, "问过");
+		assert.equal(
+			widgets.filter((w) => w.key === TURN_MARKER_WIDGET_KEY && w.content !== undefined).length,
+			1,
+			"没有活跃子代理时结束符照常画",
+		);
+		await shutdown({}, ctx);
+	} finally {
+		workspace.cleanup();
+	}
+});
+
+/**
+ * fail-open（用户 2026-10-08 选的口径，与 recap / verify-loop 一致）：
+ * 没装 pi-subagents（无人应答）时结束符照常出，且只等一次超时就返回 —— 不能因为探测把
+ * 回合收尾卡住。pi 的事件总线没有 listenerCount，探不到对端时只能等满这一次超时。
+ */
+test("没装 pi-subagents：探测超时后照常画结束符，且不卡住", { skip, timeout: 30_000 }, async () => {
+	const workspace = makeWorkspace();
+	try {
+		const bus = subagentBus(0, { reply: false });
+		const extension = await loadExtension(workspace, bus);
+		const { agentStart, agentBeforeSettle, agentSettled, shutdown } = handlersOf(extension);
+		const recorder: Recorder = { completes: [], workingMessages: [], resets: 0 };
+		const widgets: Array<{ key: string; content: unknown }> = [];
+		const ctx = createContext(recorder, { onWidget: (key, content) => widgets.push({ key, content }) });
+
+		await agentStart({}, ctx);
+		await agentBeforeSettle({ outcome: "completed" }, ctx);
+		const startedAt = Date.now();
+		await agentSettled({}, ctx);
+		const elapsed = Date.now() - startedAt;
+
+		assert.equal(bus.requests.length, 1, "探测发出去了（只是没人应答）");
+		assert.ok(
+			elapsed >= PROBE_TIMEOUT_MS - 50,
+			`应等满一次探测超时（等不到对端），实际 ${elapsed}ms`,
+		);
+		assert.ok(elapsed < PROBE_TIMEOUT_MS * 5, `不该无限等，实际 ${elapsed}ms`);
+		assert.equal(
+			widgets.filter((w) => w.key === TURN_MARKER_WIDGET_KEY && w.content !== undefined).length,
+			1,
+			"探测不到对端 = 当作没有子代理，结束符照常画（fail-open）",
+		);
+		await shutdown({}, ctx);
+	} finally {
+		workspace.cleanup();
+	}
+});
+
+/**
+ * 探测位置：放在 completed / startedAt 两道判断**之后**。
+ *
+ * 被打断 / 报错的回合本来就不画结束符，没必要为它白跑一次 RPC（更没必要让 ESC 之后多等
+ * 一个超时）。
+ */
+test("被打断 / 报错的回合不去探测子代理（探测在 completed 判断之后）", { skip, timeout: 30_000 }, async () => {
+	const workspace = makeWorkspace();
+	try {
+		const bus = subagentBus(0);
+		const extension = await loadExtension(workspace, bus);
+		const { agentStart, agentBeforeSettle, agentSettled, shutdown } = handlersOf(extension);
+		const recorder: Recorder = { completes: [], workingMessages: [], resets: 0 };
+		const ctx = createContext(recorder);
+
+		for (const outcome of ["aborted", "error"] as const) {
+			await agentStart({}, ctx);
+			await agentBeforeSettle({ outcome }, ctx);
+			await agentSettled({}, ctx);
+		}
+
+		assert.equal(bus.requests.length, 0, "非 completed 的回合一次都不该问");
+		await shutdown({}, ctx);
+	} finally {
+		workspace.cleanup();
+	}
+});
+
+/**
+ * 探测是异步的（最多等一个超时），这段窗口里可能已经有**新回合**起来了 —— 子代理完成会
+ * `triggerTurn` 唤醒一轮、用户也可能直接发下一句。`agent_start` 已经清掉 widget 并重开了
+ * 表，所以探测回来后必须再验一次，否则结束符会盖在活 spinner 上方。
+ */
+test("探测窗口内起了新回合：结束符不画（不盖在活 spinner 上）", { skip, timeout: 30_000 }, async () => {
+	const workspace = makeWorkspace();
+	try {
+		// totalActive = 0（本该画），但回包推后 150ms —— 正好让新回合插进这段窗口。
+		const bus = subagentBus(0, { delayMs: 150 });
+		const extension = await loadExtension(workspace, bus);
+		const { agentStart, agentBeforeSettle, agentSettled, shutdown } = handlersOf(extension);
+		const recorder: Recorder = { completes: [], workingMessages: [], resets: 0 };
+		const widgets: Array<{ key: string; content: unknown }> = [];
+		const ctx = createContext(recorder, { onWidget: (key, content) => widgets.push({ key, content }) });
+
+		await agentStart({}, ctx);
+		await agentBeforeSettle({ outcome: "completed" }, ctx);
+		const pending = agentSettled({}, ctx);
+		// 探测发出去了才动新回合，不然测的是另一件事。
+		await waitFor(() => bus.requests.length === 1, "探测发出");
+		await agentStart({}, ctx); // 新回合：子代理唤醒 / 用户发了下一句
+		await pending;
+
+		assert.equal(
+			widgets.filter((w) => w.key === TURN_MARKER_WIDGET_KEY && w.content !== undefined).length,
+			0,
+			"新回合已开始就不该再画上一轮的结束符",
+		);
+		await shutdown({}, ctx);
+	} finally {
+		workspace.cleanup();
+	}
+});
+
+// =============================================================================
+// 延续短语的摘要延续（`summary-continuation.ts` + `lastTurnSummary`）
+//
+// 用户 2026-10-07 定：`继续` / `ok` / `go ahead` 这类输入本身没有任务语义，那一格只显示
+// 短语等于没显示。判定按**词表**（不按长度 —— 语料里 `commit and push` 出现 144 次，短
+// 但是独立指令），上下文取**上一回合的摘要**，没有则退回 session 分支里上一条 user 消息。
+// =============================================================================
+
+/** 一条 user 文本消息的 session 分支条目（`previousUserPromptText` 读的形状）。 */
+function userEntry(text: string): unknown {
+	return { type: "message", message: { role: "user", content: [{ type: "text", text }] } };
+}
+
+/** 一条 assistant 文本消息的 session 分支条目。 */
+function assistantEntry(text: string): unknown {
+	return { type: "message", message: { role: "assistant", content: [{ type: "text", text }] } };
+}
+
+test("延续短语带上上一回合的摘要重算：请求里有上一任务 + 短语，摘要回来后上屏", { skip, timeout: 30_000 }, async () => {
+	const workspace = makeWorkspace();
+	try {
+		const extension = await loadExtension(workspace);
+		const { input, agentStart, agentBeforeSettle, agentSettled, shutdown } = handlersOf(extension);
+		const recorder: Recorder = { completes: [], workingMessages: [], resets: 0 };
+		const ctx = createContext(recorder);
+
+		// 第一回合：长提示词 → 摘要算成 → settle 时留存。
+		await input({ text: LONG_PROMPT, source: "interactive" }, ctx);
+		await agentStart({}, ctx);
+		await waitFor(() => recorder.completes.length === 1, "第一回合的摘要请求");
+		recorder.completes[0]?.resolve("优化 spinner 行尾的提示词摘要");
+		await waitFor(
+			() => (recorder.workingMessages.at(-1) ?? "").includes("优化 spinner 行尾的提示词摘要"),
+			"第一回合的摘要上屏",
+		);
+		await agentBeforeSettle({ outcome: "completed" }, ctx);
+		await agentSettled({}, ctx);
+
+		// 第二回合：只敲「继续」。它宽度上放得下（不会触发宽度判定），但语义上值得压。
+		await input({ text: "继续", source: "interactive" }, ctx);
+		await agentStart({}, ctx);
+		await waitFor(() => recorder.completes.length === 2, "延续短语应该发一次融合摘要请求");
+
+		const call = recorder.completes[1];
+		assert.ok(call);
+		assert.ok(call.prompt.includes("优化 spinner 行尾的提示词摘要"), "请求里要带上上一任务的摘要");
+		assert.ok(call.prompt.includes("继续"), "请求里要带上这条短语");
+		assert.ok(call.prompt.includes("brief follow-up"), "要说明这是上一任务的跟进");
+		assert.ok(call.prompt.includes("34 display columns"), "目标列数与渲染同一份数学");
+
+		// 等待期间先显示短语本身（与长提示词「先显示截断原文」同一套行为）。
+		const before = recorder.workingMessages.at(-1) ?? "";
+		assert.ok(before.includes("✦ 继续"), `摘要没回来前显示短语本身，实际 ${JSON.stringify(before)}`);
+
+		call.resolve("继续优化提示词摘要的延续性");
+		await waitFor(
+			() => (recorder.workingMessages.at(-1) ?? "").includes("继续优化提示词摘要的延续性"),
+			"融合后的摘要替换掉短语",
+		);
+
+		await agentBeforeSettle({ outcome: "completed" }, ctx);
+		await agentSettled({}, ctx);
+		await shutdown({}, ctx);
+	} finally {
+		workspace.cleanup();
+	}
+});
+
+test("上一回合没算摘要时退回 session 分支里上一条 user 消息（工具结果不算）", { skip, timeout: 30_000 }, async () => {
+	const workspace = makeWorkspace();
+	try {
+		const extension = await loadExtension(workspace);
+		const { input, agentStart, shutdown } = handlersOf(extension);
+		const recorder: Recorder = { completes: [], workingMessages: [], resets: 0 };
+		// 恢复的会话 / 上一轮提示词太短没算摘要：分支里有历史，但 lastTurnSummary 是空的。
+		const ctx = createContext(recorder, {
+			sessionBranch: [
+				userEntry("把 gateway 的 qoder 重试退避从 2s 改成 5s"),
+				assistantEntry("已改好。"),
+				// 工具结果是 `toolResult` role，必须被跳过（否则上下文会变成工具输出）。
+				{ type: "message", message: { role: "toolResult", content: [{ type: "text", text: "工具输出噪声" }] } },
+			],
+		});
+
+		await input({ text: "好的", source: "interactive" }, ctx);
+		await agentStart({}, ctx);
+		await waitFor(() => recorder.completes.length === 1, "延续短语应该发一次融合摘要请求");
+
+		const call = recorder.completes[0];
+		assert.ok(call);
+		assert.ok(call.prompt.includes("把 gateway 的 qoder 重试退避从 2s 改成 5s"), "上下文应是上一条 user 消息");
+		assert.ok(!call.prompt.includes("工具输出噪声"), "工具结果不能当上下文");
+		assert.ok(!call.prompt.includes("已改好。"), "assistant 的回复不是「上一任务」");
+		assert.ok(call.prompt.includes("好的"), "短语本身也要在请求里");
+
+		await shutdown({}, ctx);
+	} finally {
+		workspace.cleanup();
+	}
+});
+
+test("没有任何上下文时退回现状：短语原样显示，不发请求", { skip, timeout: 30_000 }, async () => {
+	const workspace = makeWorkspace();
+	try {
+		const extension = await loadExtension(workspace);
+		const { input, agentStart, shutdown } = handlersOf(extension);
+		const recorder: Recorder = { completes: [], workingMessages: [], resets: 0 };
+		const ctx = createContext(recorder); // 空分支 + 没有上一回合
+
+		await input({ text: "继续", source: "interactive" }, ctx);
+		await agentStart({}, ctx);
+		await delay(50);
+
+		assert.equal(recorder.completes.length, 0, "没上下文可携带就不该白花一次请求");
+		assert.ok((recorder.workingMessages.at(-1) ?? "").includes("✦ 继续"), "短语原样显示（现状行为）");
+
+		await shutdown({}, ctx);
+	} finally {
+		workspace.cleanup();
+	}
+});
+
+test("独立短指令不被误当延续：commit and push 既不融合也不请求", { skip, timeout: 30_000 }, async () => {
+	const workspace = makeWorkspace();
+	try {
+		const extension = await loadExtension(workspace);
+		const { input, agentStart, shutdown } = handlersOf(extension);
+		const recorder: Recorder = { completes: [], workingMessages: [], resets: 0 };
+		// 分支里明明有上一任务：若按长度阈值判定，这条就会被误融合成「继续上一任务」。
+		const ctx = createContext(recorder, { sessionBranch: [userEntry("重构 adapter 的路由分发")] });
+
+		for (const text of ["commit and push", "推送", "hi", "你是什么大模型"]) {
+			await input({ text, source: "interactive" }, ctx);
+			await agentStart({}, ctx);
+			await delay(30);
+			assert.equal(recorder.completes.length, 0, `${JSON.stringify(text)} 是独立指令，不该发融合请求`);
+			assert.ok(
+				(recorder.workingMessages.at(-1) ?? "").includes(text),
+				`${JSON.stringify(text)} 应原样显示`,
+			);
+			await shutdown({}, ctx);
+			await agentStart({}, ctx); // 复位，让下一条输入不被去重键吃掉
+		}
+
+		await shutdown({}, ctx);
+	} finally {
+		workspace.cleanup();
+	}
+});
+
+test("换会话后不延续：session_shutdown 清掉上一任务的摘要", { skip, timeout: 30_000 }, async () => {
+	const workspace = makeWorkspace();
+	try {
+		const extension = await loadExtension(workspace);
+		const { input, agentStart, agentBeforeSettle, agentSettled, shutdown } = handlersOf(extension);
+		const recorder: Recorder = { completes: [], workingMessages: [], resets: 0 };
+		const ctx = createContext(recorder);
+
+		await input({ text: LONG_PROMPT, source: "interactive" }, ctx);
+		await agentStart({}, ctx);
+		await waitFor(() => recorder.completes.length === 1, "第一回合的摘要请求");
+		recorder.completes[0]?.resolve("优化 spinner 行尾的提示词摘要");
+		await waitFor(
+			() => (recorder.workingMessages.at(-1) ?? "").includes("优化 spinner 行尾的提示词摘要"),
+			"摘要上屏",
+		);
+		await agentBeforeSettle({ outcome: "completed" }, ctx);
+		await agentSettled({}, ctx);
+
+		// 会话被替换（/new、/resume）：新会话里的「继续」与上一会话无关。
+		await shutdown({}, ctx);
+		await input({ text: "继续", source: "interactive" }, ctx);
+		await agentStart({}, ctx);
+		await delay(50);
+
+		assert.equal(recorder.completes.length, 1, "换会话后不该再拿旧摘要当上下文");
+		assert.ok((recorder.workingMessages.at(-1) ?? "").includes("✦ 继续"), "退回短语原样显示");
+
+		await shutdown({}, ctx);
+	} finally {
+		workspace.cleanup();
+	}
+});
+
+test("本回合摘要没算成时沿用更早那次：延续链不会因为一次失败断掉", { skip, timeout: 30_000 }, async () => {
+	const workspace = makeWorkspace();
+	try {
+		const extension = await loadExtension(workspace);
+		const { input, agentStart, agentBeforeSettle, agentSettled, shutdown } = handlersOf(extension);
+		const recorder: Recorder = { completes: [], workingMessages: [], resets: 0 };
+		const ctx = createContext(recorder);
+
+		// 回合 1：摘要 A 算成。
+		await input({ text: LONG_PROMPT, source: "interactive" }, ctx);
+		await agentStart({}, ctx);
+		await waitFor(() => recorder.completes.length === 1, "回合 1 的请求");
+		recorder.completes[0]?.resolve("摘要 A");
+		await waitFor(() => (recorder.workingMessages.at(-1) ?? "").includes("摘要 A"), "摘要 A 上屏");
+		await agentBeforeSettle({ outcome: "completed" }, ctx);
+		await agentSettled({}, ctx);
+
+		// 回合 2：请求两次都失败 → 这一回合没有摘要可留存。
+		await input({ text: `${LONG_PROMPT}（第二版）`, source: "interactive" }, ctx);
+		await agentStart({}, ctx);
+		await waitFor(() => recorder.completes.length === 2, "回合 2 的请求");
+		recorder.completes[1]?.reject(new Error("boom-1"));
+		await waitFor(() => recorder.completes.length === 3, "回合 2 的重试");
+		recorder.completes[2]?.reject(new Error("boom-2"));
+		await delay(RETRY_DELAY_MS * 2);
+		await agentBeforeSettle({ outcome: "completed" }, ctx);
+		await agentSettled({}, ctx);
+
+		// 回合 3：「继续」应该延续到**摘要 A**（宁可延续更早的任务，也不清空）。
+		await input({ text: "继续", source: "interactive" }, ctx);
+		await agentStart({}, ctx);
+		await waitFor(() => recorder.completes.length === 4, "延续短语的请求");
+		assert.ok(recorder.completes[3]?.prompt.includes("摘要 A"), "上下文应是更早那次的摘要 A");
+
+		await shutdown({}, ctx);
+	} finally {
+		workspace.cleanup();
+	}
+});
+
+test("被打断的回合也留存摘要：ESC 之后敲「继续」续的就是那件事", { skip, timeout: 30_000 }, async () => {
+	const workspace = makeWorkspace();
+	try {
+		const extension = await loadExtension(workspace);
+		const { input, agentStart, agentBeforeSettle, agentSettled, shutdown } = handlersOf(extension);
+		const recorder: Recorder = { completes: [], workingMessages: [], resets: 0 };
+		const ctx = createContext(recorder);
+
+		await input({ text: LONG_PROMPT, source: "interactive" }, ctx);
+		await agentStart({}, ctx);
+		await waitFor(() => recorder.completes.length === 1, "摘要请求");
+		recorder.completes[0]?.resolve("跑一遍全量测试");
+		await waitFor(() => (recorder.workingMessages.at(-1) ?? "").includes("跑一遍全量测试"), "摘要上屏");
+
+		// 用户按 ESC 打断：outcome 是 aborted，结束符不画，但摘要要留着。
+		await agentBeforeSettle({ outcome: "aborted" }, ctx);
+		await agentSettled({}, ctx);
+
+		await input({ text: "go ahead", source: "interactive" }, ctx);
+		await agentStart({}, ctx);
+		await waitFor(() => recorder.completes.length === 2, "延续短语的请求");
+		assert.ok(recorder.completes[2 - 1]?.prompt.includes("跑一遍全量测试"), "被打断那件事仍是上下文");
+		assert.ok(recorder.completes[1]?.prompt.includes("go ahead"), "短语本身也在请求里");
+
+		await shutdown({}, ctx);
 	} finally {
 		workspace.cleanup();
 	}

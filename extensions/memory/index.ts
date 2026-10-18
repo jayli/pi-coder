@@ -35,6 +35,9 @@ import {
 	PREVIEW_MAX_LINES,
 	TREE_PIPE,
 	classifyMemoryToolOutcome,
+	memoryPreviewRows,
+	memoryReadHeaderLineCount,
+	memoryMetaKeyLength,
 	memoryResultTreePrefixes,
 	memoryToolTitleParts,
 	previewMoreLinesHint,
@@ -190,6 +193,10 @@ function memoryToolRenderers(toolName: string) {
 				context.state.outcome = classifyMemoryToolOutcome(context.isError === true, result?.details);
 			}
 			const sourceLines = memoryResultText(result ?? {}).split("\n");
+			// 「读一条」的结果是「四行元信息 + 空行 + 正文」（见 render.ts 文件头）。折叠态只画
+			// 元信息头、正文整段收起；其余形状（列表 / 检索命中 / 单句结果）返回 0，走平铺截断。
+			const readSingle = (result?.details as { action?: unknown } | undefined)?.action === "read";
+			const headerLines = readSingle ? memoryReadHeaderLineCount(sourceLines) : 0;
 			const expanded = options?.expanded === true;
 			// 结果是静态的，按 width 缓存排版（同 plan 块 / 后台任务块）
 			const cache = new Map<number, string[]>();
@@ -199,29 +206,51 @@ function memoryToolRenderers(toolName: string) {
 					if (hit !== undefined) return hit;
 					const bodyWidth = Math.max(1, (width || 80) - BODY_INDENT.length - GUTTER_WIDTH);
 					const rows: string[] = [];
-					for (const line of sourceLines) {
+					// 每视觉行对应的字段名段长（0 = 不是元信息字段行）：只有源行的**首块**能拿到
+					// 上色段（续行不可能是字段名，见 render.ts）。
+					const rowKeyLengths: number[] = [];
+					// 头行与正文分开折行：头行数要在**折行之前**数（源行），折完就对不上源行边界了
+					let headRows = 0;
+					sourceLines.forEach((line, index) => {
 						// 空行也占一行（wrapTextWithAnsi("") → [""]）：段落间距是可读性的一部分
-						rows.push(...wrapTextWithAnsi(line, bodyWidth));
-					}
+						const wrapped = wrapTextWithAnsi(line, bodyWidth);
+						if (index < headerLines) headRows += wrapped.length;
+						const keyLength = index < headerLines ? memoryMetaKeyLength(line) : 0;
+						wrapped.forEach((fragment, fragmentIndex) => {
+							rows.push(fragment);
+							// 窄终端下折行可能把字段名本身切开，只有切点落在首块内才能安全 slice
+							const paintable = fragmentIndex === 0 && keyLength > 0 && keyLength <= fragment.length;
+							rowKeyLengths.push(paintable ? keyLength : 0);
+						});
+					});
 					if (rows.every((row) => row.trim() === "")) {
 						cache.set(width, []);
 						return [];
 					}
-					// 预览截断：非展开态裁到 PREVIEW_MAX_LINES 行，提示行挂在被裁正文的末尾。
+					// 预览截断：非展开态裁到视觉行上限，提示行挂在被裁正文的末尾。
 					// 展开态（ctrl+o）不裁。截断按折行后的视觉行数算（与树前缀同口径）。
+					// 「读一条」的折叠态只留元信息头（正文整段收起），见 render.ts 的 memoryPreviewRows。
 					let visible = rows;
 					let hidden = 0;
-					if (!expanded && rows.length > PREVIEW_MAX_LINES) {
-						visible = rows.slice(0, PREVIEW_MAX_LINES);
-						hidden = rows.length - visible.length;
+					if (!expanded) {
+						const preview = memoryPreviewRows(rows.length, headRows);
+						visible = rows.slice(0, preview.visibleRows);
+						hidden = preview.hiddenRows;
 					}
 					// 前缀按**折行 + 截断之后**的视觉行数算：折行碎片与截断提示行各算独立行，
 					// 否则一个折成三行的长句会在第一片就画上 `└`，看着像树提前结束了。
 					const lineCount = visible.length + (hidden > 0 ? 1 : 0);
 					const prefixes = memoryResultTreePrefixes(lineCount);
-					const lines = visible.map(
-						(row, index) => BODY_INDENT + theme.fg("muted", prefixes[index] ?? TREE_PIPE) + theme.fg("text", row),
-					);
+					// 元信息头的字段名（name/type/modified/description）走 syntaxKeyword（与 bash 命令选项、
+					// /theme 预览里的关键字同一支笔），冒号后的值仍是 text；两段各自成一段 SGR。
+					const lines = visible.map((row, index) => {
+						const keyLength = rowKeyLengths[index] ?? 0;
+						const body =
+							keyLength > 0
+								? theme.fg("syntaxKeyword", row.slice(0, keyLength)) + theme.fg("text", row.slice(keyLength))
+								: theme.fg("text", row);
+						return BODY_INDENT + theme.fg("muted", prefixes[index] ?? TREE_PIPE) + body;
+					});
 					if (hidden > 0) {
 						lines.push(
 							BODY_INDENT +

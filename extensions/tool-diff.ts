@@ -8,9 +8,10 @@
  *   （selectedBg / searchMatchBg / userMessageBg / customMessageBg / toolPendingBg /
  *   toolSuccessBg / toolErrorBg），**里面没有任何 diff 相关的底色**。所以主题最多只能把
  *   +/- 行染成不同前景色，做不出 CC 那种"整行绿底 / 整行红底 + 行内更亮底色"的效果。
- *   扩展自己拼 ANSI 才能逐行上底色。底色本身仍然**取自皮肤**：皮肤 `colors` 里的自定义
- *   key（`toolDiffAddedBg` / `toolDiffRemovedBg`）pi 照样解析进 Theme，扩展按 key 读出来
- *   再把前景色 SGR 换成底色 SGR —— 换皮肤时底色跟着换，见 `DIFF_ADDED_BG_TOKEN`。
+ *   扩展自己拼 ANSI 才能逐行上底色。底色本身仍然**取自皮肤**：早先写在皮肤 `colors` 的
+ *   自定义 key（`toolDiffAddedBg` / `toolDiffRemovedBg`）里，pi 1.2.0 起改放 `vars`
+ *  （`addedLine` / `removedLine` / `diffAddedBg` / `diffRemovedBg`，两套命名并存）——
+ *   换皮肤时底色跟着换，见 `DIFF_ADDED_BG_VARS`。
  *
  * 为什么必须 `renderShell: "self"`：
  *   默认 shell 会把整个工具输出包进一个 Box 并**整块**染色 —— tool-execution.js 的
@@ -111,7 +112,7 @@
  *   - LCS 是 O(n·m)，长行超过阈值直接放弃行内高亮。
  */
 
-import type { EditToolDetails, ExtensionAPI, Theme, ThemeColor } from "@earendil-works/pi-coding-agent";
+import type { EditToolDetails, ExtensionAPI, Theme } from "@earendil-works/pi-coding-agent";
 import {
 	createEditToolDefinition,
 	createWriteToolDefinition,
@@ -120,6 +121,7 @@ import {
 	highlightCode,
 } from "@earendil-works/pi-coding-agent";
 import { Text, truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
+import * as piTui from "@earendil-works/pi-tui";
 import { readFileSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { isAbsolute, resolve } from "node:path";
@@ -127,6 +129,9 @@ import { isAbsolute, resolve } from "node:path";
 // 那是个**无 `index.ts` 的纯模块目录**（pi 只加载 `extensions/<name>.ts` 与
 // `extensions/<name>/index.ts`，所以它不会被当成扩展）。
 import { TitleRow, blinkSuffix, shortenPath, statsSuffix, type TitleRowDeps } from "./tool-diff/title-row.ts";
+// diff 底色自 pi 1.2.0 起改从**皮肤文件的 `vars`** 取（schema strict 化后自定义 colors
+// key 会让整份皮肤作废），见 theme-extra/colors.ts 的文件头。
+import { colorOpsFrom, type ColorOps, themeVarAnsi } from "./theme-extra/colors.ts";
 
 /** 折叠态最多渲染的 diff 行数 */
 const PREVIEW_MAX_LINES = 60;
@@ -163,23 +168,37 @@ const WORD_BG_BLEND = 0.30;
 /**
  * diff 底色 token 名 —— 从**皮肤文件**取，不在扩展里硬编码任何色值。
  *
- * pi 的主题 schema 没有 diff 底色 token（`Theme.bg()` 只认 7 个 ThemeBg），但 `colors`
- * 里的**自定义 key** pi 照样会解析：`createTheme()` 把解析完（含 `vars` 引用）的颜色按
- * key 分流，不在那 7 个 ThemeBg 名单里的一律进 `fgColors` 表，`getFgAnsi()` 按 key 查表
- * 返回。所以皮肤里写 `"toolDiffAddedBg": "myAddedBg"`（`myAddedBg` 是皮肤 `vars` 里自定的
- * 变量）就能读到，换皮肤底色跟着换 ——
- * 扩展和皮肤解耦，色值只存在于皮肤文件里。
+ * pi ≤ 1.1.0 这几套皮肤把它们写在 `colors` 里当**自定义 key**（TypeBox 校验对未知 key 放行，
+ * `createTheme()` 把它们收进前景表供 `getFgAnsi()` 查），所以写 `"toolDiffAddedBg": "myAddedBg"`
+ * （`myAddedBg` 是皮肤 `vars` 里自定的变量）就能读到。**pi 1.2.0 把主题 schema 改成 strict
+ * 后这条路断了**（多一个 key 整份皮肤作废、回退 system）—— 现在这三个色写在皮肤的 `vars`
+ * 里，扩展自己读文件取（见 `theme-extra/colors.ts`）。取值仍按**变量名**查，所以皮肤里怎么
+ * 命名都行：本仓四套皮肤给 diff 底色的变量名不统一（1337 / coffee / nightfox 是
+ * `addedLine` / `removedLine`，ayu / catppuccin 是 `diffAddedBg` / `diffRemovedBg`），
+ * 两个名字都查一次即可。
  *
  * 返回的是**前景色** SGR（`\x1b[38;…m`），而底色只差前缀（`\x1b[48;…m`）：pi 的 `fgAnsi`
  * 与 `bgAnsi`（theme.js）除了 38 / 48 这一个数字完全相同，truecolor / 256color 的换算也是
  * 同一套（`hexToRgb` / `hexTo256`），所以换前缀就是合法的底色，不用自己算色彩模式。
+ * 转换由 `theme-extra/colors.ts` 用 pi-tui 自己的 `foregroundAnsi` / `backgroundAnsi` 做，
+ * 与 pi 内部同一对函数 —— 逐字节相同（两种色深都验过）。
  *
- * 皮肤没定义这两个 token 时（pi 内置的 dark / light，或别人的皮肤）`getFgAnsi` 会抛
- * `Unknown theme color`，兜底用同一个皮肤的 `toolSuccessBg` / `toolErrorBg` ——
- * 仍然取自皮肤，仍然不硬编码色值。
+ * 皮肤没定义这两个色时（pi 内置的 dark / light，或别人的皮肤）取到 `undefined`，
+ * 兜底用同一个皮肤的 `toolSuccessBg` / `toolErrorBg` —— 仍然取自皮肤，仍然不硬编码色值。
  */
-const DIFF_ADDED_BG_TOKEN = "toolDiffAddedBg";
-const DIFF_REMOVED_BG_TOKEN = "toolDiffRemovedBg";
+/** 兼容旧叫法：这两个名字曾经是皮肤 `colors` 里的自定义 key（pi ≤ 1.1.0 的机制）。 */
+export const DIFF_ADDED_BG_TOKEN = "toolDiffAddedBg";
+export const DIFF_REMOVED_BG_TOKEN = "toolDiffRemovedBg";
+/**
+ * 皮肤 `vars` 里给 diff 底色的变量名（按优先级查）。
+ * 两套命名并存是三套旧皮肤的既成事实：1337 / coffee / nightfox 用 `addedLine` / `removedLine`，
+ * ayu / catppuccin 用 `diffAddedBg` / `diffRemovedBg`。合并成一名会改动别人的皮肤文件，
+ * 而变量名本来就不属于扩展的接口 —— 扩展只认「谁的值对」。
+ */
+const DIFF_ADDED_BG_VARS = ["addedLine", "diffAddedBg"];
+const DIFF_REMOVED_BG_VARS = ["removedLine", "diffRemovedBg"];
+/** 给 `theme-extra/colors.ts` 的转换函数（与 pi 内部生成 token 转义用的同一对）。 */
+const SKIN_OPS: ColorOps | undefined = colorOpsFrom(piTui);
 /** write 读旧内容时的文件大小上限，超出就不算 diff */
 const OLD_CONTENT_MAX_BYTES = 200_000;
 /**
@@ -720,19 +739,21 @@ function parseRgb(ansi: string): Rgb | undefined {
 }
 
 /**
- * 从皮肤读一个 diff 底色 token，并转成底色 SGR（`38;…` → `48;…`，见上面的注释）。
- * 皮肤没定义时（`getFgAnsi` 抛 `Unknown theme color`）回退到 `fallback` 那个 ThemeBg。
- * 颜色值是空串时 pi 返回 `\x1b[39m`（前景重置），换不了前缀，同样走兜底。
+ * 从**皮肤文件的 `vars`** 读一个 diff 底色色值，转成底色 SGR。
+ *
+ * 变量名按 `names` 顺序试（两套历史命名，见 `DIFF_ADDED_BG_VARS`）；都取不到时
+ * （内置 dark / light、别人的皮肤、或 `PI_THEME_VARS=off`）回退到 `fallback` 那个 ThemeBg
+ * —— 回退仍然取自同一个皮肤，不硬编码色值。
+ *
+ * 转换走 pi-tui 自己的 `backgroundAnsi`（与 `Theme` 构造里给背景 token 生成转义用的是同一
+ * 条），所以与改造前 `getBgAnsi` 的结果逐字节相同。
  */
-function diffBgFromTheme(theme: Theme, token: string, fallback: "toolSuccessBg" | "toolErrorBg"): string {
-	let ansi: string;
-	try {
-		ansi = theme.getFgAnsi(token as ThemeColor);
-	} catch {
-		return theme.getBgAnsi(fallback);
+function diffBgFromTheme(theme: Theme, names: readonly string[], fallback: "toolSuccessBg" | "toolErrorBg"): string {
+	for (const name of names) {
+		const ansi = themeVarAnsi(theme as unknown as Parameters<typeof themeVarAnsi>[0], name, "bg", SKIN_OPS);
+		if (ansi !== undefined) return ansi;
 	}
-	if (!ansi.startsWith("\x1b[38;")) return theme.getBgAnsi(fallback);
-	return ansi.replace("\x1b[38;", "\x1b[48;");
+	return theme.getBgAnsi(fallback);
 }
 
 /**
@@ -756,8 +777,8 @@ function deriveWordBg(baseBgAnsi: string, fgAnsi: string): string {
 function buildSgr(theme: Theme): Sgr {
 	// 整行底色从皮肤取：优先皮肤自定义的 toolDiffAddedBg / toolDiffRemovedBg，
 	// 皮肤没定义就退回同一个皮肤的 toolSuccessBg / toolErrorBg —— 两条路都不硬编码色值。
-	const BG_ADD = diffBgFromTheme(theme, DIFF_ADDED_BG_TOKEN, "toolSuccessBg");
-	const BG_DEL = diffBgFromTheme(theme, DIFF_REMOVED_BG_TOKEN, "toolErrorBg");
+	const BG_ADD = diffBgFromTheme(theme, DIFF_ADDED_BG_VARS, "toolSuccessBg");
+	const BG_DEL = diffBgFromTheme(theme, DIFF_REMOVED_BG_VARS, "toolErrorBg");
 	const FG_ADD = theme.getFgAnsi("toolDiffAdded");
 	const FG_DEL = theme.getFgAnsi("toolDiffRemoved");
 	return {
