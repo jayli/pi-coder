@@ -151,7 +151,7 @@ function skillWrappedText(name: string, location: string, body: string, userMess
 
 const SKILL_TEXT = skillWrappedText(
 	"knowledge-distill",
-	"/Users/bachi/gitlab/bachi-workspace/.pi/skills/knowledge-distill/SKILL.md",
+	"/Users/example/workspace/.pi/skills/knowledge-distill/SKILL.md",
 	"# 知识蒸馏\n\n把零散材料蒸馏成知识条目。",
 	"蒸馏markdown",
 );

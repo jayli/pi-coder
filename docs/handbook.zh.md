@@ -109,12 +109,10 @@ pi install git:github.com/jayli/superpowers # 带扩展的技能包（见下文�
 
 字段的取值和注释直接看那两个文件，这里只记扫不出来、改错了会静默坏掉的东西。
 
-**快照与本机真实配置的已知差异（四处，都是刻意的）**：`models.json` 的 `baseUrl`（快照写
+**快照与本机真实配置的已知差异（三处，都是刻意的）**：`models.json` 的 `baseUrl`（快照写
 `127.0.0.1` 假定网关在本机，本机那份指向 `192.168.124.1` —— 从局域网别的机器用就换成网关主机
 LAN IP）；`settings.json` 的 `defaultModel`（会被 `auto-default-model/` 在换模型时随手改写，
-所以真实值只是「上次用的模型」）；`settings.json` 的 `extensions` 字段（见文末）；以及
-**本机多一个 `extensions/coding-monitor-sync/` 但快照里没有**（用户 2026-10-11 定的例外，见文末
-「刻意不入库的机器本地文件」）。
+所以真实值只是「上次用的模型」）；`settings.json` 的 `extensions` 字段（见文末）。
 
 **`defaultTools` 里一律写纯工具名**（`+name` / `-name` 的支持随 pi 版本变化：2026-10-06 实测当时的 pi 不支持；2026-10-07 在 pi 1.0.4 复测，项目层 `{"defaultTools":["+tool_search"]}` 能正确合并出 `…, "codemode", "tool_search"`；纯名列表跨版本都成立）：纯名列表是**白名单**，每一项按名精确匹配，匹配不上就丢，不报错也不告警。所以 `["+codemode"]` 的含义是「**哪个内置工具都别开**」而不是「在默认之上追加 codemode」—— 这个坑在本仓存在了很久（`+` 只在 `extensions` / `resources` 这类字段里是 force-include，与工具选择无关，两处语法容易混）。它当时没炸，是因为 `read` / `bash` / `edit` / `write` 都被本机扩展**重新注册**过（`read-path-collapse.ts` 注册 `read`、`bash-command-collapse.ts` 注册 `bash`、`tool-diff.ts` 注册 `edit`/`write`），而扩展工具走 `includeAllExtensionTools` 无条件放行 —— 这些工具当时是以「扩展工具」而非「内置工具」的身份活着的。代价是任何**没被扩展接管**的内置工具（`grep` / `find` / `ls`）即使写进 `defaultTools` 也不生效。现在的值是显式列全：`["read", "bash", "edit", "write", "grep", "find", "ls", "codemode", "tool_search"]`（`tool_search` 是 pi 内置扩展 `builtin:tool-search` 注册的工具，默认 inactive，靠在这里点名激活）。**改完必须验**：`SettingsManager.create(cwd, agentDir, {projectTrusted: true}).getDefaultTools()` 读解析结果（pi 1.0.4 起返回的就是解析后的名单），最稳的还是 `createAgentSession({cwd, agentDir})` 再读 `session.agent.state.tools` 的**名字列表**（含扩展工具，即最终生效集）（`clients/pi/config/settings.json` 与本机 `~/.pi/agent/settings.json` 两份都要同步，见文末快照维护约定）。
 
@@ -1281,15 +1279,10 @@ modifyOtherKeys。而 pi **启动时会主动启用 Kitty 协议**（`pi-tui` �
 | `~/.pi/agent/npm/`、`bin/` | pnpm 装的包（靠 `pi install` 重拉）与 pi 自带的 `fd` / `rg` |
 | `~/.pi/agent/git/` | `pi install git:…` 拉下来的 git 包（靠 `settings.json` 的 `packages` 重拉；里面自带 `.gitignore` 把内容全忽略，只留 `.gitignore`） |
 | `~/.pi/agent/web-search-cache/`、`~/.pi/folder-history/*.jsonl` | 运行时缓存 / 历史数据 |
-| `~/.pi/agent/extensions/coding-monitor-sync/` | **刻意只留本机、不入镜像**（用户 2026-10-11 定的例外）：把 pi 的 token 用量同步到公司内部看板（公司内部工具，非本仓库对外能力）。它调 `~/.coding-monitor/hook --run-tokscale-sync`（厂商二进制的干净入口：只上报聚合、不发会话事件 —— 走会话事件会把 pi 静默错标成 `claude_code`），在 `session_start` / `turn_end` / `session_shutdown` 三个时机后台 detached 触发；节流、聚合、上传全在厂商侧。`PI_CODING_MONITOR=off` 关闭，`/coding-monitor` 手动触发。**这是本节唯一一条「文件存在于本机、但刻意不进本仓库」的条目**（其余条目是「机器本地状态，无迁移价值」）—— 换机器时不要照 `cp`，要按需重新装。详见该目录 `sync.ts` 的文件头注释 |
 
 另外，`settings.json` 的 `extensions` 字段是该文件里**唯一刻意保留的差异**：真实文件里它指向
 `~/.loongsuite-pilot/plugins/pi-coding-agent/index.mjs`（另一个工具装的遥测扩展，本机版本已被置空成 no-op；
 机器专属绝对路径、不属于 pi 自身配置），模板里置为 `[]`，只保留 `extensions/` 目录的自动发现。
-
-`extensions/` 目录本身还有一个**内容差异**：本机有、快照里没有 `coding-monitor-sync/`（见上表最后一行）。
-它靠目录自动发现加载，不需要动 `settings.json`，所以同步 `settings.json` 时不会察觉它的存在 ——
-**改 `extensions/` 的快照同步时不要把它一并 `cp` 回去**。
 
 （另有一个**格式性**差异：`~/.pi/agent/settings.json` 末尾没有换行、快照里补上了。这不是语义差异，
 用 `diff` 对比时会多出一行 `\ No newline at end of file`，别当成漏镜。）
@@ -1301,7 +1294,7 @@ modifyOtherKeys。而 pi **启动时会主动启用 Kitty 协议**（`pi-tui` �
 - **改了本机全局配置 / 扩展** → 手动把 `~/.pi/agent/` 下的 `AGENTS.md` / `settings.json` / `models.json` /
   `mcp.json` / `pi-statusline.json` / `web-search.json` / `extensions/*` / `themes/*.json` 拷回本目录，
   保持模板与实际环境一致 —— 只有上文列的几处是刻意差异（`settings.json` 的 `extensions` 字段、
-  `rainbow.json` 不存在、**`extensions/coding-monitor-sync/` 不入镜像**），其余应当逐字节相同。
+  `rainbow.json` 不存在），其余应当逐字节相同。
   （`mcp.json` 里是**本机 MCP 可执行文件的绝对路径**，与 `models.json` 的 `baseUrl` 同类：入库作模板，
   换机器照着改 `command`。）
 - **换机器 / 重装** → 按前面的 `cp` 装回去，再 `pi install npm:pi-web-access`、
