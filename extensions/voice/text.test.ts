@@ -438,7 +438,9 @@ test("stripSpokenNoise: 凭据剥掉（Bearer / sk- / 赋值式）", () => {
 	// 这里只断言「密钥字符本身没留下来」。
 	assert.ok(!/sk-abc123/.test(stripSpokenNoise("还是 `Bearer sk-abc123` 认证")), "Bearer 后跟的 key 要剥");
 	assert.ok(
-		!/e08b024605b34be5b6ad5826e0cd9c1b/.test(stripSpokenNoise("Key（sk-e08b024605b34be5b6ad5826e0cd9c1b）已写入")),
+		!/0123456789abcdef0123456789abcdef/.test(
+			stripSpokenNoise("Key（sk-0123456789abcdef0123456789abcdef）已写入"),
+		),
 		"sk- 前缀的密钥要剥",
 	);
 	assert.equal(stripSpokenNoise("密码：abcd1234 已改"), "已改");

@@ -249,7 +249,7 @@ test("writeAliyunKey: keystore 损坏时抛错且不覆盖原文件", () => {
 });
 
 test("maskKey: 只露头尾，短值全遮", () => {
-	assert.equal(maskKey("sk-e08b024605b34be5b6ad5826e0cd9c1b"), "sk-e08…9c1b");
+	assert.equal(maskKey("sk-0123456789abcdef0123456789abcdef"), "sk-012…cdef");
 	assert.equal(maskKey("short"), "****");
 	assert.equal(maskKey("  1234567890  "), "123456…7890");
 });

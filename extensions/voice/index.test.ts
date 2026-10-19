@@ -1815,15 +1815,15 @@ test("接线：/voice key 写进 apikey.json 的 aliyunKey（保留其它字段�
 	const configFile = path.join(dir, "voice.json");
 	const harness = await loadHarness({ configFile, keystoreFile: keystore });
 
-	await harness.command("key sk-e08b024605b34be5b6ad5826e0cd9c1b");
-	assert.match(harness.notifies.at(-1)?.text ?? "", /已写入阿里云 Key（sk-e08…9c1b）/);
-	assert.equal(readAliyunKey(keystore), "sk-e08b024605b34be5b6ad5826e0cd9c1b");
+	await harness.command("key sk-0123456789abcdef0123456789abcdef");
+	assert.match(harness.notifies.at(-1)?.text ?? "", /已写入阿里云 Key（sk-012…cdef）/);
+	assert.equal(readAliyunKey(keystore), "sk-0123456789abcdef0123456789abcdef");
 	const written = JSON.parse(fs.readFileSync(keystore, "utf8"));
 	assert.deepEqual(written.apiKeys, { DEEPSEEK_API_KEY: "sk-d" }, "gateway 的 key 不该被动到");
 	assert.equal(written.authToken, "admin");
 
 	await harness.command("key");
-	assert.match(harness.notifies.at(-1)?.text ?? "", /已配置（sk-e08…9c1b）/);
+	assert.match(harness.notifies.at(-1)?.text ?? "", /已配置（sk-012…cdef）/);
 
 	await harness.command("key clear");
 	assert.match(harness.notifies.at(-1)?.text ?? "", /已清除 aliyunKey/);
