@@ -227,9 +227,9 @@ test("memory_write 落盘 + 机械重建索引", { skip }, async () => {
 
 	const result = await h.tool("memory_write", {
 		name: "gitlab-push-rule",
-		description: "内网 GitLab 拒绝非公司邮箱提交",
+		description: "GitLab 拒绝非白名单邮箱提交",
 		type: "project",
-		content: "推送被 pre-receive hook 拒绝。\n\n**Why:** push rule 要求公司邮箱。\n**How to apply:** 用 bachi@taobao.com。",
+		content: "推送被 pre-receive hook 拒绝。\n\n**Why:** push rule 要求白名单邮箱。\n**How to apply:** 用 dev@example.com。",
 	});
 	assert.match(result.text, /Saved memory "gitlab-push-rule"/);
 
@@ -243,7 +243,7 @@ test("memory_write 落盘 + 机械重建索引", { skip }, async () => {
 
 	const index = fs.readFileSync(path.join(h.memoryDir, "MEMORY.md"), "utf-8");
 	assert.match(index, /^# Memory Index/);
-	assert.match(index, /- \[gitlab-push-rule\]\(gitlab-push-rule\.md\) — project — 内网 GitLab 拒绝非公司邮箱提交/);
+	assert.match(index, /- \[gitlab-push-rule\]\(gitlab-push-rule\.md\) — project — GitLab 拒绝非白名单邮箱提交/);
 });
 
 test("memory_write 同名更新而非重复", { skip }, async () => {

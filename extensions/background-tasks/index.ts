@@ -80,6 +80,15 @@
  * （测试隔离用）；`PI_BACKGROUND_TASKS_DOCK=off` 只关 statusline 那一行（工具与通知照旧）；
  * `PI_BACKGROUND_TASKS_DOCK_LINGER_MS` 改终态行的驻留时长；
  * `PI_BACKGROUND_TASKS_TURN_NOTE_MS` 改结轮提示的运行时长阈值（默认 5s）。
+ *
+ * ## 第四个块：`bg_wait`（别人注册的工具，只换渲染）
+ *
+ * `bg_wait` 是 pi-subagents 注册的后台等待工具，本扩展**没有**它的定义，也不能重注册。
+ * 它原先走 pi 默认壳（`toolSuccessBg` 底色 + 上下各一行空行 + `bg_wait id="…"` 标题）——
+ * 用户 2026-10-18 定：这个场景也改成本扩展三个工具那棵树（无底色、无上下空行）。
+ * 实现走 `pi.registerToolRenderer`（只换渲染、不动工具，与 mcp-tree 同一条路）：
+ * 名字是 `bg_wait` 就返回同一套 self 壳渲染器，其余工具原样交给 `next()`。
+ * 它的 `details` 没有 `ok`，所以结局分类用 `classifyBgWaitOutcome`。
  */
 
 import fs from "node:fs";
@@ -127,12 +136,15 @@ import {
 	bgToolTitleParts,
 	classifyBgNotificationOutcome,
 	classifyBgToolOutcome,
+	classifyBgWaitOutcome,
 	previewMoreLinesHint,
 	type BgToolOutcome,
 } from "./render.ts";
 import { renderTaskTable, TABLE_RIGHT_MARGIN, type TaskTableRole, type TaskTableRow } from "./table.ts";
 
 const CUSTOM_TYPE = "background-task";
+/** pi-subagents 注册的后台等待工具名（本扩展只接管它的**渲染**，不注册工具）。 */
+const BG_WAIT_TOOL = "bg_wait";
 
 /** 默认给每个后台任务一份隔离工作区（`PI_BACKGROUND_TASKS_WORKTREE=off` 关掉）。 */
 function worktreeEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
@@ -412,7 +424,14 @@ function paintTableRows(rows: readonly TaskTableRow[], theme: Theme, bodySlot: s
  * 有表时正文的树**不闭合**（全行 `│ `，`bgResultTreePrefixes(count, false)`），`└ ` 交给
  * 表格首行 —— 用户 2026-10-16 选的形态。
  */
-function bgToolRenderers(toolName: string, config: { taskTable?: boolean } = {}) {
+function bgToolRenderers(
+	toolName: string,
+	config: {
+		taskTable?: boolean;
+		/** 结局分类；默认读 `details.ok`（本扩展三个工具），`bg_wait` 传自己的（details 形状不同）。 */
+		classify?: (isError: boolean, details: unknown) => BgToolOutcome;
+	} = {},
+) {
 	return {
 		renderShell: "self" as const,
 		renderCall(_args: unknown, theme: Theme, context: BgToolRenderContext) {
@@ -438,7 +457,7 @@ function bgToolRenderers(toolName: string, config: { taskTable?: boolean } = {})
 			// isError 必须从 **context** 读：pi 传给 resultRenderer 的对象是
 			// `{ content, details }`，**没有 isError 字段**（它只在 getRenderContext() 里）。
 			if (context.state) {
-				context.state.outcome = classifyBgToolOutcome(context.isError === true, result?.details);
+				context.state.outcome = (config.classify ?? classifyBgToolOutcome)(context.isError === true, result?.details);
 			}
 			const sourceLines = bgResultText(result ?? {}).split("\n");
 			const expanded = options?.expanded === true;
@@ -1044,6 +1063,18 @@ export default function backgroundTasks(pi: ExtensionAPI): void {
 				cache.clear();
 			},
 		};
+	});
+
+	// ── bg_wait：pi-subagents 的后台等待工具，同一棵树 ─────────────────
+	//
+	// `bg_wait` 不在本扩展的工具表里（pi-subagents 注册），所以不能像上面三个工具那样
+	// 直接在定义里带 `renderShell`。`pi.registerToolRenderer` 是 pi 1.3.0 提供的
+	// 「只换渲染、不动工具」的钩子：解析器按加载顺序串联，`next()` 落到下一个解析器 /
+	// 已注册的工具定义。这里**不调 `next()`**（我们就是要盖过默认壳的底色与上下空行），
+	// 其余工具名原样交回去。
+	pi.registerToolRenderer((toolName, next) => {
+		if (toolName !== BG_WAIT_TOOL) return next();
+		return bgToolRenderers(BG_WAIT_TOOL, { classify: classifyBgWaitOutcome });
 	});
 
 	// ── 生命周期：任务随会话生死 ───────────────────────────────────────────

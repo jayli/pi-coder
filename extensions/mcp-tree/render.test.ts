@@ -201,16 +201,16 @@ test("shapeResultLines：全空 / 空数组时返回空（没地方挂 `└ `）
 
 test("整块形状：标题圆点列 0、正文列 4、`└ ` 落在 ctrl+o 提示行", () => {
 	const dot = "\u001b[38;2;1;2;3m\u2022\u001b[39m";
-	const body = ["{", '  "results": [', '    { "repo": "bachi-workspace" }', "  ]", "}"];
+	const body = ["{", '  "results": [', '    { "repo": "example-workspace" }', "  ]", "}"];
 	const hint = "\u001b[38;2;1;2;3m... (210 more lines, 215 total, ctrl+o to expand)\u001b[39m";
 
-	const call = withCallGutter(['repo-bot/search_knowledge query="双十一 进展" limit=8'], dot, theme.fg("muted", "\u2502 "), true);
+	const call = withCallGutter(['knowledge-bot/search_knowledge query="版本进展" limit=8'], dot, theme.fg("muted", "\u2502 "), true);
 	const result = shapeResultLines([...body, hint], theme);
 	const all = [...call, ...result];
 
 	assert.equal(firstColumn(all[0]!), 0, "标题圆点在列 0");
-	assert.ok(plain(all[0]!).includes("repo-bot/search_knowledge"), "工具名完整保留");
-	assert.ok(plain(all[0]!).includes('query="双十一 进展"'), "参数完整保留在标题行（用户 2026-10-16 定）");
+	assert.ok(plain(all[0]!).includes("knowledge-bot/search_knowledge"), "工具名完整保留");
+	assert.ok(plain(all[0]!).includes('query="版本进展"'), "参数完整保留在标题行（用户 2026-10-16 定）");
 	assert.equal(all.filter((l) => plain(l).includes("\u2514 ")).length, 1, "整块只有一个 `└ `");
 	assert.ok(plain(all[all.length - 1]!).includes("ctrl+o to expand"), "`└ ` 落在提示行 —— 树延伸到展开入口");
 	for (const line of all.slice(1)) {

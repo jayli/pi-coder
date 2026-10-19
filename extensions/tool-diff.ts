@@ -225,9 +225,19 @@ const INDENT = " ";
  * codex 的行号列不顶格，整块 diff 相对工具标题往里缩；这里只缩 1 列，和标题 /
  * 提示行的 INDENT 一致 —— 试过 4 列（codex 原样），但窄终端里代码区会被吃掉太多列，
  * 折行明显变多，1 列是层次感与可用宽度的折中。
+ * add / del 行的这一格换成竖线 `▏`（见 `DIFF_BAR`），ctx 行仍是缩进空格。
  * 上下边框（`╌`）**不**跟着缩进 —— 见 `dashedRule`。
  */
 const DIFF_INDENT = " ";
+/**
+ * 新增 / 删除行行首的竖线字形：`▏`（U+258F，左侧八分之一块）—— 与 `user-message-bar` 同一字形。
+ *
+ * 它占的正是 `DIFF_INDENT` 那一格（两者都是 1 列），所以整行宽度、行号槽位置、代码列与折行
+ * 宽度全都与没有竖线时逐列相同 —— 底色照旧从第 0 列铺满，竖线坐在底色上，颜色取该侧的
+ * **行号前景色**（`toolDiffAdded` / `toolDiffRemoved`，与行号、+- 号同一个槽）。
+ * 竖线自带 `FG_RESET`（只重置前景），不会把整行底色清掉 —— 与行号槽里其它前景色收尾同一条纪律。
+ */
+const DIFF_BAR = "\u258F";
 
 const FG_RESET = "\x1b[39m";
 const BG_RESET = "\x1b[49m";
@@ -282,9 +292,17 @@ function gutterWidthOf(numWidth: number): number {
 	return DIFF_INDENT.length + numWidth + 3;
 }
 
-/** 空白行号槽：折行续行用（不显示行号和 +- 号，只保留底色） */
-function blankGutter(numWidth: number): string {
-	return DIFF_INDENT + " ".repeat(numWidth + 3);
+/**
+ * 行首那一格：add / del 行是竖线（`fg` 传该侧的行号前景色），ctx 行仍是一格缩进空格。
+ * 两种形状都是 1 列，所以 `gutterWidthOf` 不用为它加宽。
+ */
+function leadingCell(type: DiffLineType, fg: string): string {
+	return type === "add" || type === "del" ? `${fg}${DIFF_BAR}${FG_RESET}` : DIFF_INDENT;
+}
+
+/** 空白行号槽：折行续行用（不显示行号和 +- 号，只保留底色与行首竖线） */
+function blankGutter(lead: string, numWidth: number): string {
+	return lead + " ".repeat(numWidth + 3);
 }
 
 interface WordRanges {
@@ -938,12 +956,16 @@ function layoutRows(s: Sgr, rows: readonly PreparedRow[], width: number, gutterW
 		// 行号在前、符号在后，符号与正文之间一个空格（`95 - code` / `94   code`）。
 		// 行号跟符号同色（ctx 行没有符号，保持原来的 dim）。
 		const numFg = row.type === "ctx" ? s.FG_NUM : signFg;
-		const gutterText = `${DIFF_INDENT}${numFg}${row.numText}${FG_RESET} ${signFg}${row.sign}${FG_RESET} `;
+		// 行首那一格：add / del 是竖线（颜色 = 该侧行号前景色），ctx 是缩进空格。两者同宽，
+		// 所以行号槽、代码列、折行位置都不动。
+		const lead = leadingCell(row.type, signFg);
+		const gutterText = `${lead}${numFg}${row.numText}${FG_RESET} ${signFg}${row.sign}${FG_RESET} `;
 		// 底色从**整行最左侧**开始下（含 DIFF_INDENT 那 1 列），槽位内部一律只用 FG_RESET
 		// （只重置前景）收尾，所以行号 / 符号的收尾不会把底色清掉 —— 缩进 + 行号槽 + 代码区
 		// 连成一条完整的底色带，而不是只有代码区有底色。
 		const gutter = bg === "" ? gutterText : bg + gutterText;
-		const blank = bg === "" ? blankGutter(gutterWidth) : bg + blankGutter(gutterWidth);
+		// 折行续行也带同一条竖线：凡是铺着新增 / 删除底色的行，行首都有竖线
+		const blank = bg === "" ? blankGutter(lead, gutterWidth) : bg + blankGutter(lead, gutterWidth);
 
 		const wrapped = wrapTextWithAnsi(row.contentHL, contentWidth);
 		const limited = wrapped.length > MAX_WRAP_ROWS ? wrapped.slice(0, MAX_WRAP_ROWS) : wrapped;
@@ -1160,9 +1182,14 @@ function titleRow(theme: Theme, tool: string, path: string, suffix: string): Tit
 
 /** 单行提示（Editing… / Error / Applied / Written / no changes）。
  *  和结果卡片占同一个视觉位置，所以也带同样的缩进 —— 否则同一个工具在不同结果下
- *  一会儿缩进一会儿顶格，观感不一致。 */
+ *  一会儿缩进一会儿顶格，观感不一致。
+ *
+ *  **缩进必须走 `Text` 的 `paddingX`，不能拼进字符串**（用户 2026-10-19 报）：提示虽是单行，
+ *  但长错误（`Could not find the exact text in <长路径>...`）会被 `Text` 折行，拼在首字符前的
+ *  那一格只属于第一行，续行会顶格 —— 屏幕上就是「第一行空一格、第二行顶格」。`paddingX` 是
+ *  按**每个折行**补的，所以行首始终对齐。 */
 function noteLine(theme: Theme, color: "dim" | "error" | "success" | "muted", text: string): Text {
-	return new Text(INDENT + theme.fg(color, text), 0, 0);
+	return new Text(theme.fg(color, text), INDENT.length, 0);
 }
 
 function firstText(result: { content: readonly { type: string; text?: string }[] }): string {

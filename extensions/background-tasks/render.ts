@@ -11,6 +11,8 @@
  * `run_in_background` / `background_output` / `background_kill` 原先走 pi 的默认工具壳：
  * 整块套 `toolSuccessBg` 底色、`Box(1, 1)` 的 paddingY 给上下各一行空行、标题只有加粗
  * 工具名、结果全文平铺（且被 pi 默认裁到 10 行）。终态通知同理套 `customMessageBg` 底色。
+ * `bg_wait`（pi-subagents 注册的后台等待工具）同一套形态 —— 用户 2026-10-18 定，它原先仍是
+ * 默认壳（底色 + 上下空行 + `bg_wait id="…"` 标题）。
  * 现在统一改成本机 bash / plan 块同族的树形观感：
  *
  * ```
@@ -152,6 +154,28 @@ export function classifyBgNotificationOutcome(task: unknown): BgToolOutcome {
 	if (record.status === "killed") return "error";
 	if (typeof record.exitCode === "number" && record.exitCode !== 0) return "error";
 	return "success";
+}
+
+/**
+ * `bg_wait`（pi-subagents 的后台等待工具）的结局分类。
+ *
+ * 它的 `details` 形状与本扩展三个工具不同（`{ mode: "management", results, completions?, wait? }`，
+ * 没有 `ok`），所以不能复用 `classifyBgToolOutcome`：那样每个成功等到的结果都会被画成灰点。
+ *
+ *   isError                     → error（红）
+ *   details.completions 非空   → success（绿）：真的等到了结果
+ *   其余（没等到 / 时间窗到了 / 让路）→ declined（灰）：没办成但不是错
+ *
+ * 「没有可等的运行」（`No active run matched …`）落在 declined —— 与 `background_output`
+ * 的「没有这个任务」同一档：模型下一步自己就能纠正，不需要红点示警。
+ */
+export function classifyBgWaitOutcome(isError: boolean, details: unknown): BgToolOutcome {
+	if (isError) return "error";
+	if (details !== null && typeof details === "object") {
+		const completions = (details as { completions?: unknown }).completions;
+		if (Array.isArray(completions) && completions.length > 0) return "success";
+	}
+	return "declined";
 }
 
 /** 工具块标题行该画什么：只有点的色槽（工具块**不打任何标记**）。 */

@@ -43,8 +43,8 @@ const SKIP = "找不到本机 pi 的库入口（装过 pi 才有）";
 const BAR = "\u2022"; // •
 const PIPE = "\u2502"; // │
 const CORNER = "\u2514"; // └
-const TOOL_NAME = "mcp__repo_bot__search_knowledge";
-const ARGS = { query: "双十一 进展", limit: 8 };
+const TOOL_NAME = "mcp__knowledge_bot__search_knowledge";
+const ARGS = { query: "版本进展", limit: 8 };
 
 /**
  * `theme.bold()` 走 pi 自带的 chalk，而 chalk 在**模块求值时**就定好「要不要输出样式」
@@ -253,7 +253,7 @@ function renderBlock(options: RenderOptions = {}): string[] {
 		component.updateResult(
 			{
 				content: [{ type: "text", text: options.text ?? RESULT_TEXT }],
-				details: options.details ?? { server: "repo_bot", tool: "search_knowledge" },
+				details: options.details ?? { server: "knowledge_bot", tool: "search_knowledge" },
 				...(options.isError ? { isError: true } : {}),
 			},
 			options.partial === true,
@@ -310,8 +310,8 @@ test("标题行：圆点在列 0、参数完整保留、工具名沿用内置的
 	const title = lines[1]!;
 	assert.equal(firstColumn(title), 0, "圆点必须在列 0");
 	assert.ok(title.startsWith(BAR), `首行必须以圆点开头：${JSON.stringify(title)}`);
-	assert.ok(title.includes("repo_bot/search_knowledge"), `工具名必须保留（内置 label 是 server/tool）：${JSON.stringify(title)}`);
-	assert.ok(title.includes('query="双十一 进展"'), `参数必须完整保留在标题行：${JSON.stringify(title)}`);
+	assert.ok(title.includes("knowledge_bot/search_knowledge"), `工具名必须保留（内置 label 是 server/tool）：${JSON.stringify(title)}`);
+	assert.ok(title.includes('query="版本进展"'), `参数必须完整保留在标题行：${JSON.stringify(title)}`);
 	assert.ok(title.includes("limit=8"), `多余参数也要在：${JSON.stringify(title)}`);
 });
 
@@ -380,15 +380,15 @@ test("圆点三态：执行中 / 部分结果都灰、成功绿、失败红", { 
 });
 
 test("失败正文里的 Error: 行被染成失败红", { skip }, () => {
-	const lines = renderBlock({ isError: true, text: "Error: repo-bot 不可用" });
-	const errLine = lines.find((l) => plain(l).includes("Error: repo-bot"));
+	const lines = renderBlock({ isError: true, text: "Error: knowledge-bot 不可用" });
+	const errLine = lines.find((l) => plain(l).includes("Error: knowledge-bot"));
 	assert.ok(errLine, "错误行必须在");
 	// 与成功块的同位置行比：错误行的前景色应当与失败圆点同槽（这里只断言它带了颜色且不是默认）。
 	assert.ok(/\u001b\[38;2;\d+;\d+;\d+m/.test(errLine!), "Error: 行必须被着色");
 });
 
 test("details.error 也算失败（内置/服务端有「正常返回但带 error」的路径）", { skip }, () => {
-	const withError = renderBlock({ details: { server: "repo_bot", tool: "search_knowledge", error: "boom" }, text: "ok" });
+	const withError = renderBlock({ details: { server: "knowledge_bot", tool: "search_knowledge", error: "boom" }, text: "ok" });
 	const without = renderBlock({ text: "ok" });
 	const dotOf = (line: string): string => {
 		const match = /\u001b\[38;2;\d+;\d+;\d+m\u2022\u001b\[39m/.exec(line);

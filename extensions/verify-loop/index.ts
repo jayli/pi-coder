@@ -81,9 +81,9 @@
  *   （verification-before-completion 的铁律是 FRESH evidence）。
  */
 
-import type { AgentBeforeSettleEvent, ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type { AgentBeforeSettleEvent, ExtensionAPI, ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
 import { convertToLlm, serializeConversation } from "@earendil-works/pi-coding-agent";
-import { Box, Text } from "@earendil-works/pi-tui";
+import { wrapTextWithAnsi } from "@earendil-works/pi-tui";
 
 import { hasActiveSubagentWork } from "../recap/subagents.ts";
 import {
@@ -131,6 +131,12 @@ const DEFAULT_GOAL_TIMEOUT_MS = 45_000;
 const DEFAULT_EVALUATOR_SPEC = "litellm-any/qwen3.8-flash";
 
 const STATUS_KEY = "verify-goal";
+
+/** 注入消息正文的几何：缩进 2 列 + 树符 2 列，正文从列 4 起（与 bash / background-task 块同一套）。 */
+const BODY_INDENT = "  ";
+const GUTTER_WIDTH = 2;
+const TREE_PIPE = "\u2502 "; // │
+const TREE_LAST = "\u2514 "; // └
 
 // =============================================================================
 // 配置解析（纯函数，可单测）
@@ -247,23 +253,65 @@ export default function verifyLoop(pi: ExtensionAPI): void {
 	});
 
 	// ── 注入消息的渲染（CC 的 "Stop hook feedback" 行）──────────────────────
+	//
+	// 形态与 bash / plan / background-task 块同族（用户 2026-10-18 定）：
+	//
+	//   • ⚠ verify-loop:
+	//     │ 你声称完成，但本次 run 的文件改动（…）之后没有跑过任何命令…
+	//     └ 这是第 1/2 次拦截；达到上限后不再拦截。
+	//
+	// **不套 Box**：原来的 `Box(outputPad, 1, bg customMessageBg)` 给了整块底色 + 上下各
+	// 一行空行，跟其它块摆在一起时明显是另一种块。现在返回一个自带 `render(width)` 的对象
+	// （`CustomMessageComponent` 接受任何组件形状），底色与那两条空行一起消失 —— 上方仍剩
+	// 一行，那是组件构造时写死的 `Spacer(1)`，与 self 壳工具块同一条。
+	//
+	// 圆点与标签**同槽**：拦截（gate）/ 停与上限 → `warning`（用户要的「还是原有的警告颜色」），
+	// 达成 → `success`，不可能 → `error`，未达成 → `accent`；标签加粗。正文不染色，
+	// 结构符 `│` / `└` 走 `muted`。折行在挂树符**之前**做（正文宽度 = 总宽 - 缩进 - 树符），
+	// 所以树是连续的：除末行外全 `│ `，末行 `└ `。
 
-	pi.registerMessageRenderer<VerifyLoopDetails>(VERIFY_LOOP_CUSTOM_TYPE, (message, { outputPad }, theme) => {
-		const kind = message.details?.kind ?? "gate";
-		const label =
-			kind === "gate"
-				? theme.fg("warning", "⚠ verify-loop:")
-				: kind === "goal-met"
-					? theme.fg("success", "◎ goal 达成:")
-					: kind === "goal-impossible"
-						? theme.fg("error", "◎ goal 不可能:")
-						: kind === "goal-halted" || kind === "goal-cap"
-							? theme.fg("warning", "◎ goal 已停:")
-							: theme.fg("accent", "◎ goal 未达成:");
+	/** 注入消息的标题：圆点与标签共用同一个语义色槽。 */
+	function messageTitle(kind: InjectKind, theme: Theme): string {
+		const label = (
+			{
+				gate: ["warning", "⚠ verify-loop:"],
+				"goal-met": ["success", "◎ goal 达成:"],
+				"goal-impossible": ["error", "◎ goal 不可能:"],
+				"goal-halted": ["warning", "◎ goal 已停:"],
+				"goal-cap": ["warning", "◎ goal 已停:"],
+				"goal-not-met": ["accent", "◎ goal 未达成:"],
+			} as const
+		)[kind] ?? (["warning", "⚠ verify-loop:"] as const);
+		const [slot, text] = label;
+		return `${theme.fg(slot, "\u2022")} ${theme.fg(slot, theme.bold(text))}`;
+	}
+
+	pi.registerMessageRenderer<VerifyLoopDetails>(VERIFY_LOOP_CUSTOM_TYPE, (message, _options, theme) => {
+		const kind = (message.details?.kind ?? "gate") as InjectKind;
+		const title = messageTitle(kind, theme);
 		const body = typeof message.content === "string" ? message.content : message.content.map((part) => part.text ?? "").join("\n");
-		const box = new Box(outputPad, 1, (text) => theme.bg("customMessageBg", text));
-		box.addChild(new Text(`${label}\n${body}`, 0, 0));
-		return box;
+		// 消息是静态的，按宽度缓存排版（与工具块同一套做法）
+		const cache = new Map<number, string[]>();
+		return {
+			render(width: number): string[] {
+				const hit = cache.get(width);
+				if (hit !== undefined) return hit;
+				const total = Math.max(1, width || 80);
+				// 标题顶格（不挂缩进），折行预算就是整个宽度
+				const lines = wrapTextWithAnsi(title, total);
+				const bodyWidth = Math.max(1, total - BODY_INDENT.length - GUTTER_WIDTH);
+				const rows: string[] = [];
+				for (const line of body.split("\n")) rows.push(...wrapTextWithAnsi(line, bodyWidth));
+				for (let index = 0; index < rows.length; index += 1) {
+					lines.push(BODY_INDENT + theme.fg("muted", index === rows.length - 1 ? TREE_LAST : TREE_PIPE) + rows[index]!);
+				}
+				cache.set(width, lines);
+				return lines;
+			},
+			invalidate() {
+				cache.clear();
+			},
+		};
 	});
 
 	// ── /goal 命令 ─────────────────────────────────────────────────────────

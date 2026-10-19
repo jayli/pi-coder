@@ -35,6 +35,12 @@ const BAR = "\u258f";
 /** 自造皮肤的 `accent`（`#95c4ce` = 本机 `pi-coder-summer-night` 的 sky）—— 默认取色槽。 */
 const ACCENT = "#95c4ce";
 const ACCENT_FG = "\u001b[38;2;149;196;206m";
+/** 抬头里 `You` 用的 `syntaxKeyword`（`#9d79d6` = nightfox 的关键字紫）。 */
+const KEYWORD = "#9d79d6";
+const KEYWORD_FG = "\u001b[38;2;157;121;214m";
+/** 抬头里时间用的 `dim`（`#6d6d6d` = nightfox 的 comment）。 */
+const DIM = "#6d6d6d";
+const DIM_FG = "\u001b[38;2;109;109;109m";
 /** 默认取用的颜色（= accent），A/B 对照与 `undoBar` 用它。 */
 const BAR_FG = ACCENT_FG;
 /** 自造皮肤的 `toolDiffAdded`（`#89b8c2` = 该皮肤的 teal）：仅当 `accent` 缺失时的兜底槽。 */
@@ -124,6 +130,12 @@ interface PiApi {
 		outputPad: number,
 		transformers: unknown[],
 	) => { render(width: number): string[] };
+	InteractiveMode: {
+		prototype: {
+			addMessageToChat(message: unknown, options?: unknown): void;
+			getUserMessageText(message: unknown): string;
+		};
+	};
 }
 
 let pi: PiApi | undefined;
@@ -135,7 +147,15 @@ if (piEntry) pi = (await import(pathToFileURL(piEntry).href)) as unknown as PiAp
 function createTheme(): unknown {
 	assert.ok(pi);
 	return new pi.Theme(
-		{ accent: ACCENT, text: "#c6c8d1", muted: "#818596", thinkingXhigh: "#626262", toolDiffAdded: DIFF_ADDED },
+		{
+			accent: ACCENT,
+			syntaxKeyword: KEYWORD,
+			dim: DIM,
+			text: "#c6c8d1",
+			muted: "#818596",
+			thinkingXhigh: "#626262",
+			toolDiffAdded: DIFF_ADDED,
+		},
 		{ selectedBg: SELECTED_BG, userMessageBg: "#1b1c1d" },
 		"truecolor",
 	);
@@ -227,6 +247,46 @@ function renderUserMessage(text: string, width: number): string[] {
 	pi.initTheme("dark");
 	const markdownTheme = { ...pi.getMarkdownTheme(), codeBlockIndent: "  " };
 	return new pi.UserMessageComponent(text, markdownTheme, 1, []).render(width);
+}
+
+/**
+ * 走**真正被打过补丁的** `InteractiveMode.prototype.addMessageToChat` 画一条用户消息，
+ * 再把其中那个组件渲染出来 —— 这是「时间戳怎么落到组件上」的完整链路（没有 timestamp
+ * 的直构造组件永远看不到抬头）。
+ *
+ * 假 `this` 只需要原函数在 `case "user"` 里真正读的那几样：容器、outputPad、两个渲染上下文
+ * 方法，以及 `getUserMessageText`（直接借 pi 原型上的那个）。
+ */
+function renderThroughAddMessageToChat(
+	message: { role: string; content: string; timestamp?: number },
+	markdownTheme: unknown,
+	width: number,
+): string[] {
+	assert.ok(pi);
+	const children: unknown[] = [];
+	const fake = {
+		chatContainer: {
+			children,
+			addChild(child: unknown) {
+				children.push(child);
+			},
+		},
+		outputPad: 1,
+		getUserMessageText: pi.InteractiveMode.prototype.getUserMessageText,
+		getMarkdownThemeWithSettings: () => markdownTheme,
+		getMarkdownTransformers: () => [],
+	};
+	const add = pi.InteractiveMode.prototype.addMessageToChat as (
+		this: unknown,
+		message: unknown,
+		options?: unknown,
+	) => void;
+	add.call(fake, message);
+	const component = children.find((child) => child instanceof pi!.UserMessageComponent) as
+		| { render(width: number): string[] }
+		| undefined;
+	assert.ok(component, "addMessageToChat 应该画出一个 UserMessageComponent");
+	return component.render(width);
 }
 
 /** 去掉 CSI 颜色与 OSC 133 标记（用户消息首尾各挂一个）。 */
@@ -441,6 +501,136 @@ test("session_shutdown 后不画竖线，且渲染不再碰旧 ctx（旧 ctx 此
 
 		assert.equal(after.some((line) => line.includes(BAR)), false, "shutdown 之后不画竖线");
 		for (const [i, line] of after.entries()) assert.equal(line, undoBar(before[i] ?? "", BAR_FG), `第 ${i} 行回到未打补丁的样子`);
+	} finally {
+		workspace.cleanup();
+	}
+});
+
+/**
+ * 发送时间抬头（用户 2026-10-19 定）：`▏You 13:33 #1` 顶格画在框上方，引导符 `▏` 用 `dim`，
+ * `You` 加粗 + `syntaxKeyword`，时间与 ` #N` 用 `dim`（时间本地 24 小时制、两位补零）。
+ * 这里走完整的 `addMessageToChat → 组件 → render` 链路 —— 直构造组件是拿不到 message 上的
+ * timestamp 的，顺手也钉住「只差这一行」的 A/B。
+ */
+test("带 timestamp 的用户消息：框上方多一行 `▏You HH:MM #N`，zone 起点仍在最前", { skip, timeout: 30_000 }, async () => {
+	const workspace = makeWorkspace();
+	try {
+		const extension = await loadExtension(workspace);
+		await fireSessionStart(extension, createTheme());
+		pi.initTheme("dark");
+		const markdownTheme = { ...pi.getMarkdownTheme(), codeBlockIndent: "  " };
+		const timestamp = new Date(2026, 9, 19, 13, 33, 7).getTime();
+
+		// 先画带时间的那条，让它是 session_start 之后的第一条用户消息（轮次 #1）
+		const withTime = renderThroughAddMessageToChat({ role: "user", content: MESSAGE, timestamp }, markdownTheme, WIDTH);
+		const withoutTime = renderThroughAddMessageToChat({ role: "user", content: MESSAGE }, markdownTheme, WIDTH);
+
+		assert.equal(withTime.length, withoutTime.length + 1, "只多出抬头这一行");
+		const header = withTime[0] ?? "";
+		assert.equal(plainText(header).trimEnd(), "▏You 13:33 #1", "顶格：引导符后不空，轮次号在时间后");
+		assert.equal(header.includes("\u001b[48;2;20;21;22m"), true, "抬头底色从消息底色 #1b1c1d 变暗 25% 起");
+		assert.equal(header.includes("\u001b[48;2;0;0;0m"), true, "字符结束处已经落到背景黑");
+		assert.equal(header.includes("\u001b[48;2;27;28;29m"), false, "不再渐到消息底色");
+		assert.equal(header.endsWith("\u001b[49m"), true, "行尾收底，不溢到下一行");
+		assert.equal(visibleWidth(header), WIDTH, "底色铺满整行（与下面的消息块同宽）");
+		assert.equal(header.startsWith("\u001b]133;A\u0007"), true, "OSC 133 zone 起点留在整个消息第一行最前");
+		// 底色是逐格上的，所以检查前景那几段之前先把背景序列摘掉
+		const foreground = header.replace(/\u001b\[48;[25];[0-9;]+m/g, "");
+		assert.equal(foreground.includes(`${DIM_FG}\u258F\u001b[22;39m`), true, "引导符是 dim");
+		assert.equal(foreground.includes(`${KEYWORD_FG}\u001b[1mYou\u001b[22m\u001b[39m`), true, "You 加粗 + syntaxKeyword");
+		assert.equal(foreground.includes(`${DIM_FG} 13:33 #1\u001b[22;39m`), true, "时间与轮次号在同一个 dim 段里");
+		assert.equal(foreground.includes("13:33"), true, "时间是普通数字（24 小时制）");
+		for (const [i, line] of withTime.entries()) {
+			assert.equal(visibleWidth(line) <= WIDTH, true, `第 ${i} 行不超过 ${WIDTH} 列`);
+		}
+		assert.equal(withTime.slice(1).every((line) => line.includes(`${BAR_FG}${BAR}`)), true, "框内每行照常有竖线");
+		assert.equal(plainText(withTime.slice(1).join("\n")).includes("第一行正文"), true, "正文一字不少");
+		assert.equal(withoutTime.some((line) => plainText(line).includes("▏You")), false, "没有 timestamp 就不画抬头");
+	} finally {
+		workspace.cleanup();
+	}
+});
+
+/**
+ * 压缩次数（用户 2026-10-19 定）：抬头末尾 ` · N compactions`。口径是**这条消息发出时**
+ * 已经压缩过几次，不是当前的累计值 —— 所以按会话分支里 `compaction` 条目的位置现算。
+ * 这里用一份假 sessionManager 把三种位置摆出来：压缩前发出的（0）、压缩后发出的（1）、
+ * 刚发出还没落盘的新消息（此前的压缩全算上 = 1）。
+ */
+test("压缩次数：抬头按这条消息在分支里的位置显示 `· N compactions`", { skip, timeout: 30_000 }, async () => {
+	const workspace = makeWorkspace();
+	try {
+		const extension = await loadExtension(workspace);
+		pi.initTheme("dark");
+		const markdownTheme = { ...pi.getMarkdownTheme(), codeBlockIndent: "  " };
+		const before = { role: "user", content: "压缩前", timestamp: new Date(2026, 9, 19, 10, 0, 7).getTime() };
+		const after = { role: "user", content: "压缩后", timestamp: new Date(2026, 9, 19, 10, 5, 7).getTime() };
+		const branch = [
+			{ type: "message", message: before },
+			{ type: "message", message: { role: "assistant", content: [] } },
+			{ type: "compaction", id: "compaction-1" },
+			{ type: "message", message: { role: "assistant", content: [] } },
+			{ type: "message", message: after },
+		];
+		await fireSessionStartWithCtx(extension, {
+			ui: { theme: createTheme() },
+			sessionManager: { getBranch: () => branch },
+		});
+
+		const header = (message: { role: string; content: string; timestamp?: number }): string =>
+			plainText(renderThroughAddMessageToChat(message, markdownTheme, WIDTH)[0] ?? "").trimEnd();
+		assert.equal(header(before), "▏You 10:00 #1 · 0 compactions", "压缩之前发出的：0 次");
+		assert.equal(header(after), "▏You 10:05 #2 · 1 compactions", "压缩之后发出的：1 次");
+
+		// 刚发出的消息要到 message_end 才落盘：查不到就等于「此前所有压缩都已发生」
+		const fresh = { role: "user", content: "刚发", timestamp: new Date(2026, 9, 19, 10, 6, 7).getTime() };
+		assert.equal(header(fresh), "▏You 10:06 #3 · 1 compactions");
+	} finally {
+		workspace.cleanup();
+	}
+});
+
+/**
+ * `session_shutdown` 一到就摘掉查询函数：旧 sessionManager 会随旧 ctx 一起作废。断言方式是
+ * 「让旧 manager 此后开始抛」—— 摘掉生效的话渲染根本不会去读它；没摘则会像旧 ctx 那条一样
+ * 把异常从渲染回调扔出去（没人接得住，会带走整个 pi）。已经查过的消息走消息级缓存（压缩次数
+ * 是条目自身的属性、与分支无关），所以 shutdown 后旧消息的那一段仍在。
+ */
+test("session_shutdown 后不再读旧 sessionManager（已查过的用缓存，新消息不画）", { skip, timeout: 30_000 }, async () => {
+	const workspace = makeWorkspace();
+	try {
+		const extension = await loadExtension(workspace);
+		pi.initTheme("dark");
+		const markdownTheme = { ...pi.getMarkdownTheme(), codeBlockIndent: "  " };
+		let live = true;
+		const message = { role: "user", content: MESSAGE, timestamp: new Date(2026, 9, 19, 11, 2, 7).getTime() };
+		const branch = [
+			{ type: "compaction", id: "compaction-1" },
+			{ type: "message", message },
+		];
+		await fireSessionStartWithCtx(extension, {
+			ui: { theme: createTheme() },
+			sessionManager: {
+				getBranch: () => {
+					if (!live) throw new Error("stale session manager");
+					return branch;
+				},
+			},
+		});
+		const before = plainText(renderThroughAddMessageToChat(message, markdownTheme, WIDTH)[0] ?? "").trimEnd();
+		assert.equal(before, "▏You 11:02 #1 · 1 compactions", "换之前能读到压缩次数");
+
+		await fireSessionShutdown(extension);
+		live = false; // 此刻起旧 manager 已作废：只要有人读它就会抛
+		const after = plainText(renderThroughAddMessageToChat(message, markdownTheme, WIDTH)[0] ?? "").trimEnd();
+		assert.equal(after, "▏You 11:02 #1 · 1 compactions", "已经查过的消息用缓存，不再碰旧 manager");
+
+		// 没查过的消息就没缓存可用了：查询函数已摘掉，只能不画那一段（而不是去读死 manager）
+		const fresh = { role: "user", content: "新消息", timestamp: new Date(2026, 9, 19, 11, 3, 7).getTime() };
+		assert.equal(
+			plainText(renderThroughAddMessageToChat(fresh, markdownTheme, WIDTH)[0] ?? "").trimEnd(),
+			"▏You 11:03 #2",
+		);
 	} finally {
 		workspace.cleanup();
 	}

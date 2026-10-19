@@ -23,7 +23,7 @@ export interface StatuslineTheme {
 export interface StatuslineSource {
 	model: { id?: string } | undefined;
 	thinkingLevel?: string;
-	getContextUsage(): { percent: number | null | undefined } | undefined;
+	getContextUsage(): { percent: number | null | undefined; contextWindow?: number } | undefined;
 }
 
 /** footerData 里需要的部分。 */
@@ -97,7 +97,7 @@ export const STATUSLINE_KEY = "statusline";
 export const STATUS_PRIORITY = ["plan-mode"] as const;
 const MAX_STATUS_ITEMS = 5;
 
-/** 主行：`🅼 x/xhigh | Ctx 0.0% | \u15cc branch | (+a,-b)[ | 状态]`，各段已着色。 */
+/** 主行：`🅼 x/xhigh[/1M] | Ctx 0.0% | \u15cc branch | (+a,-b)[ | 状态]`，各段已着色。 */
 export function formatMainLine(
 	theme: StatuslineTheme,
 	source: StatuslineSource,
@@ -105,9 +105,11 @@ export function formatMainLine(
 	state: StatuslineState,
 ): string {
 	const branch = git.getGitBranch();
+	// 一次读两处用：上下文徽标与 `Ctx x%` 的分母必须是同一个窗口（虚拟模型的限额解析走它）。
+	const usage = readContextUsage(source);
 	const segments = [
-		formatModelSegment(theme, source),
-		formatContextSegment(theme, source),
+		formatModelSegment(theme, source, usage?.contextWindow),
+		formatContextSegment(theme, usage),
 		formatBranchSegment(theme, branch),
 		formatDiffSegment(theme, branch, state.diffStat),
 		formatStateSegment(theme, git, state),
@@ -187,16 +189,41 @@ export function formatExtensionStatuses(theme: StatuslineTheme, git: StatuslineG
 	return visible.join(dim(theme, SEPARATOR));
 }
 
-/** 模型图标 + id + 推理强度：`🅼 qwen3.8-flash/xhigh`（图标 dim，id 用 accent，斜杠 dim，level 用 syntaxFunction）；level 读不到（stale ctx）时只报 id。 */
-function formatModelSegment(theme: StatuslineTheme, source: StatuslineSource): string {
+/**
+ * 上下文窗口徽标：**百万级窗口才加**（`/1M`），更小的窗口不加，免得每行都挂一串噪音。
+ * 取 `getContextUsage().contextWindow` —— 与 `Ctx x%` 的分母同一个值（虚拟模型的限额解析也走它）。
+ *
+ * 取整容忍 ±10%：现实里的“1M”模型声明成 1048576（= 1 MiB，比 1M 多 4.9%），
+ * 按小数点硬算会显示成 `1.048576M`，所以先看是否贴近整百万。
+ */
+export function formatContextWindowBadge(contextWindow: number | undefined): string | undefined {
+	if (!contextWindow || contextWindow < 1_000_000) return undefined;
+	const millions = contextWindow / 1_000_000;
+	const nearest = Math.round(millions);
+	const text = Math.abs(millions - nearest) < 0.1 ? String(nearest) : millions.toFixed(1);
+	return `${text}M`;
+}
+
+/** 模型图标 + id + 推理强度 + 上下文窗口：`🅼 qwen3.8-flash/max/1M`。 */
+function formatModelSegment(
+	theme: StatuslineTheme,
+	source: StatuslineSource,
+	contextWindow: number | undefined,
+): string {
 	const id = readModel(source)?.id ?? "no-model";
 	const level = readThinkingLevel(source);
-	const suffix = level ? `${dim(theme, "/")}${theme.fg("syntaxFunction", level)}` : "";
+	const suffix = [level, formatContextWindowBadge(contextWindow)]
+		.filter((part): part is string => Boolean(part))
+		.map((part) => `${dim(theme, "/")}${theme.fg("syntaxFunction", part)}`)
+		.join("");
 	return `${dim(theme, MODEL_ICON)} ${theme.fg("accent", id)}${suffix}`;
 }
 
-function formatContextSegment(theme: StatuslineTheme, source: StatuslineSource): string {
-	const percent = readContextUsage(source)?.percent ?? null;
+function formatContextSegment(
+	theme: StatuslineTheme,
+	usage: { percent: number | null | undefined } | undefined,
+): string {
+	const percent = usage?.percent ?? null;
 	const percentText = percent === null ? "?" : `${percent.toFixed(1)}%`;
 	return `${dim(theme, "Ctx")} ${theme.fg(contextColor(percent), percentText)}`;
 }
@@ -255,7 +282,7 @@ function contextColor(percent: number | null): string {
 /** ctx 的 getter 在会话被换掉后可能抛（stale ctx），状态栏不值得为此挂掉渲染。 */
 function readContextUsage(
 	source: StatuslineSource,
-): { percent: number | null | undefined } | undefined {
+): { percent: number | null | undefined; contextWindow?: number } | undefined {
 	try {
 		return source.getContextUsage();
 	} catch {

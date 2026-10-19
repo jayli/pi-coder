@@ -8,11 +8,11 @@
  * ## 目标形状（用户 2026-10-16 定）
  *
  * ```
- * • repo-bot/search_knowledge query="双十一 进展" limit=8
+ * • knowledge-bot/search_knowledge query="版本进展" limit=8
  *   │ {
  *   │   "results": [
  *   │     {
- *   │       "repo": "bachi-workspace",
+ *   │       "repo": "example-workspace",
  *   └ ... (210 more lines, 215 total, ctrl+o to expand)
  * ```
  *
@@ -178,7 +178,7 @@ export function trimTrailingBlanks(lines: string[]): string[] {
  * 一根**悬空的 `│`**：
  *
  * ```
- * • repo_bot/search_knowledge query="…" limit=8
+ * • knowledge_bot/search_knowledge query="…" limit=8
  *   │            ← 这一行是那个 Spacer
  *   │ {          ← 正文其实从这里才开始
  * ```

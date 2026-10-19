@@ -22,6 +22,7 @@ import {
 	composeFooterLines,
 	ELLIPSIS,
 	STATUS_PRIORITY,
+	formatContextWindowBadge,
 	formatExtensionStatuses,
 	formatMainLine,
 } from "./line.ts";
@@ -57,12 +58,14 @@ function sourceOf(
 	percent: number | null = 0,
 	model: { id?: string } | null = FLASH,
 	level = "xhigh",
+	contextWindow?: number,
 ): StatuslineSource {
 	const resolved = model === null ? undefined : model;
 	return {
 		model: resolved,
 		thinkingLevel: level,
-		getContextUsage: () => (percent === null ? undefined : { percent }),
+		getContextUsage: () =>
+			percent === null ? undefined : { percent, ...(contextWindow === undefined ? {} : { contextWindow }) },
 	};
 }
 
@@ -205,6 +208,54 @@ describe("formatMainLine", () => {
 		assert.ok(
 			formatMainLine(plain, throwing, gitOf("main"), stateOf()).startsWith("\u{1f17c} qwen3.8-flash | "),
 		);
+	});
+
+	it("appends the context window badge right after the thinking level", () => {
+		assert.equal(
+			formatMainLine(
+				plain,
+				sourceOf(0, FLASH, "xhigh", 1_048_576),
+				gitOf("main"),
+				stateOf({ diffStat: { added: 0, deleted: 0 } }),
+			),
+			`\u{1f17c} qwen3.8-flash/xhigh/1M | Ctx 0.0% | \u15cc main | (+0,-0)`,
+		);
+	});
+
+	it("keeps the badge when there is no thinking level", () => {
+		assert.ok(
+			formatMainLine(plain, sourceOf(0, FLASH, "", 1_048_576), gitOf("main"), stateOf()).startsWith(
+				"\u{1f17c} qwen3.8-flash/1M | ",
+			),
+		);
+	});
+
+	it("omits the badge below one million tokens", () => {
+		for (const contextWindow of [200_000, 128_000, 999_999, undefined]) {
+			assert.ok(
+				formatMainLine(plain, sourceOf(0, FLASH, "xhigh", contextWindow), gitOf("main"), stateOf()).startsWith(
+					"\u{1f17c} qwen3.8-flash/xhigh | ",
+				),
+				String(contextWindow),
+			);
+		}
+	});
+
+	it("paints the badge like the thinking level", () => {
+		assert.ok(
+			formatMainLine(painted, sourceOf(0, FLASH, "xhigh", 1_048_576), gitOf("main"), stateOf()).startsWith(
+				"dim(\u{1f17c}) accent(qwen3.8-flash)dim(/)syntaxFunction(xhigh)dim(/)syntaxFunction(1M)dim( | )",
+			),
+		);
+	});
+
+	it("labels whole and fractional millions, and nothing below one million", () => {
+		assert.equal(formatContextWindowBadge(1_048_576), "1M");
+		assert.equal(formatContextWindowBadge(2_097_152), "2M");
+		assert.equal(formatContextWindowBadge(1_500_000), "1.5M");
+		assert.equal(formatContextWindowBadge(999_999), undefined);
+		assert.equal(formatContextWindowBadge(0), undefined);
+		assert.equal(formatContextWindowBadge(undefined), undefined);
 	});
 
 	it("treats throwing context getters as unknown", () => {

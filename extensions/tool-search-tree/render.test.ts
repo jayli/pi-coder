@@ -136,11 +136,11 @@ describe("正文工具条目的着色前缀（toolSearchResultToolLineLength）"
 			toolSearchResultToolLineLength("- memory_read: Read one memory's full body by name."),
 			"- ".length + "memory_read".length + 1,
 		);
-		assert.equal(toolSearchResultToolLineLength("- mcp__dingtalk_contact__search_user_by_mobile: 通过手机号搜索"), 47);
+		assert.equal(toolSearchResultToolLineLength("- mcp__contact_platform__search_user_by_mobile: 通过手机号搜索"), 47);
 	});
 
 	it("工具名里的 `-` `.` `/` `__` 都能识别（MCP / 带连字符与点的工具名）", () => {
-		for (const name of ["fetch-content.v2", "repo-bot/search_knowledge", "web_search"]) {
+		for (const name of ["fetch-content.v2", "knowledge-bot/search_knowledge", "web_search"]) {
 			assert.equal(toolSearchResultToolLineLength(`- ${name}: 描述`), 2 + name.length + 1, `应识别：${name}`);
 		}
 	});

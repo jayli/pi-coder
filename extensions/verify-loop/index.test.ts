@@ -20,6 +20,13 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { VERIFY_LOOP_CUSTOM_TYPE } from "./gate.ts";
 import { GOAL_ENTRY_TYPE } from "./goal.ts";
 
+/**
+ * `theme.bold()` 走 pi 自带的 chalk，而 chalk 在**模块求值时**就定好「要不要输出样式」
+ * （非 TTY 下默认关掉）—— 所以「真的加粗了」的断言必须靠这个环境变量，且**必须在 import pi 之前**设
+ * （mcp-tree/index.test.ts 同款；本文件顶层不 import pi，真正的 import 在 loadHarness 里）。
+ */
+if (process.env.FORCE_COLOR === undefined && process.env.NO_COLOR === undefined) process.env.FORCE_COLOR = "3";
+
 const EXTENSION_PATH = path.join(path.dirname(fileURLToPath(import.meta.url)), "index.ts");
 
 // =============================================================================
@@ -120,6 +127,8 @@ interface Harness {
 	notifies: string[];
 	/** setStatus 记录。 */
 	statuses: Array<{ key: string; text: string | undefined }>;
+	/** 注入消息的渲染器（真加载器注册的那一个）。 */
+	renderer?: (message: unknown, options: unknown, theme: unknown) => { render(width: number): string[]; invalidate?: () => void };
 	/** 评估调用记录（可注入裁决）。 */
 	evaluations: Array<{ prompt: string; systemPrompt: string }>;
 	/** 下一次评估返回的原始文本（undefined = 评估失败）。 */
@@ -227,6 +236,7 @@ async function loadHarness(
 	assert.ok(settleHandler, "应该注册 agent_before_settle handler");
 	assert.ok(goalCommand, "应该注册 /goal 命令");
 	assert.ok(extension.messageRenderers.get(VERIFY_LOOP_CUSTOM_TYPE), "应该注册注入消息的渲染器");
+	harness.renderer = extension.messageRenderers.get(VERIFY_LOOP_CUSTOM_TYPE) as Harness["renderer"];
 
 	harness.settle = async (messages, outcome = "completed") =>
 		settleHandler(
@@ -662,3 +672,150 @@ test(
 		assert.equal(harness.evaluations.length, 0, "闸 block 时不花评估调用");
 	},
 );
+
+// =============================================================================
+// 注入消息的渲染形态（用户 2026-10-18 定：与 bash / background-task 块同一棵树）
+//
+//   • ⚠ verify-loop:
+//     │ 你声称完成，但本次 run 的文件改动（…）之后没有跑过任何命令…
+//     └ 这是第 1/2 次拦截；达到上限后不再拦截。
+//
+// 原先走 `Box(outputPad, 1, bg customMessageBg)`：整块底色 + 上下各一行空行。
+// 这里钉的是「换了什么」：圆点、加粗标题、正文挂树符、无底色、无多余空行。
+// =============================================================================
+
+/** 假主题：颜色映射成 `slot(text)`（含 `bg`），加粗映射成 `bold(text)`。 */
+const slotTheme = {
+	fg: (slot: string, text: string) => `${slot}(${text})`,
+	bold: (text: string) => `bold(${text})`,
+	bg: (slot: string, text: string) => `BG(${slot},${text})`,
+};
+
+/** 假主题：丢掉颜色与底色，只看可见文本。 */
+const plainTheme = {
+	fg: (_slot: string, text: string) => text,
+	bold: (text: string) => text,
+	bg: (_slot: string, text: string) => text,
+};
+
+/** 渲染一条注入消息；`kind` 走 details（与真消息同一形状）。 */
+async function renderMessage(kind: string, content: string, width = 80, theme: unknown = plainTheme): Promise<string[]> {
+	const harness = await loadHarness();
+	assert.ok(harness.renderer, "应该注册渲染器");
+	return harness.renderer!({ content, details: { kind, at: 1 } }, { outputPad: 1 }, theme).render(width);
+}
+
+test(
+	"渲染：标题 = 圆点 + 加粗的 ⚠ verify-loop:（同一个 warning 槽），正文挂树符",
+	{ skip },
+	async () => {
+		const lines = await renderMessage("gate", "第一行\n第二行\n第三行", 80, slotTheme);
+		assert.deepEqual(lines, [
+			`warning(\u2022) warning(bold(⚠ verify-loop:))`,
+			`  muted(\u2502 )第一行`,
+			`  muted(\u2502 )第二行`,
+			`  muted(\u2514 )第三行`,
+		]);
+	},
+);
+
+test(
+	"渲染：圆点与标签同槽（gate → warning、达成 → success、不可能 → error、未达成 → accent）",
+	{ skip },
+	async () => {
+		const slotOf = async (kind: string): Promise<string> => {
+			const title = (await renderMessage(kind, "正文", 80, slotTheme))[0]!;
+			const match = /^(\w+)\(\u2022\) (\w+)\(bold\(/.exec(title);
+			assert.ok(match, `标题应是「圆点 + 加粗标签」：${JSON.stringify(title)}`);
+			assert.equal(match![1], match![2], "圆点与标签必须同槽（同一个语义色）");
+			return match![1]!;
+		};
+		assert.equal(await slotOf("gate"), "warning", "闸拦截 = 原有的警告色");
+		assert.equal(await slotOf("goal-halted"), "warning");
+		assert.equal(await slotOf("goal-cap"), "warning");
+		assert.equal(await slotOf("goal-met"), "success");
+		assert.equal(await slotOf("goal-impossible"), "error");
+		assert.equal(await slotOf("goal-not-met"), "accent");
+	},
+);
+
+test(
+	"渲染：不套 Box —— 无底色、无上下空行（块内只有标题 + 正文行）",
+	{ skip },
+	async () => {
+		const lines = await renderMessage("gate", "第一行\n第二行", 80, slotTheme);
+		assert.ok(!lines.some((line) => line.includes("BG(")), `整块不该有底色：${JSON.stringify(lines)}`);
+		assert.equal(lines.length, 3, `标题 + 2 行正文，不多空行：${JSON.stringify(lines)}`);
+		assert.ok(!lines.some((line) => line.trim() === ""), "块内不该有整行空白（Box 的 paddingY）");
+	},
+);
+
+test(
+	"渲染：长正文先折行再挂树符（续行也是 │、末行 └、不超宽）",
+	{ skip },
+	async () => {
+		const width = 40;
+		const body = "你声称完成，但本次 run 的文件改动之后没有跑过任何命令去观察实际结果。请运行能证明这次改动正确的命令并把输出贴出来。";
+		const lines = await renderMessage("gate", body, width);
+		assert.ok(lines.length > 3, `宽 ${width} 下必须折成多行：${JSON.stringify(lines)}`);
+		for (const line of lines) assert.ok(line.length <= width, `行超宽：${JSON.stringify(line)}`);
+		const bodyLines = lines.slice(1);
+		for (const line of bodyLines.slice(0, -1)) assert.ok(line.startsWith("  \u2502 "), `续行也要挂 │：${JSON.stringify(line)}`);
+		assert.ok(bodyLines[bodyLines.length - 1]!.startsWith("  \u2514 "), "末行才收口");
+		assert.equal(bodyLines.filter((line) => line.startsWith("  \u2514 ")).length, 1, "└ 整块只出现一次");
+	},
+);
+
+test(
+	"真组件端到端：无背景 SGR、标题顶格加粗、正文挂树、上方只剩 pi 固定的一行留白",
+	{ skip },
+	async () => {
+		const harness = await loadHarness();
+		const pi = (await import(pathToFileURL(piEntry as string).href)) as {
+			initTheme: (name?: string) => void;
+			CustomMessageComponent: new (
+				message: unknown,
+				renderer?: unknown,
+				markdownTheme?: unknown,
+				outputPad?: number,
+			) => { render: (width: number) => string[] };
+		};
+		pi.initTheme("dark");
+		const component = new pi.CustomMessageComponent(
+			{ role: "custom", customType: VERIFY_LOOP_CUSTOM_TYPE, content: "第一行\n第二行", details: { kind: "gate", at: 1 } },
+			harness.renderer,
+		);
+		const raw = component.render(80);
+		const plain = (line: string): string => line.replace(/\u001b\][^\u0007]*\u0007/g, "").replace(/\u001b\[[0-9;:?]*[a-zA-Z]/g, "");
+
+		assert.equal(raw[0], "", "第 0 行是 pi 写死的 Spacer(1)（去不掉的两个块共同点）");
+		assert.ok(!raw.some((line) => /\u001b\[(?:4[0-7]|10[0-7]|48;)/.test(line)), `不该有背景 SGR：${JSON.stringify(raw)}`);
+		assert.ok(/\u001b\[1m/.test(raw[1]!), `标题必须真的加粗：${JSON.stringify(raw[1])}`);
+		assert.equal(plain(raw[1]!).trim(), "\u2022 ⚠ verify-loop:", `标题顶格（圆点在列 0）：${JSON.stringify(plain(raw[1]!))}`);
+		assert.equal(plain(raw[2]!).startsWith("  \u2502 "), true, `正文续行挂 │：${JSON.stringify(plain(raw[2]!))}`);
+		assert.equal(plain(raw[3]!).startsWith("  \u2514 "), true, `末行收口：${JSON.stringify(plain(raw[3]!))}`);
+		assert.equal(raw.length, 4, `留白 + 标题 + 2 行正文，不多空行：${JSON.stringify(raw.map(plain))}`);
+	},
+);
+
+test(
+	"渲染：真闸消息（renderGateMessage 三段）接上去就是那个形状",
+	{ skip },
+	async () => {
+		const harness = await loadHarness();
+		const result = await harness.settle([
+			user("改一下"),
+			assistantToolCalls({ name: "edit", args: { path: "src/a.js" } }),
+			toolResult(),
+			assistantText("完成了"),
+		]);
+		const draft = lastDraft(result);
+		const lines = harness.renderer!({ content: draft?.content, details: draft?.details }, { outputPad: 1 }, plainTheme).render(80);
+		assert.equal(lines[0], "\u2022 ⚠ verify-loop:");
+		assert.ok(lines.slice(1).every((line) => /^  [\u2502\u2514] /.test(line)), `正文每行都挂树符：${JSON.stringify(lines)}`);
+		assert.ok(lines[lines.length - 1]!.startsWith("  \u2514 这是第 1/2 次拦截"), `末行是最后一句：${JSON.stringify(lines[lines.length - 1])}`);
+		// 三段正文在 80 列下各折成 1-3 行，但树是连续的：除末行外全是 │
+		assert.ok(!lines[0]!.includes("\u2502") && !lines[0]!.includes("\u2514"), "标题行不带树符");
+	},
+);
+

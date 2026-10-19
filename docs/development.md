@@ -27,13 +27,13 @@ Two consequences worth remembering:
 ## Tests
 
 ```bash
-npm test        # node --test — 1998 tests, ~45 s
+npm test        # node --test — 2047 tests, ~45 s
 ```
 
 Test files run in parallel (`os.availableParallelism()` — 15 on the machine this was written on). The whole suite is more stable with reduced parallelism at about the same wall time:
 
 ```bash
-node --test --test-concurrency=4      # 1998 tests, ~53 s
+node --test --test-concurrency=4      # 2047 tests, ~53 s
 ```
 
 **On pi 1.3.0 the raw command does not exit.** `codemode-tree/index.test.ts` registers its 12 cases and all of them pass, but its process keeps an open handle after the last test, so `node --test` waits forever. Reproduced at HEAD `1300eac` in a clean worktree, so it is a pi-version condition, not a sync regression. Add `--test-force-exit` — every test still runs, the flag only stops the process once the suite is done — or exclude that file. The measurements below were taken with `--test-force-exit`.
@@ -47,7 +47,7 @@ node --test --test-concurrency=4 --test-force-exit
 
 `web-search-tree/index.test.ts` skips 17 cases even then: it hard-codes the pi bundle entry under `~/.pi/agent/npm` (for `ToolExecutionComponent` and the loader) and the `@earendil-works/pi-coding-agent` tree there is the empty shell on this machine — `pi-web-access` itself is installed, so this is purely the loader copy.
 
-**23 of the 1998 are skipped on purpose when you run inside a pi session** — they are the real-sandbox cases in `bash-command-collapse/render.test.ts`. The skip condition is *nested* seatbelt: they skip exactly when the test process's own shell is already inside `sandbox-exec` (in a pi session with the delete boundary on, the inner `sandbox_apply` fails with `Operation not permitted`, exit 71). They are the ones that prove the boundary is enforced by the **kernel** rather than by a pattern match, so run them when you touch `sandbox.ts` — from a plain terminal, or from a background task, which bypasses the boundary. **The recorded run was a background task, i.e. outside the boundary, so all 23 executed and the suite reported 0 sandbox skips** — the 17 skips in the table are the web-search-tree cases above, not these. Inside a session the same command reports 23 skipped and 23 fewer passes; the totals are otherwise identical.
+**23 of the 2047 are skipped on purpose when you run inside a pi session** — they are the real-sandbox cases in `bash-command-collapse/render.test.ts`. The skip condition is *nested* seatbelt: they skip exactly when the test process's own shell is already inside `sandbox-exec` (in a pi session with the delete boundary on, the inner `sandbox_apply` fails with `Operation not permitted`, exit 71). They are the ones that prove the boundary is enforced by the **kernel** rather than by a pattern match, so run them when you touch `sandbox.ts` — from a plain terminal, or from a background task, which bypasses the boundary. **The recorded run was a background task, i.e. outside the boundary, so all 23 executed and the suite reported 0 sandbox skips** — the 17 skips in the table are the web-search-tree cases above, not these. Inside a session the same command reports 23 skipped and 23 fewer passes; the totals are otherwise identical.
 
 **Nine fail against the current pi (1.3.0)** — they are a pi-version condition, not a regression from a sync: every failing file is byte-identical to the snapshot except `render.test.ts`'s standing delta below, and each failure is a coupling to a pi internal. **Five are color assertions** — four in `bash-command-collapse/render.test.ts` and one in `read-path-collapse/render.test.ts` — that compare an SGR string against a hard-coded value; pi 1.3.0's built-in `dark` theme changed its `dim` slot from `#666666` to `#7e888e`, so the expected byte sequence no longer matches (the extension reads the slot correctly; the assertion is what moved). **Four are preview-window / fence assertions, all in `bash-command-collapse/render.test.ts`**: the truncation hint's prefix and placement, whether the hint survives preview trimming, the expanded-state color, and the blank line pi now leaves inside the fence. They fail for shape reasons, not because the tree is drawn wrong. On pi 1.3.0 the **pre-sync HEAD** reports eleven failing cases in those two files (nine in bash, two in read); upstream's own test changes removed the two "the color is read from the theme at render time" assertions — one in each file — so this tree has nine. Every remaining failure is a hard-coded SGR or prefix expectation. The stable fact across versions: the failing files are the snapshot's, so a sync cannot move this set — fixing the assertions belongs upstream in `clients/pi/`.
 

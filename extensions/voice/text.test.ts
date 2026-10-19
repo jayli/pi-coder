@@ -412,7 +412,7 @@ test("cleanSummaryText: 超长在句边界截断并补句号", () => {
 
 /** 一条真实的「提交 + 推送」结论（2026-10-04 会话语料）。 */
 const COMMIT_PUSH_SUMMARY =
-	"已提交并推送。 - commit: `e752224` — `feat(voice): 阿里云口播换 qwen-audio-3.1-tts-flash 并支持方言指令`，9 个文件（+232/−57） - push: `fa90a4d..e752224 main -> main`，两个 remote（GitHub `jayli/litellm-any` 与内网 GitLab）";
+	"已提交并推送。 - commit: `e752224` — `feat(voice): 阿里云口播换 qwen-audio-3.1-tts-flash 并支持方言指令`，9 个文件（+232/−57） - push: `fa90a4d..e752224 main -> main`，两个 remote（GitHub `jayli/litellm-any` 与私有 GitLab）";
 
 test("stripSpokenNoise: 真实语料里的 commit / push 结论不再漏编号", () => {
 	const speakable = toSpeakable(COMMIT_PUSH_SUMMARY);

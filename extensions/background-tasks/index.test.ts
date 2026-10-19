@@ -84,6 +84,8 @@ interface LoadedExtension {
 	tools: Map<string, { definition: ToolDefinitionLike }>;
 	commands: Map<string, { handler: (args: string, ctx: unknown) => Promise<void> }>;
 	messageRenderers: Map<string, unknown>;
+	/** `pi.registerToolRenderer` 注册的解析器（按加载顺序串联）。 */
+	toolRenderers?: Array<(toolName: string, next: () => unknown) => unknown>;
 }
 
 interface SentMessage {
@@ -872,6 +874,111 @@ test("三个工具都用 self 壳（去底色 + 去上下空行的唯一途径�
 		assert.equal(typeof definition.renderCall, "function", `${name} 应有 renderCall`);
 		assert.equal(typeof definition.renderResult, "function", `${name} 应有 renderResult`);
 	}
+	await h.shutdown();
+});
+
+test("bg_wait 走 registerToolRenderer 接管：self 壳 + 同一套树，别的工具交给 next()", { skip }, async () => {
+	const h = await loadHarness();
+	const resolvers = h.extension.toolRenderers ?? [];
+	assert.ok(resolvers.length >= 1, "应注册 toolRenderer 解析器（bg_wait 不在本扩展的工具表里）");
+	const ours = resolvers[0]!("bg_wait", () => undefined) as any;
+	assert.ok(ours, "bg_wait 应命中本扩展的渲染器");
+	// 底色与上下空行都来自 pi 的默认壳（Box(1,1,bgFn)），只有 self 壳能同时去掉
+	assert.equal(ours.renderShell, "self", "bg_wait 必须 self 壳");
+	assert.equal(typeof ours.renderCall, "function", "应有 renderCall");
+	assert.equal(typeof ours.renderResult, "function", "应有 renderResult");
+	// 别的工具原样交给下一个解析器 / 已注册的工具定义（不抢别人的渲染）
+	const sentinel = { renderShell: "default" };
+	assert.equal(resolvers[0]!("read", () => sentinel), sentinel, "非 bg_wait 不接管");
+	await h.shutdown();
+});
+
+/** `bg_wait id="bg_1"` 而 bg_1 不存在时的真实返回（用户屏幕上看到的那一条）。 */
+const BG_WAIT_NO_RUN = {
+	content: [{ type: "text", text: 'No active run matched "bg_1". Nothing to wait for.' }],
+	details: { mode: "management", results: [] },
+};
+
+test("bg_wait 的展示：标题只有 • bg_wait、正文挂树、无标记、不画任务表", { skip }, async () => {
+	const h = await loadHarness();
+	const renderers = (h.extension.toolRenderers ?? [])[0]!("bg_wait", () => undefined) as any;
+	assert.ok(renderers);
+	const ctx = renderContext();
+	const lines = renderers.renderResult(BG_WAIT_NO_RUN, { expanded: false, isPartial: false }, plainTheme, ctx).render(80).map(plain);
+	assert.deepEqual(lines, ['  └ No active run matched "bg_1". Nothing to wait for.'], `单行正文直接挂 └：${JSON.stringify(lines)}`);
+
+	const title = plain(renderers.renderCall({ id: "bg_1", timeoutMs: 240_000 }, plainTheme, ctx).render(80)[0]!);
+	assert.equal(title, "• bg_wait", `标题只留工具名（新形态与另三个块一致）：${JSON.stringify(title)}`);
+	assert.ok(!title.includes("✔") && !title.includes("✘"), "工具块不打任何标记");
+	assert.ok(!lines.join("\n").includes("┌"), "bg_wait 不带任务总览表");
+	await h.shutdown();
+});
+
+test("bg_wait 的点色：等到结果绿、没等到灰、出错红（details 无 ok，按 completions 判）", { skip }, async () => {
+	const h = await loadHarness();
+	const renderers = (h.extension.toolRenderers ?? [])[0]!("bg_wait", () => undefined) as any;
+	assert.ok(renderers);
+
+	const dotOf = (result: unknown, isError = false): string => {
+		const ctx = renderContext({ isError });
+		renderers.renderResult(result, { expanded: false, isPartial: false }, paintedTheme, ctx);
+		return renderers.renderCall({}, paintedTheme, ctx).render(80)[0]!;
+	};
+
+	// 没等到（No active run matched）：灰点 —— 与 background_output 的「没有这个任务」同一档
+	assert.match(dotOf(BG_WAIT_NO_RUN), /dim\(\u2022\)/, "没等到 → 灰点");
+	// 真等到结果：绿点
+	assert.match(
+		dotOf({ content: [{ type: "text", text: "waited" }], details: { mode: "management", results: [], completions: [{ runId: "bg_1" }] } }),
+		/success\(\u2022\)/,
+		"等到 completions → 绿点",
+	);
+	// 出错：红点（isError 优先于 details）
+	assert.match(dotOf({ content: [{ type: "text", text: "boom" }], details: { completions: [{ runId: "bg_1" }] } }, true), /error\(\u2022\)/, "出错 → 红点");
+	await h.shutdown();
+});
+
+test("bg_wait 整块无底色：真组件渲染后不含背景 SGR，且尾部不留空行", { skip }, async () => {
+	const h = await loadHarness();
+	const pi = (await import(pathToFileURL(piEntry as string).href)) as {
+		initTheme: (name?: string) => void;
+		ToolExecutionComponent: new (
+			toolName: string,
+			toolCallId: string,
+			args: unknown,
+			options: unknown,
+			toolDefinition: unknown,
+			ui: { requestRender(): void },
+			cwd: string,
+		) => {
+			markExecutionStarted: () => void;
+			updateResult: (result: unknown, isPartial?: boolean) => void;
+			render: (width: number) => string[];
+		};
+	};
+	const renderers = (h.extension.toolRenderers ?? [])[0]!("bg_wait", () => undefined) as any;
+	assert.ok(renderers);
+	const definition = { name: "bg_wait", label: "Background Wait", description: "", parameters: {}, ...renderers };
+	pi.initTheme("dark");
+	const component = new pi.ToolExecutionComponent(
+		"bg_wait",
+		"call-1",
+		{ id: "bg_1", timeoutMs: 240_000 },
+		{},
+		definition,
+		{ requestRender() {} },
+		h.projectDir,
+	);
+	component.markExecutionStarted();
+	component.updateResult(BG_WAIT_NO_RUN, false);
+	const raw = component.render(80);
+	assert.equal(raw[0], "", "第 0 行是 pi self 模式固定的留白（新形态也只留这一行）");
+	assert.notEqual(raw[raw.length - 1]!.trim(), "", "最后一行不是空行（无下边界空行）");
+	for (const line of raw) assert.ok(!line.includes("\x1b[48"), `不该有背景 SGR：${JSON.stringify(line)}`);
+	const visible = raw.map(plain).filter((line) => line.trim() !== "");
+	assert.equal(visible[0], "• bg_wait", `标题行顶格：${JSON.stringify(visible[0])}`);
+	assert.equal(visible[1], '  └ No active run matched "bg_1". Nothing to wait for.', `正文挂树：${JSON.stringify(visible[1])}`);
+	assert.equal(visible.length, 2, `除 pi 固定的上方一行留白外，上下都不多空行：${JSON.stringify(visible)}`);
 	await h.shutdown();
 });
 

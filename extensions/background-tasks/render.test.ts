@@ -24,6 +24,7 @@ import {
 	bgToolTitleParts,
 	classifyBgNotificationOutcome,
 	classifyBgToolOutcome,
+	classifyBgWaitOutcome,
 	previewMoreLinesHint,
 } from "./render.ts";
 
@@ -67,6 +68,33 @@ describe("终态通知：结局分类（读 details.task）", () => {
 	it("exitCode 非数字（还在跑 / 未知）且非 killed → success（不误报失败）", () => {
 		assert.equal(classifyBgNotificationOutcome({ status: "exited" }), "success");
 		assert.equal(classifyBgNotificationOutcome({ status: "exited", exitCode: null }), "success");
+	});
+});
+
+describe("bg_wait：结局分类（details 没有 ok，改看 completions）", () => {
+	it("isError 优先：等出错的调用是红点", () => {
+		assert.equal(classifyBgWaitOutcome(true, { completions: [{ runId: "bg_1" }] }), "error");
+		assert.equal(classifyBgWaitOutcome(true, undefined), "error");
+	});
+
+	it("completions 非空 → success（真的等到了结果，绿点）", () => {
+		assert.equal(classifyBgWaitOutcome(false, { mode: "management", results: [], completions: [{ runId: "bg_1" }] }), "success");
+	});
+
+	it("没等到 / 时间窗到了 / 让路 / 无 details → declined（灰点，不是错）", () => {
+		// `bg_wait id="bg_1"` 而 bg_1 不存在时的真实返回：No active run matched …
+		assert.equal(classifyBgWaitOutcome(false, { mode: "management", results: [] }), "declined");
+		assert.equal(
+			classifyBgWaitOutcome(false, { mode: "management", results: [], wait: { reason: "window_elapsed", timedOut: true } }),
+			"declined",
+		);
+		assert.equal(classifyBgWaitOutcome(false, { completions: [] }), "declined", "空数组不算等到结果");
+		assert.equal(classifyBgWaitOutcome(false, undefined), "declined");
+		assert.equal(classifyBgWaitOutcome(false, "not-an-object"), "declined");
+	});
+
+	it("completions 不是数组时不算成功（形状认不出就不画绿点）", () => {
+		assert.equal(classifyBgWaitOutcome(false, { completions: "bg_1" }), "declined");
 	});
 });
 

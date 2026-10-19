@@ -1,12 +1,18 @@
 /**
- * user-message-bar — 用户消息框行首竖线（接线）
+ * user-message-bar — 用户消息框：行首竖线 + 框上方的发送时间（接线）
  *
- * 本文件只做接线：补丁装在 pi 的 `UserMessageComponent.prototype.render` 上，取色源来自
+ * 本文件只做接线：补丁装在 pi 的 `UserMessageComponent.prototype.render`（竖线 + 抬头）与
+ * `InteractiveMode.prototype.addMessageToChat`（给用户消息打发送时间）上，取色源来自
  * `ctx.ui.theme`；全部逻辑在 `bar.ts`（不 import pi，`node --test` 能直跑）。
  *
- * 补丁在**模块求值时就装**（此时取色源还是空，`bar.ts` 会安静地不加竖线），这样它一定赶在
- * 第一次渲染之前到位，不依赖事件顺序。`session_start` 一到就把取色源补成 `ctx.ui.theme` ——
- * 那是个跨 `/theme` 换肤的活 Proxy，换肤下一帧即跟随。
+ * 两个补丁都在**模块求值 / session_start 时**装：
+ *   - 竖线补丁在模块求值时装（此时取色源还是空，`bar.ts` 会安静地不加竖线），这样它一定赶在
+ *     第一次渲染之前到位，不依赖事件顺序。`session_start` 一到就把取色源补成 `ctx.ui.theme` ——
+ *     那是个跨 `/theme` 换肤的活 Proxy，换肤下一帧即跟随。
+ *   - 打时间戳的补丁**只在 `session_start` 装**：那时所有扩展的模块求值都已完成，我们的包装
+ *     处在 `addMessageToChat` 调用链最外层（`skill-invocation-reorder` 会自己 `new
+ *     UserMessageComponent`、不走原函数，装在里层会漏掉 `/skill:` 消息）；首屏历史消息在
+ *     `session_start` 之后才渲染，所以也不会漏。
  *
  * 取色源还必须在**会话被替换的那一瞬间**摘掉，否则会打死整个 pi（2026-09-20 修，`/clear` 实测
  * 崩过）。pi 的 `teardownCurrent()` 顺序是：emit `session_shutdown` → `resetExtensionUI()` →
@@ -19,14 +25,27 @@
  * 所以：`session_shutdown` 一到就把取色源复位成空（该事件一定先于 `invalidate()`），读皮肤再
  * 兜一层 try/catch —— 最坏只是那几帧不画竖线，下一个 `session_start` 自动恢复。
  *
- * `PI_USER_MESSAGE_BAR=off` 关闭；`PI_USER_MESSAGE_BAR_COLOR=<皮肤槽位名>` 换颜色
- * （默认 `accent`，即皮肤的强调色；想要更暗可以试 `selectedBg`）。
+ * `PI_USER_MESSAGE_BAR=off` 关闭（竖线与时间一起关）；`PI_USER_MESSAGE_BAR_COLOR=<皮肤槽位名>`
+ * 换竖线颜色（默认 `accent`，即皮肤的强调色；想要更暗可以试 `selectedBg`）。抬头里 `You` 固定取
+ * `syntaxKeyword`、时间固定取 `dim`，不走这个开关。
+ *
+ * 抬头末尾的 ` · N compactions` 也在这里接：`session_start` 时把「这条消息发出时压缩过几次」的
+ * 查询函数（读当前会话分支，见 `sessionCompactionLookup`）交给 `bar.ts`，`session_shutdown` 时
+ * 摘掉 —— 与取色源同一个理由，旧 sessionManager 会随旧 ctx 一起作废。
  */
 
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { UserMessageComponent } from "@earendil-works/pi-coding-agent";
+import { InteractiveMode, UserMessageComponent } from "@earendil-works/pi-coding-agent";
 
-import { DEFAULT_COLOR_NAME, installUserMessageBar, type ThemeColorSource } from "./bar.ts";
+import {
+	DEFAULT_COLOR_NAME,
+	installUserMessageBar,
+	installUserMessageTimestamp,
+	resetUserMessageTurns,
+	setCompactionLookup,
+	type CompactionLookup,
+	type ThemeColorSource,
+} from "./bar.ts";
 
 export default function (pi: ExtensionAPI) {
 	if (process.env.PI_USER_MESSAGE_BAR === "off") return;
@@ -36,10 +55,17 @@ export default function (pi: ExtensionAPI) {
 	};
 
 	dropThemeSource();
-	pi.on("session_start", (_event, ctx) => {
+	pi.on("session_start", (event, ctx) => {
+		// 新会话从 #1 重新数；`/reload` 除外 —— pi 会先重放聊天区再发 session_start（见 bar.ts）
+		if (event.reason !== "reload") resetUserMessageTurns();
 		installUserMessageBar({ UserMessageComponent, theme: () => liveTheme(ctx), colorName });
+		installUserMessageTimestamp({ InteractiveMode, UserMessageComponent });
+		setCompactionLookup(sessionCompactionLookup(ctx));
 	});
-	pi.on("session_shutdown", dropThemeSource);
+	pi.on("session_shutdown", () => {
+		dropThemeSource();
+		setCompactionLookup(undefined);
+	});
 }
 
 /**
@@ -53,4 +79,41 @@ function liveTheme(ctx: ExtensionContext): ThemeColorSource | undefined {
 	} catch {
 		return undefined;
 	}
+}
+
+/** 会话管理器的最小形状：只用到 `getBranch`，条目只看 `type` 与 `message`。 */
+interface SessionManagerLike {
+	getBranch(): Array<{ type?: string; message?: object }>;
+}
+
+/** 读 `ctx.sessionManager`，**永不抛**（理由同 `liveTheme`）。 */
+function liveSessionManager(ctx: ExtensionContext): SessionManagerLike | undefined {
+	try {
+		return ctx.sessionManager as unknown as SessionManagerLike;
+	} catch {
+		return undefined;
+	}
+}
+
+/**
+ * 「这条用户消息发出时已经压缩过几次」：沿当前分支按时间顺序数 `compaction` 条目，数到这条消息
+ * 本身为止。消息还没落进分支（刚发出的消息要到 `message_end` 才写盘）时就等于「此前的压缩全都
+ * 已经发生」—— 正好是它该显示的次数。
+ *
+ * 特意不缓存结果：`/tree` 换分支、`/compact` 追加条目后 pi 会重画整个聊天区，那两种情形都得
+ * 按**那一刻**的分支算（`bar.ts` 那边按**消息对象**缓存是安全的 —— 压次是这条消息条目自身的
+ * 属性，父链定下就不再变）。分支遍历是沿 `parentId` 走，与条目总数无关，每条消息一次的开销
+ * 可以忽略。
+ */
+function sessionCompactionLookup(ctx: ExtensionContext): CompactionLookup | undefined {
+	const manager = liveSessionManager(ctx);
+	if (!manager) return undefined;
+	return (message) => {
+		let count = 0;
+		for (const entry of manager.getBranch()) {
+			if (entry.type === "compaction") count += 1;
+			else if (entry.type === "message" && entry.message === message) return count;
+		}
+		return count;
+	};
 }
