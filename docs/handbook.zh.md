@@ -1281,7 +1281,7 @@ modifyOtherKeys。而 pi **启动时会主动启用 Kitty 协议**（`pi-tui` �
 | `~/.pi/agent/npm/`、`bin/` | pnpm 装的包（靠 `pi install` 重拉）与 pi 自带的 `fd` / `rg` |
 | `~/.pi/agent/git/` | `pi install git:…` 拉下来的 git 包（靠 `settings.json` 的 `packages` 重拉；里面自带 `.gitignore` 把内容全忽略，只留 `.gitignore`） |
 | `~/.pi/agent/web-search-cache/`、`~/.pi/folder-history/*.jsonl` | 运行时缓存 / 历史数据 |
-| `~/.pi/agent/extensions/coding-monitor-sync/` | **刻意只留本机、不入镜像**（用户 2026-10-11 定的例外）：把 pi 的 token 用量同步到公司内部看板 `coding-monitor.alibaba-inc.com`（阿里内部工具，非本仓库对外能力）。它调 `~/.coding-monitor/hook --run-tokscale-sync`（厂商二进制的干净入口：只上报聚合、不发会话事件 —— 走会话事件会把 pi 静默错标成 `claude_code`），在 `session_start` / `turn_end` / `session_shutdown` 三个时机后台 detached 触发；节流、聚合、上传全在厂商侧。`PI_CODING_MONITOR=off` 关闭，`/coding-monitor` 手动触发。**这是本节唯一一条「文件存在于本机、但刻意不进本仓库」的条目**（其余条目是「机器本地状态，无迁移价值」）—— 换机器时不要照 `cp`，要按需重新装。详见该目录 `sync.ts` 的文件头注释 |
+| `~/.pi/agent/extensions/coding-monitor-sync/` | **刻意只留本机、不入镜像**（用户 2026-10-11 定的例外）：把 pi 的 token 用量同步到公司内部看板（公司内部工具，非本仓库对外能力）。它调 `~/.coding-monitor/hook --run-tokscale-sync`（厂商二进制的干净入口：只上报聚合、不发会话事件 —— 走会话事件会把 pi 静默错标成 `claude_code`），在 `session_start` / `turn_end` / `session_shutdown` 三个时机后台 detached 触发；节流、聚合、上传全在厂商侧。`PI_CODING_MONITOR=off` 关闭，`/coding-monitor` 手动触发。**这是本节唯一一条「文件存在于本机、但刻意不进本仓库」的条目**（其余条目是「机器本地状态，无迁移价值」）—— 换机器时不要照 `cp`，要按需重新装。详见该目录 `sync.ts` 的文件头注释 |
 
 另外，`settings.json` 的 `extensions` 字段是该文件里**唯一刻意保留的差异**：真实文件里它指向
 `~/.loongsuite-pilot/plugins/pi-coding-agent/index.mjs`（另一个工具装的遥测扩展，本机版本已被置空成 no-op；
