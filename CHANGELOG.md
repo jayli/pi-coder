@@ -2,6 +2,24 @@
 
 All notable changes to this package. The extensions themselves are snapshot copies from the author's pi environment; their individual histories live in that repository.
 
+## 2.5.3 — 2026-10-19
+
+Privacy patch: documentation, test fixtures and one asset only — no extension behavior changes.
+
+### Changed
+
+- **`extensions/voice/`** — the test fixtures and mask examples now use synthetic keys (`sk-0123…cdef` / `sk-abc…1234`); the previous example value was rotated and no longer authenticates.
+- **`docs/handbook.zh.md`** — removed the remaining company-intranet references (the internal dashboard row and its follow-up mentions); the deliberate-differences count goes four → three.
+- **`assets/ayu2.png`** — the internal GitLab push line is painted out; every pixel outside the redaction box is unchanged (`PSNR = inf`).
+- **`extensions/skill-invocation-reorder/skill-invocation-reorder.test.ts`** — the real workspace path is replaced with `/Users/example/workspace/...`.
+- **`package.json`** — `version` 2.5.2 → **2.5.3**.
+
+### Notes
+
+- **Affected suites still pass**: `voice/aliyun.test.ts` + `voice/text.test.ts` 96/96, `voice/index.test.ts` 71/71, `skill-invocation-reorder.test.ts` 12/12.
+- **`assets/` is not in the npm `files` list**, so the image redaction lands on `main` and the CDN only; the handbook change is in the tarball.
+- **The old key value remains in earlier commits and in npm `2.4.0` / `2.5.0` / `2.5.2`**, but it was rotated and no longer authenticates. Removing those copies would need a history rewrite and npm version handling.
+
 ## 2.5.2 — 2026-10-19
 
 Snapshot sync of **35 upstream commits** (2026-10-07 → 2026-10-19), from the previous snapshot tip `ab347bf` to `ac255fb`. Extension count **33 → 37**, suite **1747 → 1998** tests. Four new extensions — `compaction-summary/`, `mcp-tree/`, `tool-search-tree/` and `skill-invocation-reorder.ts` — plus a new helper directory `theme-extra/` that migrates the package's three extension-owned theme colors out of `colors` and into `vars`, because **pi 1.2.0 made the theme schema strict** and one unknown key now invalidates the whole skin. The rest is a wide pass over the background-task, memory, recap, explored-group and working-indicator blocks.
