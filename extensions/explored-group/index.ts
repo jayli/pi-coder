@@ -87,7 +87,7 @@ function hydrateFromHistory(ctx: ExtensionContext): void {
 }
 
 /** 本扩展接管的原生工具（渲染 + 分组）。 */
-const NATIVE_TOOLS = new Set(["grep", "find", "ls"]);
+const NATIVE_TOOLS = new Set(["grep", "find", "ls", "glob"]);
 
 /**
  * 给一个原生只读工具装上「可折叠就并组，否则原样」的渲染。
@@ -168,7 +168,9 @@ export default function (pi: ExtensionAPI) {
 		}
 	});
 
-	// ── 断组兜底：不可折叠的工具调用 ────────────────────────────────────────
+	// `glob` 由 `glob-tool/index.ts` 自己注册（它有自己的执行逻辑），**不能**在这里再注册一份 ——
+	// 同名工具重复注册会让 pi 报 `Tool "glob" conflicts with …`。它只需要在 NATIVE_TOOLS 里，
+	// 好让下面的 `tool_call` 兜底不要把它当"不可折叠的工具"去断组。──
 	// 原生 grep/find/ls 与 read/bash 已由消息重放覆盖；这条保证**其他**工具
 	//（write / edit / subagent / task_* …）也会断组。
 	pi.on("tool_call", (event) => {

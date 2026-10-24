@@ -69,6 +69,9 @@
  * `ctrl+o` 展开时不折 `… +N`，显示全部行。**成员块的完整内容**在这一态由各成员自己的
  * 渲染器负责 —— `renderCall` 里判断 `context.expanded`，展开的成员不再投 0 行
  *（接线见 `bash-command-collapse.ts` / `read-path-collapse.ts`）。
+ *
+ * 行数上限不是冗余：2026-10-20 先按「组里几条就画几行」改过一版（commit 40367a2），
+ * 用户实际体验后判定更差、当天要求恢复 —— 别再把 `… +N` 当废弃逻辑删掉。
  */
 
 import { visibleWidth } from "@earendil-works/pi-tui";
@@ -161,6 +164,9 @@ export function nativeVerbFor(toolName: string): string | null {
 			return "Search";
 		case "find":
 			return "Find";
+		// `glob` 也是原生工具（模型直调、非 bash 拼接）—— 行首动词加粗。
+		case "glob":
+			return "Glob";
 		case "ls":
 			return "List";
 		default:

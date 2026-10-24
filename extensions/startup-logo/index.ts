@@ -57,17 +57,31 @@
  * 其余三点约束：
  *   1. 只在 TUI 模式装（`ctx.mode === "tui"`）—— print / RPC / JSON 模式没有 header。
  *   2. 换会话（`/new`、`/clear`、`/resume`、fork、rewind）时 pi 会先 `resetExtensionUI()`
- *      还原内置 header，等新会话 `session_start` 才重装；中间那几十毫秒会真的出帧，
- *      于是顶部「闪」回内置 header 并跳一次版式。这段窗口由 `header-guard.ts` 在渲染路径上
+ *      还原「内置 header」，等新会话 `session_start` 才重装；中间那几十毫秒会真的出帧，
+ *      于是顶部「闪」一次并跳一次版式。这段窗口由 `header-guard.ts` 在渲染路径上
  *      冻住（重放上一帧的行），机制与 statusline 的 footer 冻结同源，各持一份、互不依赖。
+ *      注：启动静音把内置 header 换成了空 `Text`，所以这里「还原」出来的是空的那只；
+ *      冻结照样管用，用户看到的是「上一帧 logo → 新 logo」而不是空白。
+ *      **换会话也会重新求值扩展模块**，所以「本进程已静音」这个事实要挂在 `globalThis` 上
+ *      （`boot-suppress.ts` 的 `BOOT_SUPPRESSED_KEY`）—— 否则新实例会把顶部那条空行弄丢（见下）。
  *   3. 终端太窄（印记右侧放不下侧栏）时退化成单行 wordmark，不折行。
  *
+ * ## 启动窗口（用户 2026-10-22 要求「不要先看到默认 logo」）
+ *
+ * `setHeader()` 只能等 `session_start`，而 pi 在 `init()` 里早就把内置 header 挂上并出过帧了 ——
+ * 实测内置 logo 在 ~1.05s 出现、定制 logo 到 ~2.4s，中间 1.3 秒是 pi 的 `▀▀█ v1.4.0`。
+ * `boot-suppress.ts` 在**扩展工厂**里（TUI 还没 new 出来）把 `shouldShowStartupHeader()` 换成
+ * 返回 false，pi 于是压根不建内置 header（只挂一个空 `Text`），顶部在那段时间是空白。
+ * 机制与 `statusline/footer-suppress.ts` 同源，`PI_LOGO_BOOT_SUPPRESS=off` 可关。
+ *
  * 开关：`PI_LOGO=off` 启动时不装（无配置文件、无侧效；此时启动清单保持 pi 原样，因为剪枝要靠
- * 已挂载的 header 组件去认容器）；`PI_LOGO_ANIMATION=off` 只关入场动画（logo 仍装，静态显示）。
+ * 已挂载的 header 组件去认容器；内置 header 也不静音 —— 关掉 logo 就该恢复 pi 原样）；
+ * `PI_LOGO_ANIMATION=off` 只关入场动画（logo 仍装，静态显示）；`PI_LOGO_BOOT_SUPPRESS=off`
+ * 只关启动静音（接受那一次「默认 logo → 定制 logo」的闪烁，用来 A/B 对照）。
  */
 
 import type { ExtensionAPI, ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
-import { keyHint, keyText, rawKeyHint, VERSION } from "@earendil-works/pi-coding-agent";
+import { InteractiveMode, keyHint, keyText, rawKeyHint, VERSION } from "@earendil-works/pi-coding-agent";
 import {
 	colorToOkhsl,
 	colorToRgb,
@@ -102,6 +116,7 @@ import {
 } from "./logo.ts";
 import { findRenderContainer, freezeHeaderContainer, releaseHeaderGuard } from "./header-guard.ts";
 import { hideLoadedSections } from "./loaded-sections.ts";
+import { suppressBuiltInHeader } from "./boot-suppress.ts";
 
 /** 环境变量的值是不是 `off`（大小写 / 空白宽容）。 */
 const isOff = (name: string): boolean => (process.env[name] ?? "").trim().toLowerCase() === "off";
@@ -117,6 +132,8 @@ const logoEnabled = (): boolean => !isOff("PI_LOGO");
 
 /** 入场动画开关（与 `PI_LOGO` 同款：只有环境变量，没有会话内命令）。 */
 const animationEnabled = (): boolean => !isOff("PI_LOGO_ANIMATION");
+/** 启动静音开关（同上：只关「别先画内置 header」，logo 本体照装）。 */
+const bootSuppressEnabled = (): boolean => !isOff("PI_LOGO_BOOT_SUPPRESS");
 /** 窄终端阈值：印记右侧至少还要留出这些列才画印记。 */
 const MIN_SIDE_COLUMNS = 20;
 const SIDE_GAP = 2;
@@ -142,6 +159,11 @@ interface HeaderComponent {
 }
 
 export default function startupLogo(pi: ExtensionAPI) {
+	// 工厂跑在 TUI 创建之前，所以这里就能把内置 header 静音：启动那一刻它不建，顶部留白等我们的
+	// logo 装上（见 boot-suppress.ts）。`setHeader` 装好后立刻交还 —— `init()` 之后没人再读它。
+	// 放在工厂的**最后一步**：前面任何一步抛错都不留下「顶部一直空白」的状态。
+	const releaseBuiltInHeader = logoEnabled() && bootSuppressEnabled() ? suppressBuiltInHeader(InteractiveMode) : undefined;
+
 	// 冻结窗口要用的四样：TUI 根（找容器）、当前 header 组件、它的容器、上一帧渲染出的行。
 	let tuiHandle: unknown;
 	let headerComponent: HeaderComponent | undefined;
@@ -418,6 +440,15 @@ export default function startupLogo(pi: ExtensionAPI) {
 		const clampText = (line: string): string => truncateToWidth(line, Math.max(1, width - MARK_INDENT.length), ELLIPSIS);
 		const clamp = (line: string | undefined): string | undefined => (line === undefined ? undefined : clampText(line));
 		const onboardingLines = onboarding.map(clampText);
+		// 顶部那条空行：pi 装内置 header 时自带（`Spacer(1) + header + Spacer(1)`），被我们静音之后
+		// 它走 minimal 分支（只挂一个渲染 0 行的空 `Text`），那条 spacer 就没了 —— 印记会直接贴
+		// 终端顶边。**只在真静音时补**：`--verbose` / 开关关掉时 pi 仍走正常分支、自带那条还在，
+		// 再补一条就是两条空行。
+		//
+		// 判据必须是**进程级**的（`suppressed` 的口径就是这个，见 boot-suppress.ts）：`/clear` 会
+		// 重新求值扩展模块、换一个新实例，而 pi 的 `init()` 早已跑完 —— 只看本实例的话，`/clear`
+		// 之后这条空行会凭空消失（用户 2026-10-22 实测，1.4.0 上启动正常、`/clear` 后印记贴顶）。
+		const leading = releaseBuiltInHeader?.suppressed === true;
 
 		// 窄终端：不画印记，退化成单行 wordmark（同样缩进一格，跟印记左边对齐）。
 		if (width < MARK_WIDTH + MIN_SIDE_COLUMNS) {
@@ -426,6 +457,7 @@ export default function startupLogo(pi: ExtensionAPI) {
 				logo: [`${MARK_INDENT}${truncateToWidth(wordmark, room, ELLIPSIS)}`],
 				hints: clamp(hints),
 				onboarding: onboardingLines,
+				leading,
 			});
 		}
 		const sideRoom = Math.max(0, width - MARK_WIDTH - SIDE_GAP);
@@ -438,21 +470,25 @@ export default function startupLogo(pi: ExtensionAPI) {
 		// 落定 / 未开动画时走下面那条**与改动前逐字节相同**的静态路径。
 		if (elapsed !== null) {
 			const logo = attachSideText(markLines(buildPainter(theme, elapsed)), clipped, SIDE_GAP);
-			return composeHeaderLines({ logo, hints: clamp(hints), onboarding: onboardingLines });
+			return composeHeaderLines({ logo, hints: clamp(hints), onboarding: onboardingLines, leading });
 		}
 		const logo = attachSideText(
 			markLines((filled) => (filled ? theme.fg("accent", MARK_CELL) : " ".repeat(MARK_CELL.length))),
 			clipped,
 			SIDE_GAP,
 		);
-		return composeHeaderLines({ logo, hints: clamp(hints), onboarding: onboardingLines });
+		return composeHeaderLines({ logo, hints: clamp(hints), onboarding: onboardingLines, leading });
 	};
 
 	const installHeader = (ctx: ExtensionContext) => {
 		// 先交还上一段换会话窗口的冻结再装新 header：两步在同一个同步块里，中间出不了帧。
 		guardRelease?.();
 		guardRelease = undefined;
-		if (ctx.mode !== "tui" || !logoEnabled()) return;
+		if (ctx.mode !== "tui" || !logoEnabled()) {
+			// 拿不到 TUI / logo 没开：静音白打了，立即交还（`init()` 那条路早就跑完了）。
+			releaseBuiltInHeader?.();
+			return;
+		}
 
 		let component: HeaderComponent | undefined;
 		ctx.ui.setHeader((tui, theme) => {
@@ -472,6 +508,10 @@ export default function startupLogo(pi: ExtensionAPI) {
 			component = own;
 			return own;
 		});
+
+		// header 装上了，内置 header 的静音可以交还了：`init()` 里建 header 那一步早已跑完，
+		// 之后再读 `shouldShowStartupHeader()` 的只有测试。交还后原型回到 pi 原样（幂等）。
+		releaseBuiltInHeader?.();
 
 		// 组件此刻已被 pi 挂进 header 容器（`setHeader` 是同步的），按对象身份认出那个容器；
 		// 换会话时冻结要用。顺手解除别的扩展实例遗留的接管（`/reload` 之后可能有一次）。

@@ -33,7 +33,7 @@
 
 import { segmentVerb, splitShellSegments } from "../explored-group/classify.ts";
 
-export type NativeLookupTool = "grep" | "find" | "ls" | "read";
+export type NativeLookupTool = "glob" | "grep" | "find" | "ls" | "read";
 
 export interface LookupRedirect {
 	/** 建议改用的原生工具（多族混杂时取优先级最高的那个）。 */
@@ -100,6 +100,60 @@ const SHELL_VARIABLE = /\$\{?[A-Za-z_][A-Za-z0-9_]*\}?/;
 /** 参数里有没有需要 shell 先展开的 token。 */
 function hasShellExpansion(tokens: string[]): boolean {
 	return tokens.some((t) => SHELL_EXPANSION.test(t) || SHELL_VARIABLE.test(t));
+}
+
+/**
+ * 把 `find -name` 的 shell 模式转成 `glob` 的模式；转不了就返回 undefined（保留 `find` 建议）。
+ *
+ * `*` / `?` / `[` 两边的**含义一致**：shell 的方案里它们是通配符，`glob` 的
+ * `normalizePattern` 又把不含 `/` 的模式自动补上 `**` 前缀（递归），所以原样透传就是对的。
+ * 真正不一致、也因此要放弃的是三类：
+ *
+ *   - **大括号**：`find -name '{a,b}.ts'` 匹配的是**字面**文件名 `{a,b}.ts`（fnmatch 不展开），
+ *     而 glob 走 minimatch 会把它当大括号展开成 `a.ts` / `b.ts` —— 转过去是静默换了语义，不转。
+ *   - 反斜杠转义（`-name 'a'` 与 `a*` 的差别在 find 里靠反斜杠表达，而 `path.matchesGlob` 不认反斜杠转义）；
+ *   - 带 shell 含义的字符（`$` `` ` `` `;` 空格 / `/`）—— 它们的语义在两层之间不成立。
+ *
+ * 另外 minimatch 把 `*{` / `*(` 当扩展通配（`*(a|b)`），而 shell 侧它们是两个独立元字符，
+ * 这种组合也一律不转。
+ *
+ * 背景：`-path` / `-regex` 这类谓词根本不在本闸的判定范围内（被上面那个
+ * `token.startsWith("-")` 挡成不拦）。
+ */
+function globPatternFromName(shellPattern: string): string | undefined {
+	// `find . -name 'foo/bar'` 里 `-name` 带 `/` 匹配不到东西（那是 `-path` 的用法），不转。
+	if (shellPattern.includes("/")) return undefined;
+	// minimatch 的扩展通配 `*{` / `*(`：shell 侧不是这个意思。
+	if (/\*[{(]/.test(shellPattern)) return undefined;
+	let depth = 0;
+	for (const ch of shellPattern) {
+		if (ch === "[") {
+			depth++;
+			continue;
+		}
+		if (ch === "]") {
+			depth = Math.max(0, depth - 1);
+			continue;
+		}
+		if (depth > 0) {
+			// 方括号内部：`!` / `^` 是取反（两边同义）、`-` 是区间、`*` / `?` / `{` / `}` / `,`
+			// 是字面字符（minimatch 在括号内同样当字面）。
+			if (ch === "!" || ch === "^" || ch === "-" || ch === "." || ch === "_") continue;
+			if (ch === "*" || ch === "?" || ch === "{" || ch === "}" || ch === ",") continue;
+			if (/[A-Za-z0-9]/.test(ch)) continue;
+			return undefined;
+		}
+		// 括号外部：注意 `{` / `}` / `,` **不在**放行列表 —— find 的 fnmatch 不做大括号展开
+		//（匹配字面文件名），glob 的 minimatch 会展开，转过去是静默换结果；`!` 在括号外是
+		// shell 的否定运算符、在 minimatch 开头还是模式取反，也不放。
+		if (ch === "*" || ch === "?") continue;
+		if (ch === "." || ch === "_" || ch === "-" || /[A-Za-z0-9]/.test(ch)) continue;
+		// `\` / `$` / `` ` `` / `;` / 空格 / 引号残片：不猜它的语义。
+		return undefined;
+	}
+	// 括号不闭合（`[abc`）：fnmatch 当字面、minimatch 行为不定，不转。
+	if (depth !== 0) return undefined;
+	return shellPattern === "" ? undefined : shellPattern;
 }
 
 /** 去掉一层引号。 */
@@ -242,19 +296,52 @@ function splitPipeline(segment: string): string[] {
 	if (FIND_VERBS.has(verb)) {
 		// 只认 `-name` / `-iname` / `-type`；出现别的谓词（`-maxdepth` / `-mtime` / `-exec`…）就不拦。
 		let i = 0;
+		let hasName = false;
+		let onlyFiles = true;
 		while (i < args.length) {
 			const token = args[i]!;
 			if (token === "-name" || token === "-iname" || token === "-type") {
 				if (args[i + 1] === undefined) return null;
+				if (token === "-name") hasName = true;
+				// `-iname` 是大小写不敏感，glob 的匹配是敏感的 —— 转过去会静默少结果。
+				if (token === "-iname") onlyFiles = false;
+				// `-type d` / `-type l` 找的是目录与链接，而 glob 只返回文件。
+				if (token === "-type" && args[i + 1] !== "f") onlyFiles = false;
 				i += 2;
 				continue;
 			}
 			if (token.startsWith("-")) return null;
 			i += 1;
 		}
-		// 搜索起点是 shell 展开出来的（`find * -name x`）→ 原生照抄必失败。
-		const dirs = args.filter((t) => !t.startsWith("-")).map(unquote);
+		// 搜索起点只能是**第一个谓词之前**的位置参数 —— `args.filter(!startsWith("-"))` 会把
+		// `-name` 的**值**（`*.ts`）也当成起点，拿它判定就会把 `find . -name "*.ts"` 误当成两个起点。
+		const firstFlag = args.findIndex((t) => t.startsWith("-"));
+		const dirs = args.slice(0, firstFlag === -1 ? args.length : firstFlag).map(unquote);
+		// 起点是 shell 展开出来的（`find * -name x`）→ 原生照抄必失败。
 		if (hasShellExpansion(dirs.slice(0, 1))) return null;
+		// **多个搜索起点**（`find src tests -name "*.ts"`）：`glob` / `find` 都只收一个 `path`，
+		// 照抄建议会静默漏掉其余目录 —— 与 `ls a b` 同口径（那里也是 `return null`）。
+		// 2026-10-24 补：这是 find 分支一直存在的漏拦（`buildHint` 只取 `dirs[0]`），改指 glob 后同样会漏。
+		if (dirs.length > 1) return null;
+		// `find … -name '<模式>'` 就是「按文件名找」—— 那正是 `glob` 的本职（候选集来自仓库清单），
+		// 而 `find` 是 `fd --hidden` 全量遍历。2026-10-24 之前这里一律给 `find`，等于把模型从
+		// 它刚被拦下的那条路上原地挪了一步。剩下能到 `find` 的只有 `fd`、以及带 `-iname` /
+		// `-type d` 这些 glob 表达不了的形态。
+		//
+		// 子代理会话不用在这里防：`bash-command-collapse.ts` 的 gate 在调 `detectBashLookup`
+		// **之前**就用 `isSubagentSession(env, sessionFileOf(ctx))` 把子会话整个跳过了。
+		// 跳过的依据是历史实测（2026-10-23 super-dingding 会话）：12 个 worker 子代理
+		// 被拦 64 次，每次白烧一轮（worker 均 9.6s）却没改用原生工具 —— 只会说一句
+		// 「我改」再重试。注意这**不是**因为它们读不到规则：白名单里的 `core-rules`
+		// 会注入 AGENTS.core.md，Tool choice 段它们读得到（2026-10-24 实测子会话的
+		// custom_message 含该段）。
+		// （2026-10-24 起 `subagents.defaultExtensions` 已把 `glob-tool/` 加进白名单，
+		// 子代理的工具集里有 `glob`；但 gate 跳过子会话的口径不变。）
+		if (verb === "find" && hasName && onlyFiles) {
+			const nameIdx = args.findIndex((t) => t === "-name");
+			const pattern = nameIdx >= 0 ? globPatternFromName(unquote(args[nameIdx + 1] ?? "")) : undefined;
+			if (pattern !== undefined) return "glob";
+		}
 		return "find";
 	}
 
@@ -319,6 +406,18 @@ function buildHint(tool: NativeLookupTool, stages: Stage[], cdTarget: string | u
 			const include = stage.args.find((t) => t.startsWith("--include="));
 			if (include) hint.glob = unquote(include.slice("--include=".length));
 			return { pattern: pos[0], path, args: { pattern: pos[0], ...hint } };
+		}
+		if (tool === "glob" && FIND_VERBS.has(stage.verb)) {
+			const nameIdx = stage.args.findIndex((t) => t === "-name");
+			const pattern = globPatternFromName(unquote(stage.args[nameIdx + 1] ?? ""));
+			// 搜索起点只能是**第一个谓词之前**的位置参数 —— `positionals()` 会把 `-name` 的
+			// **值**（`*.ts`）也当成位置参数拿进来，拿它当 path 就成了一条跑不通的建议。
+			const firstFlag = stage.args.findIndex((t) => t.startsWith("-"));
+			const leading = stage.args.slice(0, firstFlag === -1 ? stage.args.length : firstFlag).map(unquote);
+			const dir = leading[0] ?? (cdUnresolved && cdTarget === undefined ? undefined : cdTarget ?? ".");
+			const path = join(dir);
+			// `glob({pattern, path})`：pattern 在前（它是必填），与工具 schema 同序。
+			return { pattern, path, args: { pattern, path } };
 		}
 		if (tool === "find" && FIND_VERBS.has(stage.verb)) {
 			const nameIdx = stage.args.findIndex((t) => t === "-name" || t === "-iname");
@@ -423,9 +522,10 @@ export function detectBashLookup(command: string): LookupRedirect | null {
 
 	if (families.length === 0 || stages.length === 0) return null;
 
-	// 优先级：grep > find > ls > read。`cat f | grep pat` 的意图是 grep（path=f），
-	// 取最左会误判成 read。
-	const priority: NativeLookupTool[] = ["grep", "find", "ls", "read"];
+	// 优先级：grep > glob > find > ls > read。`cat f | grep pat` 的意图是 grep（path=f），
+	// 取最左会误判成 read；而 `find … -name` 现在归 glob —— 它与 grep 同现时（`find … -name x; grep foo`）
+	// 真正的目的是 grep（先用 find 挑文件再搜内容），所以 grep 仍在 glob 之前。
+	const priority: NativeLookupTool[] = ["grep", "glob", "find", "ls", "read"];
 	const tool = priority.find((t) => families.includes(t)) ?? families[0]!;
 	const hint = buildHint(tool, stages, cdTarget, cdUnresolved);
 	return { tool, hint, tools: families };
@@ -466,6 +566,12 @@ export function renderLookupRedirect(redirect: LookupRedirect): string {
 				`确实要搜被忽略的树时，把那个目录**显式**作为 path 传入即可穿透（显式 path 不过滤）。`,
 		);
 	}
+	if (redirect.tool === "glob") {
+		lines.push(
+			`注意：\`glob\` 的候选集来自 \`git ls-files\`（索引里的文件，已按 .gitignore 过滤，不含 .git/ 内部）；` +
+				`它只按**文件名**匹配、不搜内容 —— 搜内容请用 \`grep\`。模式不含 \`/\` 时自动递归（\`*.ts\` 等价于 \`**/*.ts\`）。`,
+		);
+	}
 	if (redirect.tool === "ls") {
 		lines.push(`注意：原生 \`ls\` 只给条目名；需要大小/时间等元信息请用 bash 的 \`stat\` / \`du\`（不会被拦）。`);
 	}
@@ -474,4 +580,53 @@ export function renderLookupRedirect(redirect: LookupRedirect): string {
 		`（这条闸门可用 \`PI_BASH_LOOKUP_GATE=off\` 关闭；复合探查、变换器、写操作、测试命令都不会被拦。）`,
 	);
 	return lines.join("\n");
+}
+
+/**
+ * 会话文件路径是否属于 pi-subagents 的子会话。
+ *
+ * 形状差异（2026-10-23 实测两条路径一致）：
+ *   父会话  `sessions/<proj>/<ts>_<id>.jsonl`
+ *   子会话  `sessions/<proj>/<ts>_<id>/<runId>/run-N/session.jsonl`
+ * 即带 `run-<N>` 目录段、文件名是 `session.jsonl`。
+ */
+export function isSubagentSessionFile(sessionFile: unknown): boolean {
+	if (typeof sessionFile !== "string" || sessionFile.length === 0) return false;
+	// 两段一起判，避免把恰好名字叫 session.jsonl 的父会话误判成子会话。
+	return /(^|\/)run-\d+\/session\.jsonl$/.test(sessionFile.replace(/\\/g, "/"));
+}
+
+/**
+ * 是否跑在 pi-subagents 的子会话里。
+ *
+ * 两个判据，任一成立即是子会话：
+ *
+ * 1. **`PI_SUBAGENT_CHILD=1`** —— pi-subagents 的 async runner 在自己的进程上设
+ *    （`runs/background/subagent-runner.js`），其后代进程同样继承。
+ * 2. **会话文件落在嵌套子目录** —— 前台派发（`async: false`）的子会话跑在**父进程内**，
+ *    没有独立 runner，`PI_SUBAGENT_CHILD` 实测为空（2026-10-23 实测确认）。这时
+ *    也不能读 `process.env.PI_SESSION_FILE`：扩展与父会话共用同一个 `process.env`，
+ *    读到的是**父会话**的值。必须用 `tool_call` 的 `ctx.sessionManager.getSessionFile()`
+ *    （它是绑定到子会话的）—— 所以 `bash-command-collapse.ts` 传的是 ctx 的会话文件，
+ *    `env` 只用于单元测试与无 ctx 的调用方。
+ *
+ * 为什么子会话要关掉单一探查闸：这条闸是给**交互会话**定的规则（用户 2026-10-06
+ * 要求「该用原生工具时就用」），但子代理的 `tools` 白名单由它自己的 agent 定义
+ * （`reviewer` / `researcher` 根本没有 bash）。注意子代理**并非读不到这条规则**：
+ * 它们不继承全局 AGENTS.md（`inheritGlobalContext: false`），但白名单里的 `core-rules`
+ * 会注入 AGENTS.core.md 的蒸馏版，Tool choice 段在里面（2026-10-24 实测子会话的
+ * custom_message 含该段）。实测
+ * （2026-10-23 的 super-dingding 兜底画像化会话）：12 个 worker 子代理被这条闸拦了
+ * 64 次，每次白烧一个 turn（worker 均 9.6s）。拦下来得到的不是「它改用原生工具」，
+ * 而是「它再花一轮说抱歉」。
+ */
+export function isSubagentSession(
+	env: NodeJS.ProcessEnv = process.env,
+	sessionFile?: unknown,
+): boolean {
+	if (env.PI_SUBAGENT_CHILD === "1") return true;
+	if (isSubagentSessionFile(sessionFile)) return true;
+	// 没传 ctx 的会话文件时（单测 / 无 ctx 调用方）退回 env：async 子进程的 bash
+	// 拿到的是注入过的 env，所以 shape 在这里仍然可信。
+	return isSubagentSessionFile(env.PI_SESSION_FILE);
 }

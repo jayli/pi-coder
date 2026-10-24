@@ -212,9 +212,15 @@ function formatModelSegment(
 ): string {
 	const id = readModel(source)?.id ?? "no-model";
 	const level = readThinkingLevel(source);
-	const suffix = [level, formatContextWindowBadge(contextWindow)]
+	const badge = formatContextWindowBadge(contextWindow);
+	// 推理强度走 `mdCode`（行内代码色，用户 2026-10-22 定）：它是**可变的值**，不该和模型名
+	// 共用 `accent` —— 同一行里两个同色段读起来像一个名字。`/1M` 徽标是窗口的静态属性，
+	// 仍走 `syntaxFunction`（那曾是整个后缀的槽位）。
+	const suffix = [
+		level === undefined ? undefined : `${dim(theme, "/")}${theme.fg("mdCode", level)}`,
+		badge === undefined ? undefined : `${dim(theme, "/")}${theme.fg("syntaxFunction", badge)}`,
+	]
 		.filter((part): part is string => Boolean(part))
-		.map((part) => `${dim(theme, "/")}${theme.fg("syntaxFunction", part)}`)
 		.join("");
 	return `${dim(theme, MODEL_ICON)} ${theme.fg("accent", id)}${suffix}`;
 }

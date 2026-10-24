@@ -21,12 +21,31 @@ const CWD = "/Users/bachi/jaylli/litellm-any";
 const SKIP = "找不到本机 pi 的库入口（装过 pi 才有）";
 
 async function findPiLibraryEntry(): Promise<string | undefined> {
+	const candidates: string[] = [];
+	if (process.env.PI_TEST_PI_ENTRY) candidates.push(process.env.PI_TEST_PI_ENTRY);
+
+	// 本机的 pi 是 pnpm 全局安装，`~/.pi/agent/npm/node_modules/@earendil-works/` 不存在
+	// （那里只有依赖）—— 只写下面那两条会让整份测试静默全 skip。与
+	// `ask-user-question/render.test.ts` 同一套查找：先用 PATH 里的 `pi` shim 反查真实安装位置。
+	for (const dir of (process.env.PATH ?? "").split(path.delimiter)) {
+		if (!dir) continue;
+		const shimPath = path.join(dir, "pi");
+		try {
+			const real = fs.realpathSync(shimPath);
+			if (real !== shimPath) candidates.push(path.join(path.dirname(real), "index.js"));
+		} catch {
+			// 不是符号链接 / 不存在：看下面的 shim 脚本
+		}
+		try {
+			const match = /^# cmd-shim-target=(.+)$/m.exec(fs.readFileSync(shimPath, "utf8"));
+			if (match?.[1]) candidates.push(path.join(path.dirname(match[1].trim()), "index.js"));
+		} catch {
+			// 读不到这个 shim：跳过
+		}
+	}
+
 	const packageDir = path.join(os.homedir(), ".pi/agent/npm/node_modules/@earendil-works/pi-coding-agent");
-	const candidates = [
-		process.env.PI_TEST_PI_ENTRY,
-		path.join(packageDir, "dist/bundle/index.js"),
-		path.join(packageDir, "dist/index.js"),
-	].filter((c): c is string => typeof c === "string");
+	candidates.push(path.join(packageDir, "dist/bundle/index.js"), path.join(packageDir, "dist/index.js"));
 	for (const candidate of candidates) {
 		if (!fs.existsSync(candidate)) continue;
 		try {
@@ -88,6 +107,7 @@ const loaded = pi
 				path.join(EXT_DIR, "explored-group/index.ts"),
 				path.join(EXT_DIR, "bash-command-collapse.ts"),
 				path.join(EXT_DIR, "read-path-collapse.ts"),
+				path.join(EXT_DIR, "glob-tool/index.ts"),
 			],
 			CWD,
 			path.join(os.tmpdir(), "explored-group-test-agent"),
@@ -1117,4 +1137,29 @@ test("回归：只给 offset / 只给 limit 时行号也得看得见（对齐 pi
 		const line = renderBlock("read", "s", args)[1]!;
 		assert.equal(line, `  └ Read a.ts${span}`, JSON.stringify(args));
 	}
+});
+
+test("render：glob 的行首动词是加粗的 Glob（原生工具）", { skip }, () => {
+	// 不直接 import `render.ts` 的 `nativeVerbFor`：它 import 了 pi-tui，从 `node --test`
+	// 里解析不到（loader alias 只在 pi 的加载器里生效）。改为走真实渲染路径断言结果。
+	reset();
+	replay([{ type: "toolCall", id: "b", name: "glob", arguments: { pattern: "**/*.ts", path: "clients/pi" } }]);
+	const raw = renderBlockRaw("glob", "b", { pattern: "**/*.ts", path: "clients/pi" });
+	const row = raw.find((line) => plain(line).includes("Glob"))!;
+	assert.ok(row, `没找到 Glob 行：${JSON.stringify(raw.map(plain))}`);
+	assert.ok(verbIsBold(row, "Glob"), `Glob 应当加粗：${JSON.stringify(plain(row))}`);
+});
+
+test("render：连续 glob + grep 并进同一个 Explored，且 glob 不切断分组", { skip }, () => {
+	reset();
+	replay([
+		{ type: "toolCall", id: "g1", name: "glob", arguments: { pattern: "**/*.ts", path: "clients/pi" } },
+		{ type: "toolCall", id: "g2", name: "grep", arguments: { pattern: "registerTool", path: "clients/pi" } },
+	]);
+	const lines = renderBlock("glob", "g1", { pattern: "**/*.ts", path: "clients/pi" });
+	const flat = lines.join("\n");
+	assert.match(flat, /Explored/, `期望一个 Explored 组，实得 ${JSON.stringify(lines)}`);
+	assert.match(flat, /Glob \*\*\/\*\.ts in clients\/pi/);
+	// 第二个成员在同组里（同一个组的组长是 g1，所以 g2 自己的块渲染 0 行）
+	assert.deepEqual(renderBlock("grep", "g2", { pattern: "registerTool", path: "clients/pi" }), []);
 });

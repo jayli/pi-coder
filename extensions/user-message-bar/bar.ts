@@ -8,22 +8,44 @@
  *     ▏ 正文正文
  *     ▏
  *
- * 框的**上方**再有一行发送时间（用户 2026-10-19 定；竖线照旧在最前，底色从消息底色
- * `userMessageBg` 变暗 25% 起**逐字渐到背景黑**，跨度是本行文字的格数 + 20，之后到行尾保持背景色，
- * 所以右半截直接融进页面背景）：
+ * 框的**上方**再有一行发送时间（用户 2026-10-19 定；竖线照旧在最前）。形状是**两段带底色的
+ * 文字块**，两段各以一个引导符 `▏` 起头（用户 2026-10-23 定，取代原先「整行纯文字」），
+ * 行尾右端另有一段**只上前景 `dim` 的会话时长**（用户 2026-10-24 定）：
  *
- *     ▏You 12:04 #12 · 1 compactions
+ *     ▏You 12:04 #12 ▏0 compactions▕                          +38m
  *     ▏
  *     ▏ 正文正文
  *     ▏
  *
- * 最前面的引导符 `▏`（与消息框竖线同字形）用 `dim`（与回合结束符 `✻ Churned for 3m 37s · done
- * 11:52 PM` 同一个色槽）、`You` 加粗 + 主题的 `syntaxKeyword`（语法关键字色）、时间 /` #12` /
- * ` · N compactions` 用 `dim`；时间走 **本地 24 小时制、两位补零**（`formatClock`，`9:33` →
- * `09:33`）。`#12` 是当前会话里的第几条用户消息（1 起，回放 / 重建时沿用原编号）；` · N
- * compactions` 是**这条消息发出时**已经压缩过几次（0 也画；按当时的分支数，不是当前的累计值 ——
- * 见 `setCompactionLookup`），且在**渲染时现查**（不在打戳时快照：会话替换会先把历史重画、
- * 再发 `session_start`，那时查询函数还没装上），引导符与 `You` 之间不空。
+ * 时长右对齐贴到最后一列（用补白推到 `width`），口径是「**这条消息发出时**当前上下文窗口已经跑了
+ * 多久」—— 见 `formatSessionAge` 与 `index.ts` 的 `sessionAgeLookup`。它不铺底色、不带竖线字形：那是
+ * **这一行的注释**，不是第三个字块，压在色块里会抢走 `N compactions` 的视觉重量。
+ *
+ * **时长一旦画出来就冻结**（用户 2026-10-24 定）。这**不是**审美偏好，是正确性要求：抬头在视口之上，
+ * 而 pi 的主屏渲染器（`TuiMainScreen`）一旦发现「首行变化落在视口之上」就 `fullRender(true)` ——
+ * 写 `\x1b[2J\x1b[H\x1b[3J`，**清屏并清空整个 scrollback**，再从启动 logo 重画。旧实现让 `+Nm` 在
+ * 渲染时读 `Date.now()`，于是任何一次重绘跨过分钟边界（`statusline` 每 30s 一次的 git 轮询就够了）
+ * 都会改掉历史里的这一行 ⇒ 用户只是上翻看历史、什么都没动，屏幕就被拽回底部、历史也被抹掉。
+ * 所以口径必须是**每条消息自己的、不变的**值（见 `messageAge`）。
+ *
+ * 行里有**三个竖线字形**：第一段开头的引导符 `▏`、第二段开头的 `▏`、第二段末尾的镜像 `▕`。它们就在
+ * 各自的底色块里：**最左边那个保持 `text` 原色**（`HEADER_LEAD_DARKEN = 0`），**另外两个全黑**
+ * （`HEADER_GLYPH_DARKEN = 1`，用户 2026-10-23 定）；同一块
+ * 底色里的 `You` / 时间 / `#N` / `N compactions` 仍是原样的 `text`，加粗只作用于 `You`。
+ * 第一段 `▏You 12:04 #12 `（**含尾随那一格**）的底色是 **`syntaxKeyword` 压暗 40%**
+ * （`HEADER_BG_DARKEN` / `darkenAnsiBackground`）；第二段 `▏0 compactions▕` 两头各一个竖线字形 —— 开头是
+ * 引导符 `▏`（`0` 左边那格，不再是空格）、结尾是它的镜像 `▕`（U+2595，替换原来那格行尾留白）；底色是
+ * `thinkingText`（用户说的「Think 字体颜色」= pi 里 thinking 正文的那个槽）**再压暗 30%**
+ * （`HEADER_THOUGHT_BG_DARKEN`）。`mdKeyword` 不是 pi 的主题槽（schema 里 `md*` 只有 heading / link /
+ * code / quote / hr / listBullet），所以按「关键字色」落到 `syntaxKeyword`。
+ *
+ * 两块之间只有第一段尾格那一格空格；整行末尾也是**裸着的**（`49m` 收底），所以这一行不像消息框那样
+ * 连成一片。
+ * 时间走 **本地 24 小时制、两位补零**（`formatClock`，`9:33` → `09:33`）。`#12` 是当前会话里的第
+ * 几条用户消息（1 起，回放 / 重建时沿用原编号）；` 0 compactions` 是**这条消息发出时**已经压缩
+ * 过几次（0 也画；按当时的分支数，不是当前的累计值 —— 见 `setCompactionLookup`），且在**渲染时
+ * 现查**（不在打戳时快照：会话替换会先把历史重画、再发 `session_start`，那时查询函数还没装上）。
+ * 引导符与 `You` 之间不空；`You` 之后是 ` HH:MM #N `（时间前那格起头、轮次号后那格收尾）。
  * 时间来自 user 消息对象上的 `timestamp`（毫秒，session 文件里持久化同一份），不是渲染时钟 ——
  * 所以 resume / fork 回放出来的历史消息显示的是**当初的发送时间**。组件构造处拿不到 message，
  * 由 `installUserMessageTimestamp` 在 `InteractiveMode.prototype.addMessageToChat` 外层打戳。
@@ -38,7 +60,7 @@
  * `outputPad = 0`（pi 的设置项）时行首没有内边距可占，竖线 + 缩进共两格都得向行尾借 —— 借不够
  * 就先保住竖线（少空那一格），连一格都借不出来时这行干脆不加（宁可少画，不能撑宽）。
  *
- * 颜色取皮肤的 **`accent`** —— 这套皮肤里"强调/正向"的那个亮色。
+ * 竖线颜色取皮肤的 **`accent`** —— 这套皮肤里"强调/正向"的那个亮色。
  * 它是**前景**槽，直接拿 `getFgAnsi` 用；想换别的槽位（包括 `selectedBg` 这种背景槽，会做一次
  * 48→38 的等值转换当前景用）用 `PI_USER_MESSAGE_BAR_COLOR=<皮肤槽位名>`。竖线自带前景复位，
  * 所以竖线后面那个空格不会被染上前景色。
@@ -185,41 +207,195 @@ function colorAnsi(source: ThemeColorSource, name: string): string | undefined {
 /** 抬头里 `You` 的固定文案。 */
 export const HEADER_LABEL = "You";
 
+/**
+ * 抬头行**最左边**那个引导符 `▏` 的前景**压暗的比例**（用户 2026-10-23 定：`0` = 不压暗，
+ * 与 `You` / 时间一样是原样的 `text`）。
+ */
+export const HEADER_LEAD_DARKEN = 0;
+
+/**
+ * 另外两个竖线字形（第二段开头的 `▏`、末尾的 `▕`）的前景**压暗的比例**（用户 2026-10-23 定：
+ * `1` = 全暗，直接画成黑色）。
+ *
+ * 只作用于字形本身：同一块底色里的 `You` / 时间 / `#N` / `N compactions` 仍是原样的 `text`。
+ * 按**已经解析出来的** `text` 色值算（见 `darkenAnsiForeground`），所以换肤自动跟随。
+ */
+export const HEADER_GLYPH_DARKEN = 1;
+
 /** 抬头最前面的引导符（`▏` U+258F，与消息框竖线同字形；用户 2026-10-19 定）。 */
 export const HEADER_LEAD = "\u258F";
 
-/** 引导符槽位：皮肤的 `dim` —— 与 `working-indicator` 的回合结束符 `✻ … · done …` 同槽。 */
-const HEADER_LEAD_COLOR = "dim";
-/** 发件人槽位：皮肤的语法关键字色（`pi-coder-1337` 的 `keyword` 变量就挂在它上面）。 */
-const HEADER_LABEL_COLOR = "syntaxKeyword";
-/** 时间槽位：皮肤的 `dim`。 */
-const HEADER_TIME_COLOR = "dim";
-
-/** 抬头底色的**渐变起点**：用户消息框的底色（`userMessageBg`）变暗 25%（用户 2026-10-19 定）。
- * 渐变**终点是终端背景色**（≈ 纯黑，见 `HEADER_BG_END_RGB`），不是消息底色。
- */
-const HEADER_BG_COLOR_NAME = "userMessageBg";
-/** 变暗 25% = 每个通道乘 0.75。 */
-const HEADER_BG_SCALE = 0.75;
 /**
- * 渐变在**文字之后**再多走 20 格（用户 2026-10-19 定）：文字不落在渐变末端，尾巴还有一段
- * 慢慢化进背景；碰到行右边界时以边界为准（渐变总长 = min(行宽, 文字格数 + 20)）。
+ * 第二段末尾的收尾符（`▕` U+2595，右八分之一块 —— `▏` 的镜像；用户 2026-10-23 定：
+ * `compactions` 后面那格空格换成它，前景同样走 `text`）。
  */
-const HEADER_BG_TAIL = 20;
-/**
- * 渐变终点：行背后的终端背景。pi 不画页面底色（那是终端的），也拿不到终端通过 OSC 11
- * 上报的底色 —— 本机的背景是纯黑一档，所以直接取纯黑。终端背景若不是黑，右端会有一条
- * 不明显的接缝（改这个常量即可）。
- */
-const HEADER_BG_END_RGB: readonly [number, number, number] = [0, 0, 0];
+export const HEADER_TAIL = "\u2595";
 
-/** 槽位缺失时的兜底顺序（旧皮肤可能没有 `syntaxKeyword` / `dim`）。 */
-const HEADER_LEAD_FALLBACKS = ["muted", "text"] as const;
-const HEADER_LABEL_FALLBACKS = ["accent", "text"] as const;
-const HEADER_TIME_FALLBACKS = ["muted", "text"] as const;
+/**
+ * 抬头第一段（`You HH:MM #N`）的底色槽：皮肤的语法关键字色（`pi-coder-1337` 的 `keyword` 变量就
+ * 挂在它上面）。用户 2026-10-23 说的 `mdKeyword` 在 pi 的主题 schema 里**不存在**（`md*` 只有
+ * heading / link / code / quote / hr / listBullet 那几个），按「关键字色」落到这个槽。
+ */
+const HEADER_BG_COLOR = "syntaxKeyword";
+
+/**
+ * 第一段（`▏You HH:MM #N `）的底色**压暗的比例**（用户 2026-10-23 定：10% → 30%；2026-10-24 再深一档到 40%）。
+ *
+ * 只作用于**底色**：两段文字的前景是皮肤正文色 `text`，不受它影响。压暗按**已经解析出来的那个
+ * 颜色**算 —— 同一个槽位在不同皮肤 / 终端色深下是不同色值，逐皮肤改是不可能的（见
+ * `darkenAnsiBackground`）。
+ */
+export const HEADER_BG_DARKEN = 0.4;
+
+/** 第二段（` N compactions `）的底色槽：pi 里 thinking 正文用的那个槽（用户说的「Think 字体颜色」）。 */
+const HEADER_THOUGHT_BG_COLOR = "thinkingText";
+
+/**
+ * 第二段底色的**压暗的比例**（用户 2026-10-23 定：20%，与第一段的 30% 分开；2026-10-24 两段各加
+ * 10 个百分点 → 30%，仍比第一段浅一档）。
+ *
+ * 本来就比第一段暗的槽（nightfox 的 `thinkingText` 是 `#6d6d6d`）只会变更深，不会变亮。
+ */
+export const HEADER_THOUGHT_BG_DARKEN = 0.3;
+
+/** 两段文字共用的前景槽：皮肤的正文色。 */
+const HEADER_TEXT_COLOR = "text";
+
+/** 抬头右端那个时长用的前景槽（用户 2026-10-24 定：只上前景、不铺底色 —— 它是这一行的注释，
+ * 不是第三个字块，压在色块里会抢走 `N compactions` 的视觉重量）。 */
+const HEADER_AGE_COLOR = "dim";
+
+/** 槽位缺失时的兜底顺序（旧皮肤可能没有这些槽；正文色没有就整个不铺字了，直接用终端默认）。 */
+const HEADER_BG_FALLBACKS = ["accent", "selectedBg", "muted", "text"] as const;
+const HEADER_THOUGHT_BG_FALLBACKS = ["dim", "muted", "selectedBg", "text"] as const;
+const HEADER_TEXT_FALLBACKS = ["userMessageText"] as const;
+
+/**
+ * xterm 256 色阶：6×6×6 立方体的六个阶 + 24 阶灰阶。只用于索引 ↔ RGB 反算。
+ * 基本 16 色（索引 < 16）不在这张表里 —— 它们由终端自己决定色值，换算会换掉色系。
+ */
+const CUBE_LEVELS = [0, 95, 135, 175, 215, 255];
+const GRAY_LEVELS = Array.from({ length: 24 }, (_, index) => 8 + index * 10);
+
+interface Rgb {
+	r: number;
+	g: number;
+	b: number;
+}
+
+/** 256 色索引 → RGB（≥16 时，与 pi-tui 的 `indexedToRgb` 同表）。 */
+function indexedToRgb(index: number): Rgb {
+	if (index >= 232) {
+		const gray = 8 + (index - 232) * 10;
+		return { r: gray, g: gray, b: gray };
+	}
+	const cube = index - 16;
+	return {
+		r: CUBE_LEVELS[Math.floor(cube / 36)] ?? 0,
+		g: CUBE_LEVELS[Math.floor((cube % 36) / 6)] ?? 0,
+		b: CUBE_LEVELS[cube % 6] ?? 0,
+	};
+}
+
+/** 最接近 `target` 的那一阶（同距取靠前，与 pi-tui 一致）。 */
+function closestIndex(values: readonly number[], target: number): number {
+	let best = 0;
+	let bestDistance = Number.POSITIVE_INFINITY;
+	for (let index = 0; index < values.length; index += 1) {
+		const distance = Math.abs(target - (values[index] ?? 0));
+		if (distance < bestDistance) {
+			best = index;
+			bestDistance = distance;
+		}
+	}
+	return best;
+}
+
+/** 加权色距（灰度感知权重，与 pi-tui 的 `colorDistance` 一致）。 */
+const weightedDistance = (a: Rgb, b: Rgb): number => {
+	const dr = a.r - b.r;
+	const dg = a.g - b.g;
+	const db = a.b - b.b;
+	return dr * dr * 0.299 + dg * dg * 0.587 + db * db * 0.114;
+};
+
+/** RGB → 最接近的 256 色索引（与 pi-tui 的 `rgbToAnsi256` 同算法，含灰阶优先判定）。 */
+function rgbToIndexed({ r, g, b }: Rgb): number {
+	const rIndex = closestIndex(CUBE_LEVELS, r);
+	const gIndex = closestIndex(CUBE_LEVELS, g);
+	const bIndex = closestIndex(CUBE_LEVELS, b);
+	const cube: Rgb = {
+		r: CUBE_LEVELS[rIndex] ?? 0,
+		g: CUBE_LEVELS[gIndex] ?? 0,
+		b: CUBE_LEVELS[bIndex] ?? 0,
+	};
+	const gray = Math.round(0.299 * r + 0.587 * g + 0.114 * b);
+	const grayOffset = closestIndex(GRAY_LEVELS, gray);
+	const grayValue = GRAY_LEVELS[grayOffset] ?? 0;
+	const spread = Math.max(r, g, b) - Math.min(r, g, b);
+	if (spread < 10 && weightedDistance({ r, g, b }, { r: grayValue, g: grayValue, b: grayValue }) < weightedDistance({ r, g, b }, cube)) {
+		return 232 + grayOffset;
+	}
+	return 16 + 36 * rIndex + 6 * gIndex + bIndex;
+}
+
+/**
+ * 把一段**前景色** ANSI 按比例压暗（`amount` = 0.2 表示暗 20%），输出仍是同一色深下的前景序列。
+ *
+ * 三种情形：
+ *   - `\x1b[38;2;r;g;b m`（truecolor）：三通道各乘 `1 - amount` —— 就是「这个色值暗 20%」的直白读法。
+ *   - `\x1b[38;5;N m`（256 色）：先按 xterm 调色板反算 RGB、压暗，再量化回最接近的索引，
+ *     所以输出的仍是终端认识的那个色深（不会在 256 色终端里冒出 truecolor 序列）；
+ *     基本 16 色（N < 16）原样返回 —— 它们的实际色值由终端自己决定，换算会换掉色系。
+ *   - 其它（无色、非前景序列、参数个数不认识）：原样返回，不猜。
+ *
+ * 序列尾部的附加属性（例如 `dim` 槽位带的 `\x1b[2m`）原样保留。
+ *
+ * `amount` 允许到 `1`：那是「全暗」，三通道全部归零（黑色）；只有 `> 1` 这种算不出来的比例才原样返回。
+ */
+export function darkenAnsiForeground(ansi: string, amount: number): string {
+	return darkenAnsi(ansi, amount, 38);
+}
+
+/**
+ * 把一段**背景色** ANSI 按比例压暗；规则与 `darkenAnsiForeground` 完全同构，只是认 `48` 那条序列
+ * （24 位色 `48;2;r;g;b` 与 256 色 `48;5;N`），输出仍是背景序列。
+ *
+ * 抬头的底色块走这条路：`theme.getBgAnsi` 给的就是 `\x1b[48;…m`，压暗后直接当底色用。
+ */
+export function darkenAnsiBackground(ansi: string, amount: number): string {
+	return darkenAnsi(ansi, amount, 48);
+}
+
+/** `darkenAnsiForeground` / `darkenAnsiBackground` 的共同实现（`slot` 是 `38` 或 `48`）。 */
+function darkenAnsi(ansi: string, amount: number, slot: 38 | 48): string {
+	// `amount === 1` 是合法的「全暗」（乘 0 = 黑色），只有 0 / 越界 / 非数字才不碰
+	if (!Number.isFinite(amount) || amount <= 0 || amount > 1) return ansi;
+	const match = new RegExp(`^\\u001b\\[${slot};([25]);([0-9;]+)m([\\s\\S]*)$`).exec(ansi);
+	if (!match) return ansi;
+	const kind = match[1];
+	const params = (match[2] ?? "").split(";").map((value) => Number.parseInt(value, 10));
+	const tail = match[3] ?? "";
+	if (params.some((value) => !Number.isFinite(value))) return ansi;
+	const factor = 1 - amount;
+
+	if (kind === "2") {
+		if (params.length !== 3) return ansi;
+		const [r, g, b] = params as [number, number, number];
+		const dark = (channel: number): number => Math.round(channel * factor);
+		return `\u001b[${slot};2;${dark(r)};${dark(g)};${dark(b)}m${tail}`;
+	}
+
+	if (params.length !== 1) return ansi;
+	const index = params[0] as number;
+	if (index < 16 || index > 255) return ansi;
+	const rgb = indexedToRgb(index);
+	const dark: Rgb = { r: rgb.r * factor, g: rgb.g * factor, b: rgb.b * factor };
+	return `\u001b[${slot};5;${rgbToIndexed(dark)}m${tail}`;
+}
 
 /** 前景槽 ANSI；缺失返回 undefined（调用方据此不套颜色，而不是抛）。 */
-function headerColor(
+function headerFg(
 	source: ThemeColorSource | undefined,
 	preferred: string,
 	fallbacks: readonly string[],
@@ -236,119 +412,34 @@ function headerColor(
 	return undefined;
 }
 
-/** xterm 256 色号 → RGB；只认 16..255（0..15 是终端自定义色，猜不得）。 */
-function indexedRgb(index: number): [number, number, number] | undefined {
-	if (!Number.isInteger(index) || index < 16 || index > 255) return undefined;
-	if (index >= 232) {
-		const level = 8 + (index - 232) * 10;
-		return [level, level, level];
-	}
-	const cube = [0, 95, 135, 175, 215, 255];
-	const offset = index - 16;
-	return [cube[Math.floor(offset / 36)]!, cube[Math.floor(offset / 6) % 6]!, cube[offset % 6]!];
-}
-
-/** RGB → 最近的 xterm 256 色号（同样只在 16..255 里找）。 */
-function nearestIndexed(rgb: readonly [number, number, number]): number {
-	let best = 16;
-	let bestDistance = Number.POSITIVE_INFINITY;
-	for (let index = 16; index <= 255; index += 1) {
-		const candidate = indexedRgb(index);
-		if (!candidate) continue;
-		const dr = rgb[0] - candidate[0];
-		const dg = rgb[1] - candidate[1];
-		const db = rgb[2] - candidate[2];
-		const distance = 0.299 * dr * dr + 0.587 * dg * dg + 0.114 * db * db;
-		if (distance < bestDistance) {
-			bestDistance = distance;
-			best = index;
+/**
+ * 背景槽 ANSI（**原样的背景序列**，不做 48→38 的转换）；缺失 / 该槽其实是终端默认底色时返回
+ * undefined —— 调用方据此不铺底色，而不是把文字埋在看不见的地方。
+ *
+ * 背景槽也可能被皮肤写在**前景**位（旧皮肤、以及 `thinkingText` 这种本来就只有前景的槽）：
+ * 那就把 `38` 等值换成 `48` 拿来当底色用。
+ */
+function headerBg(
+	source: ThemeColorSource | undefined,
+	preferred: string,
+	fallbacks: readonly string[],
+): string | undefined {
+	if (!source) return undefined;
+	for (const name of [preferred, ...fallbacks]) {
+		try {
+			const ansi = source.getBgAnsi(name);
+			if (ansi.startsWith("\u001b[48;")) return ansi;
+		} catch {
+			// 不是背景槽：接着当前景槽试
+		}
+		try {
+			const ansi = source.getFgAnsi(name);
+			if (ansi.startsWith("\u001b[38;")) return ansi.replace("\u001b[38;", "\u001b[48;");
+		} catch {
+			// 这个皮肤没有这个槽位：试下一个
 		}
 	}
-	return best;
-}
-
-/** 一个底色槽位拆成「RGB + 按当前色彩模式编码」两个东西。 */
-interface BgColor {
-	rgb: [number, number, number];
-	encode: (rgb: readonly [number, number, number]) => string;
-}
-
-/**
- * 把 `getBgAnsi` 的输出拆回 RGB，并给出同模式的编码器。
- *
- * truecolor 原样编码成 `48;2`；256 色皮肤落回最近的色号（保持同一色彩模式，不硬塞 `48;2`）。
- * 0..15 是终端自定义色、`49m` 是终端默认底色 —— 这两种拿不到 RGB，返回 undefined。
- */
-function parseBgAnsi(ansi: string): BgColor | undefined {
-	const truecolor = /^\u001b\[48;2;(\d+);(\d+);(\d+)m$/.exec(ansi);
-	if (truecolor) {
-		const rgb: [number, number, number] = [Number(truecolor[1]), Number(truecolor[2]), Number(truecolor[3])];
-		return {
-			rgb,
-			encode: ([r, g, b]) => `\u001b[48;2;${Math.round(r)};${Math.round(g)};${Math.round(b)}m`,
-		};
-	}
-	const indexed = /^\u001b\[48;5;(\d+)m$/.exec(ansi);
-	if (!indexed) return undefined;
-	const rgb = indexedRgb(Number(indexed[1]));
-	if (!rgb) return undefined;
-	return { rgb, encode: (color) => `\u001b[48;5;${nearestIndexed(color)}m` };
-}
-
-/** 一帧抬头的渐变底色。 */
-export interface HeaderBackground {
-	/** 每个可见格一个背景 ANSI：第 0 格是变暗 25% 的消息底色，最后一格已经是背景色。 */
-	cells: string[];
-	/** 背景色 ANSI（渐变终点）—— 字符结束之后到行尾都用它铺满。 */
-	end: string;
-}
-
-/** 渐变结果按「消息底色 ANSI + 可见格数」缓存：同一屏几十条消息、每帧都要用。 */
-const headerBackgroundCache = new Map<string, HeaderBackground | undefined>();
-
-/**
- * 抬头底色渐变（用户 2026-10-19 定）：从 `userMessageBg` 变暗 25% 起步，渐到**背景色**（纯黑），
- * 跨度是这一行**文字格数 + 20 格**（`HEADER_BG_TAIL`，碰到行右边界就以边界为准）——
- * 文字不落在渐变末端，尾巴还有一段慢慢化进背景，不会出现一段悬空的色块。
- *
- * 取不到消息底色（旧皮肤没这个槽 / 槽位是空串 / 0..15 系统色）= 返回 undefined，这一行就不铺
- * 底色、也不补白，与加底色之前逐字一致。
- */
-export function headerBackground(
-	source: ThemeColorSource | undefined,
-	length: number,
-): HeaderBackground | undefined {
-	if (!source || length < 1) return undefined;
-	let raw: string;
-	try {
-		raw = source.getBgAnsi(HEADER_BG_COLOR_NAME);
-	} catch {
-		return undefined;
-	}
-	const key = `${raw}\u0000${length}`;
-	if (headerBackgroundCache.has(key)) return headerBackgroundCache.get(key);
-
-	const color = parseBgAnsi(raw);
-	if (!color) return undefined;
-	const start = color.rgb.map((value) => value * HEADER_BG_SCALE) as [number, number, number];
-	const end = HEADER_BG_END_RGB;
-	const cells: string[] = [];
-	for (let index = 0; index < length; index += 1) {
-		// 只有一格时没有距离可渐变，就停在起点
-		const t = length < 2 ? 0 : index / (length - 1);
-		cells.push(
-			color.encode([
-				start[0] + (end[0] - start[0]) * t,
-				start[1] + (end[1] - start[1]) * t,
-				start[2] + (end[2] - start[2]) * t,
-			]),
-		);
-	}
-	const background: HeaderBackground = { cells, end: color.encode(end) };
-	// 正常一屏只用一两个可见格数（换终端宽度 / 换皮肤才会多），超了就整体清掉重算
-	if (headerBackgroundCache.size >= 16) headerBackgroundCache.clear();
-	headerBackgroundCache.set(key, background);
-	return background;
+	return undefined;
 }
 
 /**
@@ -370,18 +461,49 @@ export function formatClock(timestamp: unknown): string | undefined {
 }
 
 /**
- * 抬头那一行：`▏You 12:04 #12 · 1 compactions`。顶格画在消息框上方；底色是从消息底色
- * 变暗 25% 到**背景黑**的**逐字渐变**（`headerBackground`），长度 = 文字格数 + 20、碰到行右边界
- * 就截到边界，之后到行尾是背景色。
+ * 会话时长（用户 2026-10-24 定）：从**当前上下文窗口的第一轮对话**算到**这条消息发出那一刻**，
+ * 形如 `+38m`。**算一次就定死**，不随渲染时钟更新（理由见文件头：视口之上的一行一变就会触发
+ * pi 的清屏 + 清 scrollback 整屏重画）。
  *
- * `width` 是这一帧的渲染宽度：完整抬头（#12 + ` · 1 compactions`）时 29 列，正常终端永远装得下，
- * 但窄到装不下时**必须截断** —— pi-tui 的主屏渲染器发现任何一行超过终端宽度就抛错，整个 TUI 会崩。
- * 这里按**码点**逐个吃预算（引导符 / 空格 / `You` / 时间 / `#12` / 压缩段都只占 1 列），颜色开关
- * 不占预算。
+ * 单位选择与 `background-tasks` 的 `formatElapsed` 刻意不同 —— 那个是给后台任务报进展的，
+ * 精确到秒（`38m7s`）；这里是「这场对话跑了多久」的粗粒度提示，只换一次量级，位数更稳定：
+ *   - 不足一分钟 → `+0m`（不报秒：快速问答不值得占两格去秒级抖动）
+ *   - 一小时以内 → `+38m`
+ *   - 超过一小时 → `+2h35m`（不丢分钟：到了这个量级，`+2h` 太粗）
+ * 负值 / 非数 / 传入 undefined 一律当 0（时钟回拨不该在抬头上画出 `+-3m`）。
+ */
+export function formatSessionAge(ms: number | undefined): string {
+	const safe = typeof ms === "number" && Number.isFinite(ms) && ms > 0 ? ms : 0;
+	const minutes = Math.floor(safe / 60_000);
+	if (minutes < 60) return `+${minutes}m`;
+	const hours = Math.floor(minutes / 60);
+	return `+${hours}h${minutes % 60}m`;
+}
+
+/**
+ * 抬头那一行：`▏You 12:04 #12   0 compactions`（两段带底色的文字块，中间空两格）。
  *
- * 尾缀是点缀，放不下就按「压缩次数 → 轮次号」的顺序**整段丢掉**，绝不截出 `#1` / `· 1` 这种假值，
- * 时间照常画。拿不到皮肤时输出**无色**的同一行（时间仍然有用），而不是整行不画；
- * 单个槽位缺失时该段退到兜底槽，全都缺失则该段无色。
+ *   1. `▏You 12:04 #12 `（**含前面那个引导符与尾部那一格**）：底 = `syntaxKeyword` **压暗 40%**，字 = `text`，`You` 加粗；
+ *   2. `▏0 compactions▕`（**两头各一个竖线字形**：开头的引导符 + 结尾的镜像 `▕`）：底 = `thinkingText`
+ *      （用户说的「Think 字体颜色」）**再压暗 30%**，字 = `text`。
+ *
+ * 竖线字形的前景：行首那个 `▏` 就是 `text` 本来的颜色（不压暗），第二段的 `▏` 与末尾的 `▕` 全黑
+ * （`leadColor` / `glyphColor`，`applyGlyphColor` 逐个字形换色后立刻
+ * 还原，所以后面的字符不会继承暗色）。
+ *
+ * 用户 2026-10-23 的原话把竖线也算在第一段里（「这几个字的前景色都改为 fg 的颜色」）—— 所以引导符
+ * 就坐在第一块底色里、也是 `text` 前景，不在外面裸着。
+ *
+ * 两段之间没有额外分隔，就是「第一段的尾格」那一格空格；两段之间的底色断开（每块自己 `49m` 收尾），
+ * 所以看着是两个色块而不是一条长条。
+ *
+ * `width` 是这一帧的渲染宽度：窄到装不下时**必须退** —— pi-tui 的主屏渲染器发现任何一行超过终端
+ * 宽度就抛错，整个 TUI 会崩。这里按**码点**逐个吃预算（引导符 / 空格 / `You` / 时间 / `#12` /
+ * 压缩段都只占 1 列），颜色开关不占预算。
+ *
+ * 退化顺序：压缩块整段丢掉 → `#12` 整段丢掉（连同它前面那格）→ 最后才截时间；绝不截出 `0` /
+ * `#1` 这种假值。拿不到皮肤时输出**无色**的同一行（时间仍然有用），而不是整行不画；
+ * 单个槽位缺失时该段退到兜底槽，全都缺失则该段无色（不铺底）。
  */
 export function buildHeaderLine(
 	source: ThemeColorSource | undefined,
@@ -389,63 +511,125 @@ export function buildHeaderLine(
 	width: number,
 	turn?: number,
 	compactions?: number,
+	age?: number,
 ): string | undefined {
 	if (!clock || !Number.isFinite(width) || width < 1) return undefined;
 
-	const lead = headerColor(source, HEADER_LEAD_COLOR, HEADER_LEAD_FALLBACKS);
-	const label = headerColor(source, HEADER_LABEL_COLOR, HEADER_LABEL_FALLBACKS);
-	const time = headerColor(source, HEADER_TIME_COLOR, HEADER_TIME_FALLBACKS);
+	const columns = Math.floor(width);
+	// 第一段底色 = `syntaxKeyword` **压暗 40%**；引导符就在这块底色里（用户 2026-10-24 定）
+	const partBg = headerBg(source, HEADER_BG_COLOR, HEADER_BG_FALLBACKS);
+	const cardBg = partBg === undefined ? undefined : darkenAnsiBackground(partBg, HEADER_BG_DARKEN);
+	// 第二段底色 = thinking 正文色（用户说的「Think 字体颜色」）**再压暗 30%**
+	const thoughtSource = headerBg(source, HEADER_THOUGHT_BG_COLOR, HEADER_THOUGHT_BG_FALLBACKS);
+	const thoughtBg =
+		thoughtSource === undefined ? undefined : darkenAnsiBackground(thoughtSource, HEADER_THOUGHT_BG_DARKEN);
+	// 两段文字都是皮肤的正文色。最左边的引导符不压暗（= 就是 `text`），另外两个竖线字形全暗
+	// （用户 2026-10-23 定）；`darkenAnsiForeground` 的比例为 0 时原样返回，所以前者天然等于 `fgColor`
+	const fgColor = headerFg(source, HEADER_TEXT_COLOR, HEADER_TEXT_FALLBACKS);
+	const leadColor = fgColor === undefined ? undefined : darkenAnsiForeground(fgColor, HEADER_LEAD_DARKEN);
+	const glyphColor = fgColor === undefined ? undefined : darkenAnsiForeground(fgColor, HEADER_GLYPH_DARKEN);
+	// 右端时长：只上前景，不铺底色（用户 2026-10-24 定）。取不到 dim 就整段不画 —— 用 `text` 顶上
+	// 会让它和左边字块里的正文同色，视觉上抢戏，比不显示更差
+	const ageColor = headerFg(source, HEADER_AGE_COLOR, []);
+	const ageText = typeof age === "number" && Number.isFinite(age) ? formatSessionAge(age) : undefined;
 
-	let remaining = Math.floor(width);
-	const segments: Array<{ text: string; open: string; close: string }> = [];
-	const push = (text: string, open: string, close: string): void => {
-		if (remaining < 1) return;
-		// 按码点切：将来若再出现代理对字符（emoji 等），也不会被劈成孤立代理项
-		const visible = Array.from(text).slice(0, remaining);
-		if (visible.length === 0) return;
-		remaining -= visible.length;
-		segments.push({ text: visible.join(""), open, close });
-	};
-
-	// 引导符走 `dim`：某些皮肤里它是 faint 标记（`\x1b[2m`），复位必须带上 `22`
-	push(HEADER_LEAD, lead ?? "", lead ? "\u001b[22;39m" : "");
-	push(HEADER_LABEL, label ? `${label}\u001b[1m` : "", label ? "\u001b[22m\u001b[39m" : "");
-	// ` HH:MM #N · N compactions`：时间 → 轮次号 → 压缩次数（用户 2026-10-19 定），整段走 `dim`；
-	// 开头那一格就是 `You` 后的空格
 	const turnText = typeof turn === "number" && Number.isFinite(turn) ? ` #${turn}` : "";
 	const compactionText =
-		typeof compactions === "number" && Number.isFinite(compactions) ? ` · ${compactions} compactions` : "";
-	// 尾缀整段放得下才画；放不下就从右往左丢（先压缩次数、再轮次号 —— 宁可少画，不能报假号），时间照常
-	const bodyText =
-		[` ${clock}${turnText}${compactionText}`, ` ${clock}${turnText}`, ` ${clock}`].find(
-			(text) => Array.from(text).length <= remaining,
-		) ?? ` ${clock}`;
-	push(bodyText, time ?? "", time ? "\u001b[22;39m" : "");
-	const columns = Math.floor(width);
-	const length = columns - remaining;
-	if (length < 1) return undefined;
+		typeof compactions === "number" && Number.isFinite(compactions) ? `${compactions} compactions` : undefined;
 
-	// 渐变跨度 = 文字格数 + 20 格（用户 2026-10-19 定）；碰到行右边界就以边界为准
-	const gradientLength = Math.min(columns, length + HEADER_BG_TAIL);
-	const background = headerBackground(source, gradientLength);
-	let line = "";
-	let column = 0;
-	for (const segment of segments) {
-		line += segment.open;
-		for (const char of segment.text) {
-			line += `${background?.cells[column] ?? ""}${char}`;
-			column += 1;
-		}
-		line += segment.close;
+	/** 一个带底色的字块：底色贯穿整段（含首尾那几格空格），字块结尾同时收掉底色与前景。 */
+	interface Chunk {
+		text: string;
+		bg: string | undefined;
 	}
-	if (background === undefined) return line;
+	const chunk = (text: string, bg: string | undefined): Chunk => ({ text, bg });
+	const widthOf = (chunks: readonly Chunk[]): number =>
+		chunks.reduce((sum, item) => sum + Array.from(item.text).length, 0);
 
-	// 文字之后先把剩下的渐变尾巴铺完（每格一个空格，最多 20 格），剩下的行尾用背景色（渐变最后一格已经是它）
-	let tail = "";
-	for (let index = column; index < gradientLength; index += 1) tail += `${background.cells[index]} `;
-	const rest = columns - gradientLength;
-	// 行尾用 `49m` 收底，免得溢出到下一行
-	return `${line}${tail}${rest > 0 ? `${background.end}${" ".repeat(rest)}` : ""}\u001b[49m`;
+	// 放不下就整段丢：先丢压缩块、再丢轮次号，最后才截时间（绝不截出 `0` / `#1` 这种假值）。
+	// 两段之间没有额外空格 —— 已包含在第一段的尾格与第二段的首格里（用户 2026-10-23 定）。
+	// 第二段是 `▏N compactions▕`：`0` 左边那格也是引导符（不再是空格），末尾那格是它的镜像
+	// `▕`（不再是行尾留白）；两块之间那一格由第一段的尾格提供，前景两边都是 `text`
+	const thoughtText =
+		compactionText === undefined ? undefined : `${HEADER_LEAD}${compactionText}${HEADER_TAIL}`;
+	const layouts: Chunk[][] = [];
+	for (const head of [`${HEADER_LEAD}${HEADER_LABEL} ${clock}${turnText} `, `${HEADER_LEAD}${HEADER_LABEL} ${clock} `]) {
+		if (thoughtText !== undefined) layouts.push([chunk(head, cardBg), chunk(thoughtText, thoughtBg)]);
+		layouts.push([chunk(head, cardBg)]);
+	}
+	// 右端时长与左段之间的间隔就是第一段那个尾随空格 + 这里的一格 —— 右段自己带前导空格，
+	// 于是至少总能和左边的色块分开（贴上去会看着像被人挤到了色块边上）。
+	// 它**不参与 layout 选择**：选哪一级只由左边两块决定，窄了就少画它（age 是装饰性的右侧平衡，
+	// 不该夺走 `N compactions` 这种真信息）
+	const ageChunk =
+		ageText === undefined || ageColor === undefined ? undefined : { text: ` ${ageText}`, color: ageColor };
+	const chosen = layouts.find((items) => widthOf(items) <= columns);
+
+	// 连最短那一级都放不下：与旧行为一致，按码点截断（引导符先占一格）
+	if (chosen === undefined) {
+		const visible = Array.from(`${HEADER_LEAD}${HEADER_LABEL} ${clock}`).slice(0, columns).join("");
+		return fgColor === undefined ? visible : `${fgColor}${visible}\u001b[39m`;
+	}
+
+	// 最后一个字块没底色、也没前景时（拿不到皮肤、或槽位全缺），尾格只剩白地白字 —— 吃掉，别拉出
+	// 一行白边。有底色 / 有前景时**不吃**：那一格是块尾留白，或者已经是收尾符 `▕`
+	const tail = chosen[chosen.length - 1];
+	if (tail !== undefined && tail.bg === undefined && fgColor === undefined) {
+		chosen[chosen.length - 1] = { text: tail.text.trimEnd(), bg: tail.bg };
+	}
+
+	let line = "";
+	for (const [index, item] of chosen.entries()) {
+		const colors = `${fgColor ?? ""}${item.bg ?? ""}`;
+		const close = item.bg === undefined ? (fgColor === undefined ? "" : "\u001b[39m") : "\u001b[49m\u001b[39m";
+		if (index === 0 && fgColor !== undefined) {
+			// `You` 加粗（用户没让它取消）：`22m` 只收粗体，不碰同一个字块里的前景与底色。
+			// 拿不到皮肤时不加粗，整行保持无色的纯文本
+			const bold = `${HEADER_LEAD}${HEADER_LABEL}`;
+			const rest = item.text.slice(bold.length);
+			// 加粗段里也换竖线色：38 不改粗体状态，所以换完仍是粗体。
+			// 这一段开头的 `▏` 就是整行最左边那个，走不压暗的 `leadColor`
+			line += `${colors}\u001b[1m${applyGlyphColor(bold, leadColor, glyphColor, fgColor, true)}\u001b[22m${rest}${close}`;
+			continue;
+		}
+		line += `${colors}${applyGlyphColor(item.text, leadColor, glyphColor, fgColor, false)}${close}`;
+	}
+	// 右端时长：把整行补到 `columns` 宽再写它，于是它总贴着终端右边缘（且不前导空格吃掉半边）；
+	// 宽度不够时整段不画 —— 绝不截出假值，也绝不拒不让位给左边两块
+	if (ageChunk !== undefined) {
+		const pad = columns - widthOf(chosen) - Array.from(ageChunk.text).length;
+		if (pad >= 0) line += `${" ".repeat(pad)}${ageChunk.color}${ageChunk.text}\u001b[22;39m`;
+	}
+	return line;
+}
+
+/**
+ * 把一段文本里的竖线字形（`▏` / `▕`）换成各自的前景色 —— 底色不动，字块里其余字符继续用原来的
+ * `text`。
+ *
+ * 两档色是分开的：`firstIsLead` 为真时，这一段**第一个字符**若就是 `▏`（整行最左边那个引导符），
+ * 用 `leadColor`（默认不压暗）；其余字形用 `darkColor`。某个色缺省、或者算出来与 `fgColor` 一模一样
+ * 时，那个字形直接跟正文同色、不插多余的转义。
+ *
+ * 每个字形后面立刻补回原来的前景色，所以后面那个字符不会继承竖线的暗色。
+ */
+function applyGlyphColor(
+	text: string,
+	leadColor: string | undefined,
+	darkColor: string | undefined,
+	fgColor: string | undefined,
+	firstIsLead: boolean,
+): string {
+	const restore = fgColor === undefined ? "\u001b[39m" : fgColor;
+	let out = "";
+	let index = 0;
+	for (const char of text) {
+		const glyph = char === HEADER_LEAD || char === HEADER_TAIL;
+		const color = !glyph ? undefined : firstIsLead && index === 0 && char === HEADER_LEAD ? leadColor : darkColor;
+		out += color === undefined || color === fgColor ? char : `${color}${char}${restore}`;
+		index += 1;
+	}
+	return out;
 }
 
 /** 组件实例上的发送时间槽位。`Symbol.for` 让 `/reload` 后新模块实例也读得到。 */
@@ -482,6 +666,78 @@ function messageFor(component: object): object | undefined {
 const COMPACTION_LOOKUP_KEY = Symbol.for("pi-user-message-bar.compaction-lookup");
 
 export type CompactionLookup = (message: object) => number | undefined;
+
+/**
+ * 「这场对话跑了多久」的查询函数（毫秒），由 `index.ts` 用当前会话的分支实现。
+ *
+ * 与 `CompactionLookup` 同一套生命周期（`globalThis` + `Symbol.for`，`session_shutdown` 时摘掉）——
+ * 旧 sessionManager 会随旧 ctx 一起作废。它是**整行共用的值**（不按消息），因为抬头画的是「现在
+ * 这个上下文窗口已经跑了多久」，与这条消息何时发出无关。
+ */
+const AGE_LOOKUP_KEY = Symbol.for("pi-user-message-bar.age-lookup");
+
+export type AgeLookup = (message: object) => number | undefined;
+
+/** 装上 / 摘掉会话时长查询函数（`undefined` = 摘掉，抬头右端就不画那一段）。 */
+export function setAgeLookup(lookup: AgeLookup | undefined): void {
+	const host = globalThis as Record<symbol, unknown>;
+	if (lookup === undefined) delete host[AGE_LOOKUP_KEY];
+	else host[AGE_LOOKUP_KEY] = lookup;
+}
+
+/**
+ * 消息 → 会话时长缓存。与压缩次数同一套理由，但更硬：**这里缓存的是「冻结」本身**。
+ *
+ * 抬头在视口之上，pi 的主屏渲染器一旦发现视口之上有任何一行变了就整屏重画并清 scrollback
+ * （见文件头）。所以一条消息的抬头必须**逐字节稳定**：第一次算出来是什么，之后永远是什么。
+ */
+const AGE_CACHE_KEY = Symbol.for("pi-user-message-bar.age-cache");
+
+function ageCache(): WeakMap<object, number> {
+	const host = globalThis as Record<symbol, unknown>;
+	let cache = host[AGE_CACHE_KEY] as WeakMap<object, number> | undefined;
+	if (cache === undefined) {
+		cache = new WeakMap();
+		host[AGE_CACHE_KEY] = cache;
+	}
+	return cache;
+}
+
+/**
+ * 这条消息的抬头该显示的会话时长（毫秒）—— **第一次问就定死**，同一个消息对象之后永远返回同一个值。
+ *
+ * 为什么不再「渲染时现算」：那会让 `+Nm` 跨过分钟边界时改掉历史里的一行，而 pi 的主屏渲染器看到
+ * 视口之上有变化就会清屏 + 清 scrollback 整屏重画 —— 用户只是上翻看历史、什么都没动，屏幕却被
+ * 拽回底部、历史也被抹掉（2026-10-24 实测：`statusline` 每 30s 的 git 轮询是那次重绘的鼓点）。
+ *
+ * 口径因此是「**这条消息发出时**窗口已经跑了多久」，它只依赖两个都不再变的量（消息自己的
+ * `timestamp`、以及当时窗口的起点），天然稳定，重放 / 恢复会话也是同一个值。
+ *
+ * 缓存还兼任会话替换窗口的保护：`session_shutdown` 摘掉查询函数后、下一个 `session_start` 之前，
+ * pi 会先把历史重画一遍（`renderBeforeBind`）—— 已算过的消息走缓存照常显示，不会闪成没有右段。
+ *
+ * 没装查询函数 / 拿不到这条消息的值 / 它抛异常（旧会话已作废）都返回 undefined —— 抬头右端少画
+ * 这一段，而不是把异常扔进渲染 tick（那里没人接得住，会打死整个 pi）。
+ */
+export function messageAge(component: object): number | undefined {
+	const message = messageFor(component);
+	if (message === undefined) return undefined;
+	const cache = ageCache();
+	const cached = cache.get(message);
+	if (cached !== undefined) return cached;
+
+	const lookup = (globalThis as Record<symbol, unknown>)[AGE_LOOKUP_KEY];
+	if (typeof lookup !== "function") return undefined;
+	let age: number | undefined;
+	try {
+		const value = (lookup as AgeLookup)(message);
+		age = typeof value === "number" && Number.isFinite(value) ? value : undefined;
+	} catch {
+		return undefined;
+	}
+	if (age !== undefined) cache.set(message, age);
+	return age;
+}
 
 /** 装上 / 摘掉压缩次数查询函数（`undefined` = 摘掉，抬头就不画那一段）。 */
 export function setCompactionLookup(lookup: CompactionLookup | undefined): void {
@@ -662,9 +918,13 @@ export function installUserMessageBar(options: UserMessageBarOptions): boolean {
 		const clock = messageClock(this as object);
 		const turn = messageTurn(this as object);
 		const compactions = messageCompactions(this as object);
+		// 已冻结的「发出时窗口跑了多久」—— 不能改成实时值，见 messageAge
+		const age = messageAge(this as object);
 		const width = typeof args[0] === "number" ? args[0] : 0;
 		const header =
-			clock === undefined ? undefined : buildHeaderLine(state.theme(), clock, width, turn, compactions);
+			clock === undefined
+				? undefined
+				: buildHeaderLine(state.theme(), clock, width, turn, compactions, age);
 		if (!header) return body;
 		return [liftZoneStart(header, body), ...body];
 	};

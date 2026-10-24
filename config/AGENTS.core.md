@@ -47,7 +47,8 @@ Distilled from `~/.pi/agent/AGENTS.md`; must never decay mid-session.
 - Scale length to the change (small → 2–5 sentences); reference paths instead of pasting file contents.
 
 ## Tool choice
-- `grep` / `find` / `ls` / `read` are first-class tools; bash's "`ls, grep, find, etc.`" description is a left-over, not a recommendation. One single-purpose lookup → the native tool; a compound probe (several answers per call, pipelines, `awk`/`sort`/`jq`, anything that writes) → bash, and do not fragment it.
+- `glob` / `grep` / `find` / `ls` / `read` are first-class tools. One single-purpose lookup → the native tool; a compound probe (several answers per call, pipelines, `awk`/`sort`/`jq`, anything that writes) → bash, and do not fragment it.
+- Opening a repo investigation, `glob` the scope first (`gateway/**/*.py`) instead of guessing a path or `grep -r`-ing wide: it costs one call and gives you the file list everything else hangs off. Where `glob` is not in your tool list (some subagents), `find` is the fallback.
 - `cd <dir> && <lookup>` still counts as a single lookup — the `cd` is navigation and the native tools take `path`.
 - Independent lookups go out as parallel calls, not as one `&&` chain; truncate with `limit`, not `| head`.
 - Native `grep`/`find` respect `.gitignore` (skip `node_modules/`, `dist/`); shell `grep -r` does not — point the native tool's `path` at an ignored tree explicitly. A lookup needing a flag the native tools lack (`grep -v`, `find -mtime`, a counting pipe) still goes to bash, and the gate passes those.

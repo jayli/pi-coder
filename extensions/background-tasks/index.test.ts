@@ -782,13 +782,15 @@ test("旧 registry 的迟到终态不注入新会话（registry 身份闸）", {
 /** 假主题：丢掉颜色以便断言可见文本；bold 也原样返回。 */
 const plainTheme = {
 	fg: (_color: string, text: string) => text,
+	bg: (_color: string, text: string) => text,
 	bold: (text: string) => text,
 };
 
 /** 着色主题：把每段包成 `slot(text)` 以便断言用的是哪个语义色槽（与 plan-mode/render.test.ts 同形）。 */
 const paintedTheme = {
 	fg: (color: string, text: string) => `${color}(${text})`,
-	bold: (text: string) => text,
+	bg: (color: string, text: string) => `bg:${color}(${text})`,
+	bold: (text: string) => `bold(${text})`,
 };
 
 /**
@@ -820,6 +822,7 @@ function skinTheme(vars: Record<string, string> = {}): Theme & { cleanup: () => 
 			if (value === undefined) throw new Error(`Unknown theme color: ${color}`);
 			return `${value}(${text})`;
 		},
+		bg: (color: string, text: string) => `bg-${color}(${text})`,
 		bold: (text: string) => text,
 		cleanup: () => fs.rmSync(dir, { recursive: true, force: true }),
 	} as unknown as Theme & { cleanup: () => void };
@@ -1092,9 +1095,9 @@ test("总览表：run_in_background 结果块末尾挂当前任务表（首行 �
 	assert.match(joined, /bg_1 +│ npm test +│ exit 0 +│ +10s/);
 	assert.match(joined, /bg_2 +│ sleep 2; echo helloworld +│ running +│ +1s/);
 	assert.ok(lines[lines.length - 1]!.startsWith("    └"), `底边框在列 4：${JSON.stringify(lines[lines.length - 1])}`);
-	// 右侧留 4 列（用户 2026-10-17 定）：表格行止于列 76，而不是顶到 width=80
+	// 宽度封顶 55（用户 2026-10-22 定）：80 列终端下表格不再撑满，右边缘停在列 4+55 = 59
 	for (const line of lines.slice(2)) {
-		assert.equal(line.length, 80 - 4, `表格行右侧应留 4 列（到列 ${80 - 4}）：${JSON.stringify(line)}`);
+		assert.equal(line.length, 4 + 55, `表格行宽度应封顶 55（到列 ${4 + 55}）：${JSON.stringify(line)}`);
 	}
 	// 表格左边界在列 4（与正文同列）：首行的表格部分是 `┌`，其余行是 `│` / `└`
 	assert.equal(lines[2]!.indexOf("┌"), 4, `表格左竖线应在列 4：${JSON.stringify(lines[2])}`);
@@ -1124,14 +1127,15 @@ test("总览表：只有 run_in_background 带，output / kill 不带", { skip }
 	await h.shutdown();
 });
 
-test("总览表：右侧留 4 列，右边框不顶到行尾", { skip }, async () => {
+test("总览表：宽度封顶 55，窄窗口按可用宽度收（右侧仍留 4 列）", { skip }, async () => {
 	const h = await loadHarness();
 	const definition = h.extension.tools.get("run_in_background")!.definition as any;
 	const result = {
 		content: [{ type: "text", text: "已在后台启动 bg_1。" }],
 		details: { ok: true, tableNow: 1_000_000, tasks: [{ id: "bg_1", command: "npm test", status: "running", startedAt: 999_000, endedAt: undefined }] },
 	};
-	// 几何：正文 2 列缩进 + 2 列树符 = 列 4 起画，可用宽 80-4 = 76，表宽 76-4 = 72，整行 4+72 = 76
+	// 几何：正文 2 列缩进 + 2 列树符 = 列 4 起画；可用宽 = width - 4（右留白），表格再用这个值。
+	// 宽终端（80）下表格封顶 55 ⇒ 整行 4 + 55 = 59，右侧留白从 4 变 21 列。
 	const wide = definition
 		.renderResult(result, { expanded: false, isPartial: false }, plainTheme, renderContext())
 		.render(80)
@@ -1142,16 +1146,33 @@ test("总览表：右侧留 4 列，右边框不顶到行尾", { skip }, async (
 	assert.equal(tableRows.length, 5, `顶框 / 表头 / 分隔 / 任务行 / 底框：${JSON.stringify(wide)}`);
 	assert.ok(tableRows[0]!.startsWith("  └ ┌"), `表格顶边框挂 └：${JSON.stringify(tableRows[0])}`);
 	for (const line of tableRows) {
-		assert.equal(line.length, 80 - 4, `表格行应止于列 ${80 - 4}（右侧留 4 列）：${JSON.stringify(line)}`);
+		assert.equal(line.length, 4 + 55, `宽终端下表格宽度封顶 55：${JSON.stringify(line)}`);
 	}
 	// 左边界：首行的树符位是 `└ `，其余行是等宽空白（两者都占 2 列）
 	for (const line of tableRows.slice(1)) {
 		assert.equal(line.slice(0, 4), "    ", `表格行左边界应在列 4：${JSON.stringify(line)}`);
 	}
-	// 表宽 = 可用宽 - 留白，且每行等宽（右边框对齐）
+	// 每行等宽（右边框对齐）
 	const widths = new Set(tableRows.map((line: string) => line.length));
 	assert.equal(widths.size, 1, `表格各行等宽：${JSON.stringify([...widths])}`);
-	// 正文不扣留白：它按字符折行，行尾自然参差，不强行补齐到 76
+
+	// 不同窗口宽度 ⇒ 表格宽 = min(可用宽 - 8, 55)。可用宽 = 窗口 - 正文 4 列（缩进 + 树符）
+	// - 4 列右留白；所以 80 列终端里表格只有 72 列可拿，封顶后停在 55。
+	for (const [width, expected] of [[120, 55], [80, 55], [70, 55], [63, 55], [59, 51], [50, 42]] as const) {
+		const rows = definition
+			.renderResult(result, { expanded: false, isPartial: false }, plainTheme, renderContext())
+			.render(width)
+			.map(plain)
+			.slice(1);
+		for (const line of rows) {
+			assert.equal(
+				line.length,
+				4 + expected,
+				`width=${width} 时表格宽应为 ${expected}（min(可用宽 ${width - 8}, 55)）：${JSON.stringify(line)}`,
+			);
+		}
+	}
+	// 正文不扣留白：它按字符折行，行尾自然参差
 	assert.ok(wide[0]!.startsWith("  │ 已在后台启动"), `正文照旧挂树：${JSON.stringify(wide[0])}`);
 	await h.shutdown();
 });
@@ -1176,7 +1197,7 @@ test("总览表：展开态（ctrl+o）不重复贴表，且超过 5 个任务�
 			.map(plain);
 		const body = lines.filter((line: string) => /│ bg_\d/.test(line));
 		assert.equal(body.length, 5, `表恒为 5 行任务（expanded=${expanded}）：${JSON.stringify(lines)}`);
-		assert.match(lines.join("\n"), /…3 background tasks earlier/, `折叠提示（expanded=${expanded}）`);
+		assert.match(lines.join("\n"), /…3 bg tasks earlier/, `折叠提示（expanded=${expanded}）`);
 	}
 	await h.shutdown();
 });
@@ -1253,7 +1274,7 @@ test("总览表：边框走 bash 输出色，其余：id accent / 状态按结�
 	assert.match(row1, /text\(\s*4s\)/, "时长走 text 前景色");
 	assert.match(row1, /text\(npm test/, "命令走 text 前景色");
 	assert.match(painted.find((line: string) => line.includes("┌"))!, /toolOutput\(┌/, "边框走 bash 输出色（皮肤没定义 bashOutput 时回退 toolOutput）");
-	assert.match(painted.find((line: string) => line.includes("mdCode(id"))!, /mdCode\(id\s*\)/, "表头走 mdCode");
+	assert.match(painted.find((line: string) => line.includes("mdCode("))!, /mdCode\( id\s+\)/, "表头走 mdCode（左空格已进同一格）");
 	// 表格格子里不再出现 muted（首行的 `└ ` 属于正文树连接符，不算表格格子）
 	const tableLines = painted.slice(painted.findIndex((line: string) => line.includes("┌")));
 	assert.ok(tableLines.length > 0);
@@ -1288,9 +1309,48 @@ test("总览表：边框走皮肤 vars.bashOutput 的真转义，与正文同色
 		// 其余格子不受影响：id 仍是 accent、表头仍是 text
 		assert.ok(!border.includes("text(┌"), "边框不该走 text 槽");
 		assert.match(lines.find((line: string) => line.includes("npm test"))!, /#7777cc\(bg_1\)/, "id 仍走 accent");
-		assert.match(lines.find((line: string) => line.includes("id  "))!, /#00aaaa\(id/, "表头走 mdCode");
+		// 表头：先在 mdCode 上色，再叠表头底色的形态标记（本假主题只认 `bg-<slot>` 前缀）
+		assert.match(lines.find((line: string) => line.includes(" id"))!, /bg-userMessageBg\(#00aaaa\( id/, "表头走 mdCode + surface 底色");
 	} finally {
 		theme.cleanup();
+	}
+	await h.shutdown();
+});
+
+test("总览表：表头四个格子加粗 + 刷 surface 底色，竖线与其余格子不受影响", { skip }, async () => {
+	const h = await loadHarness();
+	const definition = h.extension.tools.get("run_in_background")!.definition as any;
+	const now = 1_000_000;
+	const result = {
+		content: [{ type: "text", text: "已在后台启动 bg_1。" }],
+		details: {
+			ok: true,
+			tableNow: now,
+			tasks: [{ id: "bg_1", command: "npm test", status: "exited", startedAt: now - 5_000, endedAt: now - 1_000, exitCode: 0 }],
+		},
+	};
+	const lines = definition
+		.renderResult(result, { expanded: false, isPartial: false }, paintedTheme, renderContext())
+		.render(80) as string[];
+	// 表头行（第二个表格行，第一个是顶边框）：四个格子各自 `bg:userMessageBg(bold(mdCode(词)))`
+	const header = lines.find((line: string) => line.includes("mdCode("))!;
+	assert.ok(header, `应找到表头行：${JSON.stringify(lines)}`);
+	for (const word of ["id", "command", "status", "time"]) {
+		assert.ok(
+			header.includes(`bg:userMessageBg(bold(mdCode( ${word} `),
+			`表头「${word}」应加粗 + 刷底色（含左右各 1 空格）：${JSON.stringify(header)}`,
+		);
+	}
+	// 只染四个格子：表头行里 `bg:` 只包住格内文字与两侧空格，竖线仍是 border 片段
+	assert.equal(header.split("bg:userMessageBg(").length - 1, 4, `表头只该有 4 个底色块：${JSON.stringify(header)}`);
+	assert.equal(header.split("toolOutput(│)").length - 1, 5, `五根竖线仍是 border 片段：${JSON.stringify(header)}`);
+	// 其余行不受影响：任务行的 id 无底色、无加粗
+	const taskRow = lines.find((line: string) => line.includes("accent(bg_1)"))!;
+	assert.ok(!taskRow.includes("bg:"), `任务行不该有底色：${JSON.stringify(taskRow)}`);
+	assert.ok(!taskRow.includes("bold("), `任务行不该加粗：${JSON.stringify(taskRow)}`);
+	// 边框行（顶/底/分隔线）也不带底色
+	for (const line of lines.filter((l: string) => /[┌└├]/.test(l))) {
+		assert.ok(!line.includes("bg:"), `边框行不该有底色：${JSON.stringify(line)}`);
 	}
 	await h.shutdown();
 });
@@ -1423,9 +1483,9 @@ test("终态通知：末尾贴任务总览表（与 run_in_background 同一张�
 	assert.match(joined, /bg_1 +│ npm test +│ exit 0 +│ +10s/);
 	assert.match(joined, /bg_3 +│ echo hi +│ exit 0 +│ +8s/);
 	assert.ok(lines[lines.length - 1]!.startsWith("    └"), `底边框在列 4：${JSON.stringify(lines[lines.length - 1])}`);
-	// 同一套几何：右侧留 4 列、左边界在列 4
+	// 同一套几何：宽度封顶 55、左边界在列 4
 	for (const line of lines.slice(4)) {
-		assert.equal(line.length, 80 - 4, `表格行右侧应留 4 列：${JSON.stringify(line)}`);
+		assert.equal(line.length, 4 + 55, `表格行宽度应封顶 55：${JSON.stringify(line)}`);
 	}
 	await h.shutdown();
 });

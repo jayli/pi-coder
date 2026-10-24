@@ -13,6 +13,7 @@ import { describe, it } from "node:test";
 
 import {
 	MAX_TABLE_ROWS,
+	MAX_TABLE_WIDTH,
 	MIN_COMMAND_WIDTH,
 	moreTasksHint,
 	renderTaskTable,
@@ -118,7 +119,47 @@ describe("renderTaskTable：形状与列", () => {
 	it("整表宽度恰好等于传入的 width（command 吃掉剩余空间）", () => {
 		for (const width of [40, 60, 80, 120]) {
 			const lines = render([taskOf()], width);
-			assert.equal(widthOf(lines[0]!), width, `width=${width} 的表格宽度：${JSON.stringify(lines[0])}`);
+			assert.equal(widthOf(lines[0]!), Math.min(width, MAX_TABLE_WIDTH), `width=${width} 的表格宽度：${JSON.stringify(lines[0])}`);
+		}
+	});
+
+	it("宽度封顶 MAX_TABLE_WIDTH = 55（用户 2026-10-22 定），再宽也不拉伸", () => {
+		assert.equal(MAX_TABLE_WIDTH, 55);
+		for (const width of [55, 56, 80, 120, 200]) {
+			const lines = render([taskOf()], width);
+			assert.equal(widthOf(lines[0]!), 55, `width=${width} 时表格应停在 55：${JSON.stringify(lines[0])}`);
+		}
+		// 窄于 55 时照旧按传入宽度收，封顶不影响窄终端
+		for (const width of [40, 45, 54]) {
+			assert.equal(widthOf(render([taskOf()], width)[0]!), width, `width=${width} 应原样使用`);
+		}
+	});
+
+	it("表头四个格子带 bold + bg 标记，任务行与边框行不带（用户 2026-10-22 定）", () => {
+		const rows = renderTaskTable([taskOf(), taskOf({ id: "bg_2", startedAt: NOW - 1_000 })], {
+			width: 60,
+			now: NOW,
+			widthOf,
+		});
+		const header = rows[1]!;
+		const headerCells = header.filter((segment) => segment.role === "header");
+		assert.equal(headerCells.length, 4, `表头四个格子：${JSON.stringify(header)}`);
+		assert.deepEqual(
+			headerCells.map((segment) => ({ bold: segment.bold, bg: segment.bg })),
+			Array.from({ length: 4 }, () => ({ bold: true, bg: true })),
+		);
+		// 边框（含竖线与格两侧空格）不带标记 —— 只染格子，不通栏
+		for (const segment of header.filter((segment) => segment.role !== "header")) {
+			assert.equal(segment.bold, undefined, `边框片段不该加粗：${JSON.stringify(segment)}`);
+			assert.equal(segment.bg, undefined, `边框片段不该有底色：${JSON.stringify(segment)}`);
+		}
+		// 任务行与顶/分隔/底边框都不带
+		for (const row of [rows[0]!, rows[2]!, ...rows.slice(3)]) {
+			for (const segment of row) {
+				assert.notEqual(segment.role, "header");
+				assert.notEqual(segment.bold, true);
+				assert.notEqual(segment.bg, true);
+			}
 		}
 	});
 
@@ -170,11 +211,11 @@ describe("renderTaskTable：行序、上限与折叠", () => {
 		const lines = render(tasks, 60);
 		const body = lines.filter((line) => /bg_\d/.test(line));
 		assert.equal(body.length, MAX_TABLE_ROWS, `任务行数应被压到 ${MAX_TABLE_ROWS}：${JSON.stringify(lines)}`);
-		assert.match(lines.join("\n"), /…3 background tasks earlier/, `折叠提示：${JSON.stringify(lines)}`);
+		assert.match(lines.join("\n"), /…3 bg tasks earlier/, `折叠提示：${JSON.stringify(lines)}`);
 		assert.ok(!lines.join("\n").includes("bg_1 "), "最旧的 bg_1 被丢掉");
 		assert.ok(lines.join("\n").includes("bg_8"), "最新的 bg_8 保留");
 		// 折叠行在**表头之下、任务行之上**（用户 2026-10-17 定）：被丢掉的正是这些可见行之前的那几个
-		const hintIndex = lines.findIndex((line) => line.includes("background tasks earlier"));
+		const hintIndex = lines.findIndex((line) => line.includes("bg tasks earlier"));
 		const firstTask = lines.findIndex((line) => /│ bg_\d/.test(line));
 		assert.equal(hintIndex, 3, `折叠行在表头分隔线之后：${JSON.stringify(lines)}`);
 		assert.equal(firstTask, hintIndex + 1, `折叠行在第一条任务行之上：${JSON.stringify(lines)}`);
@@ -184,14 +225,14 @@ describe("renderTaskTable：行序、上限与折叠", () => {
 	it("恰好 5 个时不折叠", () => {
 		const tasks = Array.from({ length: 5 }, (_unused, index) => taskOf({ id: `bg_${index + 1}`, startedAt: NOW - index }));
 		const lines = render(tasks, 60);
-		assert.ok(!lines.join("\n").includes("background tasks earlier"), `不该出现折叠提示：${JSON.stringify(lines)}`);
+		assert.ok(!lines.join("\n").includes("bg tasks earlier"), `不该出现折叠提示：${JSON.stringify(lines)}`);
 	});
 
 	it("maxRows 可覆盖上限（测试与将来调整用）", () => {
 		const tasks = Array.from({ length: 6 }, (_unused, index) => taskOf({ id: `bg_${index + 1}`, startedAt: NOW - index }));
 		const lines = render(tasks, 60, 2);
 		assert.equal(lines.filter((line) => /bg_\d/.test(line)).length, 2);
-		assert.match(lines.join("\n"), /…4 background tasks earlier/);
+		assert.match(lines.join("\n"), /…4 bg tasks earlier/);
 	});
 
 	it("折叠行宽度与表格其余行一致", () => {
@@ -208,7 +249,7 @@ describe("renderTaskTable：行序、上限与折叠", () => {
 			taskOf({ id: `bg_${index + 1}`, startedAt: NOW - index, command: `cmd-${index + 1}` }),
 		);
 		const lines = render(tasks, 60);
-		const hint = lines.find((line) => line.includes("background tasks earlier"))!;
+		const hint = lines.find((line) => line.includes("bg tasks earlier"))!;
 		// 四根竖线一根不少 —— 这是「表格结构不被破坏」的具体含义
 		assert.equal(hint.split("│").length - 1, 5, `折叠行要保留 4 根内部竖线：${JSON.stringify(hint)}`);
 		assert.equal(hint.startsWith("│"), true, `折叠行以左边框开头：${JSON.stringify(hint)}`);
@@ -216,7 +257,7 @@ describe("renderTaskTable：行序、上限与折叠", () => {
 		// 与表头逐列对齐：文案落在第 2 格（command），id / status / time 三格是 -
 		const cells = hint.split("│").slice(1, -1).map((cell) => cell.trim());
 		const headerCells = lines.find((line) => line.startsWith("│ id"))!.split("│").slice(1, -1).map((cell) => cell.trim());
-		assert.deepEqual(cells, ["-", "…2 background tasks earlier", "-", "-"], `折叠行四格：${JSON.stringify(cells)}`);
+		assert.deepEqual(cells, ["-", "…2 bg tasks earlier", "-", "-"], `折叠行四格：${JSON.stringify(cells)}`);
 		// 占位 `-` 居中（与用户草图 `│  -   │ … │    -    │   -   │` 一致），不是左对齐
 		for (const [index, cell] of hint.split("│").slice(1, -1).entries()) {
 			if (index === 1) continue; // command 格是左对齐的文案
@@ -229,7 +270,23 @@ describe("renderTaskTable：行序、上限与折叠", () => {
 	});
 
 	it("moreTasksHint 文案固定（英文短句，只占 command 一格）", () => {
-		assert.equal(moreTasksHint(3), "…3 background tasks earlier");
+		assert.equal(moreTasksHint(3), "…3 bg tasks earlier");
+	});
+
+	it("封顶宽度下折叠提示整句进得去，不被裁出第二个省略号（用户 2026-10-22 定）", () => {
+		// 用户截图里的场景：5 位数 id（bg_10 / bg_11）+ 7 列的 running 把 command 挤到 25 列，
+		// 旧文案 `…6 background tasks earlier`（27 列）被裁成 `…6 background tasks earl…`
+		const tasks = Array.from({ length: 11 }, (_unused, index) =>
+			taskOf({
+				id: `bg_${index + 1}`,
+				startedAt: NOW - (11 - index) * 1_000,
+				status: "running",
+				endedAt: undefined,
+			}),
+		);
+		const lines = render(tasks, 80);
+		const hint = lines.find((line) => line.includes("bg tasks earlier"))!;
+		assert.equal(hint.split("│")[2]!.trim(), "…6 bg tasks earlier", `折叠提示不该被再裁一刀：${JSON.stringify(hint)}`);
 	});
 });
 

@@ -238,6 +238,14 @@ export function phraseForToolCall(
 		}
 		return `Find ${clip(pattern)}${path ? ` in ${shortenPath(path, cwd)}` : ""}`;
 	}
+	// `glob` 与 `find` 同一形态（模式 + 可选作用域），只是动词不同 —— 不合并成一行是因为
+	// 两个工具的**候选集不同**（glob 走仓库清单、find 走文件遍历），合并会丢这个事实。
+	if (toolName === "glob") {
+		const pattern = (args as { pattern?: string })?.pattern;
+		const path = (args as { path?: string })?.path;
+		if (!pattern) return null;
+		return `Glob ${clip(pattern)}${path ? ` in ${shortenPath(path, cwd)}` : ""}`;
+	}
 	if (toolName === "ls") {
 		const path = (args as { path?: string })?.path;
 		return `List ${path ? shortenPath(path, cwd) : "."}`;

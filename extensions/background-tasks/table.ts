@@ -40,11 +40,11 @@
  *      并在底边框之前补一行折叠提示。上限是对「这张表每次都要贴一遍」的预算约束：
  *      5 行 + 表头表尾 + 正文 10 行预览，最长的块约 18 行。
  *      折叠提示**就是一行普通表格行**（用户 2026-10-17 定）：`id` 与 `status` / `time` 三列
- *      填 `-`，文案 `…N background tasks earlier` 落在 `command` 列里，四根竖线一根不少：
+ *      填 `-`，文案 `…N bg tasks earlier` 落在 `command` 列里，四根竖线一根不少：
  *
  *      ```
  *      │ bg_7 │ cd /… &&…       │ running │    0s │
- *      │  -   │ …2 background tasks earlier │    -    │   -   │
+ *      │  -   │ …2 bg tasks earlier │    -    │   -   │
  *      ```
  *
  *      早先那版是把四列压成一格、塞进整句中文提示（`… 另有 2 个较早的任务（/background 看全部）`），
@@ -58,18 +58,31 @@
  * 采用**：它把退出码吞掉了，而退出码正是只有这张表能一眼给出的信息；同一块界面里两套状态
  * 词也会让 dock 行与表格对不上。
  *
- * ## 配色（用户 2026-10-17 定，三轮）
+ * ## 配色（用户 2026-10-17 定，三轮；表头底色 2026-10-22 定）
  *
- * **列标题（id / command / status / time）走 `mdCode`**（行内代码色）；**边框走 bash 工具调用的
- * 正文输出色**（`bashOutput` → `toolOutput`，即 role `border`，调用方用 `pickBodySlot` 解析后
- * 上色）—— 表格挂在正文树尾，框线与上面那几行输出同一个色；其余无色的格子（时长 / 命令 /
- * 折叠提示）走 `text` 前景色；本来就有语义色字体的保留原有槽位 —— id `accent`、状态词按
- * 结局 `warning` / `success` / `error`。
+ * **列标题（id / command / status / time）走 `mdCode`**（行内代码色）；**表头四个格子另加粗 +
+ * 刷一层 surface 灰底**（见上一节）；**边框走 bash 工具调用的正文输出色**（`bashOutput` →
+ * `toolOutput`，即 role `border`，调用方用 `pickBodySlot` 解析后上色）—— 表格挂在正文树尾，
+ * 框线与上面那几行输出同一个色；其余无色的格子（时长 / 命令 / 折叠提示）走 `text` 前景色；
+ * 本来就有语义色字体的保留原有槽位 —— id `accent`、状态词按结局 `warning` / `success` / `error`。
  *
  * ## 窄终端：放不下就整张表不画
  *
  * `command` 列拿剩余宽度，低于 `MIN_COMMAND_WIDTH` 时**整张表返回空**（调用方据此只画
  * 正文）—— 画一排 `…` 的半截表比不画更难读，而正文里已经有这次启动的任务 id 与命令。
+ *
+ * ## 宽度上限 55 列（用户 2026-10-22 定）
+ *
+ * 原来是「可用多宽就填多宽」，宽终端上一张两三个任务的小表被拉成一百多列、`command`
+ * 格空掉一大半。现在表格自身封顶 `MAX_TABLE_WIDTH = 55`（含左右边框），窗口更宽就停在
+ * 55；窄到放不下 55 时按可用宽度收。扣留白仍是调用方的事（见下一节）。
+ *
+ * ## 表头的标题行形态（用户 2026-10-22 定）
+ *
+ * 表头那四个格子（id / command / status / time）**加粗 + 刷一层灰底**：片段上带 `bold` /
+ * `bg` 两个标记，由调用方落成 ANSI。底色取皮肤的 surface 槽（`userMessageBg`），不是
+ * `dim` 色阶 —— `dim` 在 1337 上是 `#6d6d6d`，那档灰压在深色的行内代码色上会把对比度
+ * 吃光。只染四个格子（连左右各 1 个补位空格），竖线不染 —— 四段分离的色块，不是通栏。
  *
  * ## 右侧留白
  *
@@ -83,6 +96,19 @@ import { statusWord } from "./status.ts";
 
 /** 表格最多列几行任务（用户 2026-10-16 定：5）。 */
 export const MAX_TABLE_ROWS = 5;
+
+/**
+ * 表格的**最大宽度**（用户 2026-10-22 定：55 列，含左右边框）。
+ *
+ * 这张表原来是「可用多宽就画多宽」—— 宽终端上一张两三个任务的小表被拉成一百多列。
+ * 55 列是用户量出来的舒适上限：竖线到竖线一眼扫完，`command` 仍够放一条常见命令。
+ * 窗口更宽时表格**停在 55**，右边缘参差；窗口窄时按可用宽度收。可用宽度本身已经扣掉了
+ * 正文缩进 / 树符（4 列）与右留白（4 列）—— 整行 `└ ` + 4 列在 `┌` 前，即 80 列终端里
+ * 表格只有 72 列可拿，封顶后停在 55（右边留 21 列空白）。
+ *
+ * 下限不变：连 `MIN_COMMAND_WIDTH` 都保不住时整张表不画。
+ */
+export const MAX_TABLE_WIDTH = 55;
 
 /** `command` 列最少要几列才值得画表。再窄就只能显示 `…`，等于没有这一列。 */
 export const MIN_COMMAND_WIDTH = 10;
@@ -112,7 +138,9 @@ export const MIN_TIME_WIDTH = 5;
  * 一格能用的语义色槽。
  *
  * - `header` = **列标题**（id / command / status / time），走 `mdCode`（行内代码色，用户 2026-10-17 定：
- *   列名是「字段名」，与正文里反引号包住的标识符同一个观感）；
+ *   列名是「字段名」，与正文里反引号包住的标识符同一个观感）；片段还带 `bold` + `bg`
+ *   两个标记（用户 2026-10-22 定：表头是标题行，字要加粗、格子要有灰底），由调用方
+ *   决定怎么落成 ANSI —— 本模块仍然不碰主题；
  * - `border` 走 bash 输出色（`pickBodySlot`）；
  * - `id` 走 `accent`，`status-*` 按结局 `warning` / `success` / `error`；
  * - `time` / `command` / `hint`（折叠行的占位 `-` 与文案，不是列名）走 `text` 前景色。
@@ -132,6 +160,10 @@ export type TaskTableRole =
 export interface TaskTableSegment {
 	text: string;
 	role: TaskTableRole;
+	/** 加粗（目前只有表头用，用户 2026-10-22 定）。 */
+	bold?: boolean;
+	/** 给这一格刷底色（目前只有表头用，用户 2026-10-22 定：皮肤 surface 色）。 */
+	bg?: boolean;
 }
 
 /** 一行 = 若干片段。边框行是一个整段，任务行是「边框 + 格内容」交替。 */
@@ -173,9 +205,13 @@ const FRAME_WIDTH = 13;
  *
  * 旧文案是整句中文 `… 另有 N 个较早的任务（/background 看全部）`，压平四列后仍有约 46 列；
  * 现在它只占 `command` 那一格，文案得短到窄终端下不至于立刻被裁成 `……`。
+ *
+ * `background` 缩成 `bg`（用户 2026-10-22 定）：表格封顶 55 列后 `command` 只剩 26 列，
+ * `…6 background tasks earlier` 是 27 列，被 `clampText` 裁成 `…6 background tasks earl…`；
+ * 缩成 `…6 bg tasks earlier`（19 列）后整句进得去，这一格的省略号只留给真正的长命令。
  */
 export function moreTasksHint(hidden: number): string {
-	return `…${hidden} background tasks earlier`;
+	return `…${hidden} bg tasks earlier`;
 }
 
 /** 把一行文本硬裁到 `width` 列，末尾留 `…`（U+2026，1 列）。`width <= 0` 时返回空串。 */
@@ -237,13 +273,22 @@ function borderLine(left: string, middle: string, right: string, widths: readonl
 
 /**
  * 拼 `│ cell │ cell │`。`widths` 与 `cells` 一一对应 —— 表头、任务行、折叠提示行都是 4 格。
+ *
+ * **带 `bg` 标记的格子连左右各 1 个补位空格一起成段**（用户 2026-10-22 定：只染四个格子，
+ * 每个词连同左右各 1 空格、竖线不染）—— 底色由调用方刷到整个片段的文本上，于是每格是一块
+ * 连片色块而不是浮在格里的窄条。总宽度不变（仍是 `width + 2`），只是那两格空格从 border
+ * 片段并进了格子片段。
  */
 function cellRow(cells: ReadonlyArray<TaskTableSegment>, widths: readonly number[]): TaskTableRow {
 	const segments: TaskTableSegment[] = [];
 	for (let index = 0; index < widths.length; index += 1) {
-		segments.push({ text: "│", role: "border" }, { text: " ", role: "border" });
-		segments.push(cells[index]!);
-		segments.push({ text: " ", role: "border" });
+		const cell = cells[index]!;
+		segments.push({ text: "│", role: "border" });
+		if (cell.bg === true) {
+			segments.push({ ...cell, text: ` ${cell.text} ` });
+		} else {
+			segments.push({ text: " ", role: "border" }, cell, { text: " ", role: "border" });
+		}
 	}
 	segments.push({ text: "│", role: "border" });
 	return segments;
@@ -288,7 +333,10 @@ function computeWidths(
  */
 export function renderTaskTable(tasks: readonly TaskTableTask[], options: TaskTableOptions): TaskTableRow[] {
 	if (tasks.length === 0) return [];
-	const { width, now, widthOf } = options;
+	// 宽度封顶在 `MAX_TABLE_WIDTH`（用户 2026-10-22 定）：宽终端上不再把两三个任务的小表
+	// 拉成一百多列。封顶后再走原来的列宽分配 —— 窄终端不受影响（min 取的就是传入值）。
+	const width = Math.min(options.width, MAX_TABLE_WIDTH);
+	const { now, widthOf } = options;
 	const maxRows = Math.max(1, Math.floor(options.maxRows ?? MAX_TABLE_ROWS));
 	if (!(width > 0)) return [];
 
@@ -304,11 +352,15 @@ export function renderTaskTable(tasks: readonly TaskTableTask[], options: TaskTa
 
 	const rows: TaskTableRow[] = [borderLine("┌", "┬", "┐", inner)];
 
+	// 表头是**标题行**（用户 2026-10-22 定）：四个格子各自加粗并刷底色。底色只包住格子本身 ——
+	// 竖线仍是 border 片段（`cellRow` 把带 `bg` 的格与它左右那格空格并成一片）。
 	rows.push(
 		cellRow(
 			HEADERS.map((header, index) => ({
 				text: cellText(header, inner[index]!, widthOf),
 				role: "header" as TaskTableRole,
+				bold: true,
+				bg: true,
 			})),
 			inner,
 		),

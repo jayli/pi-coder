@@ -19,6 +19,7 @@ import test from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { MARK_ANIM_LEAD_IN_MS, MARK_ANIM_TOTAL_MS } from "./animation.ts";
+import { BOOT_SUPPRESSED_KEY, suppressBuiltInHeader } from "./boot-suppress.ts";
 import { MARK_ROWS, MARK_WIDTH } from "./logo.ts";
 
 const EXTENSION_PATH = path.join(path.dirname(fileURLToPath(import.meta.url)), "index.ts");
@@ -337,6 +338,60 @@ test("session_start：header 是 logo（每行缩进一格、没有 /logo 提示
 		assert.deepEqual(sectionTitlesIn(loaded), []);
 		assert.equal(loaded.children.length, 0, "连开头那个额外空行也收掉，不留多余留白");
 	} finally {
+		workspace.cleanup();
+	}
+});
+
+test("顶部空行：静音后自己补一条；/clear 重载出来的新实例也要补（进程级事实）", { skip, timeout: 30_000 }, async () => {
+	const workspace = makeWorkspace();
+	try {
+		// 装一个假 pi：拿真实 `InteractiveMode.prototype` 的形状，但完全受测试控制。
+		class FakeInteractiveMode {
+			shouldShowStartupHeader(): boolean {
+				return true;
+			}
+		}
+		// 用户 2026-10-22 实测回归：/clear 之后扩展模块重新求值、换新实例，而 pi 的 init()
+		// （唯一一次问 shouldShowStartupHeader）早在旧实例的生命周期里跑完了 ⇒ 新实例如果只
+		// 看自己那次 wrapper 被没被问过，就会漏掉顶部那条空行（启动正常、/clear 后印记贴顶）。
+		const first = suppressBuiltInHeader(FakeInteractiveMode)!;
+		assert.equal(first.suppressed, false, "还没被问过：还谈不上「本进程已静音」");
+		new FakeInteractiveMode().shouldShowStartupHeader(); // pi 的 init() 那一下
+		assert.equal(first.suppressed, true);
+
+		// 模拟 /clear：模块重新求值 —— 新实例自己的 wrapper 一次都没被问过。
+		delete (globalThis as { [BOOT_SUPPRESSED_KEY]?: unknown })[BOOT_SUPPRESSED_KEY];
+		const second = suppressBuiltInHeader(FakeInteractiveMode)!;
+		assert.equal(second.suppressed, false, "清理过 `globalThis` 之后，新实例确实读不到（否则这条用例测不到东西）");
+		// 重新落一次事实（真进程里它一直都在，/clear 不会把它拿走），再验新实例能读到。
+		new FakeInteractiveMode().shouldShowStartupHeader();
+		assert.equal(second.suppressed, true);
+
+		const extension = await loadExtension(workspace.agentDir, workspace.projectDir);
+		const sessionStart = extension.handlers.get("session_start")?.[0];
+		assert.ok(sessionStart);
+		// 关掉入场动画：静默期里印记本来就是空白，会把「第一条空行之后是印记」这条断言搅浑。
+		process.env.PI_LOGO_ANIMATION = "off";
+		const tui = createFakeTui();
+		const { ctx } = createContext(tui);
+		await sessionStart({}, ctx);
+		const plain = (tui.headerComponent as { render(w: number): string[] }).render(80).map(stripAnsi);
+		// 扩展自己打的那份补丁：`init()` 已经跑完，所以它只靠进程级事实拿到 `suppressed`。
+		assert.equal(plain[0], "", `静音后印记上方要有一条空行：${JSON.stringify(plain.slice(0, 3))}`);
+		assert.ok(plain[1]!.includes("█"), `空行之后应该直接是印记第一行：${JSON.stringify(plain.slice(0, 3))}`);
+		assert.equal(plain.filter((line) => line === "").length, 2, "一共两条：顶部那条 + 印记下方那条");
+
+		// 对照：进程级事实不在时（`PI_LOGO_BOOT_SUPPRESS=off` / `--verbose` 那条路），不许自作多情补一条。
+		delete (globalThis as { [BOOT_SUPPRESSED_KEY]?: unknown })[BOOT_SUPPRESSED_KEY];
+		const cleanTui = createFakeTui();
+		const cleanExt = await loadExtension(workspace.agentDir, workspace.projectDir);
+		await cleanExt.handlers.get("session_start")?.[0]!({}, createContext(cleanTui).ctx);
+		const cleanPlain = (cleanTui.headerComponent as { render(w: number): string[] }).render(80).map(stripAnsi);
+		assert.ok(cleanPlain[0]!.includes("█"), `没有静音就不补空行：${JSON.stringify(cleanPlain.slice(0, 2))}`);
+		assert.equal(cleanPlain.filter((line) => line === "").length, 1, "只剩印记下方那一条");
+	} finally {
+		delete process.env.PI_LOGO_ANIMATION;
+		delete (globalThis as { [BOOT_SUPPRESSED_KEY]?: unknown })[BOOT_SUPPRESSED_KEY];
 		workspace.cleanup();
 	}
 });

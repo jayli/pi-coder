@@ -324,15 +324,53 @@ function tableWidthFor(bodyWidth: number): number {
 }
 
 /**
- * 表格一格的色槽（用户 2026-10-17 定，三轮）：
+ * 表格一格的色槽（用户 2026-10-17 定，三轮；2026-10-22 补表头底色）：
  *
  * - **列标题走 `mdCode`**（行内代码色）—— 列名是字段名，与正文里反引号包住的标识符同一个观感；
+ *   2026-10-22 加：整个格子**加粗 + 刷皮肤的 surface 底色**（`userMessageBg`）—— 表头是标题行，
+ *   一格一块淡色底才看着像表头。只染格子，竖线仍是 border 片段。
  * - **边框走 bash 工具调用的正文输出色**（`bashOutput` → `toolOutput`，即 `pickBodySlot`）——
  *   表格就是挂在正文树尾的延续，框线与上面那几行输出同一个色；
  * - 其余无色的格子（表头以外的时长 / 命令 / 折叠提示）走 `text` 前景色；
  * - 原本带语义色的格子保持不变 —— `id` 走 `accent`，状态词按结局 `warning` / `success` / `error`。
  */
-function paintTableCell(theme: Theme, role: TaskTableRole, text: string, bodySlot: string | undefined): string {
+function paintTableCell(
+	theme: Theme,
+	role: TaskTableRole,
+	text: string,
+	bodySlot: string | undefined,
+	segment?: { bold?: boolean; bg?: boolean },
+): string {
+	const painted = paintTableCellFg(theme, role, text, bodySlot);
+	// 表头底色取皮肤的 **surface** 槽（`userMessageBg`），不是 `dim` 色阶：dim 在 1337 上
+	// 是 `#6d6d6d`，压在 mdCode 的深青上对比度就没了。`theme.bg()` 只认 7 个官方
+	// `ThemeBg`，所以这里用槽名（不走 theme-extra 的 `vars` 自定色）。
+	//
+	// 嵌套顺序是 bg(bold(fg(text)))：三种重置码互不干扰（`\x1b[49m` / `\x1b[22m` /
+	// `\x1b[39m`），底色因此覆盖整格（含两端补位空格），而格内文字仍各自上色。
+	// 底色/加粗都是增强：皮肤没这个槽、或主题实现不完整时静默退回单上前景色，不能把
+	// 表格整张搞没（渲染器里抛异常等于这个块消失）。
+	if (segment?.bg !== true && segment?.bold !== true) return painted;
+	let out = painted;
+	if (segment.bold === true) {
+		try {
+			out = theme.bold(out);
+		} catch {
+			/* 主题没实现 bold：保留原样 */
+		}
+	}
+	if (segment.bg === true) {
+		try {
+			out = theme.bg("userMessageBg", out);
+		} catch {
+			/* 主题没有这个背景槽：保留原样 */
+		}
+	}
+	return out;
+}
+
+/** 表格一格的前景色（表头底色在 `paintTableCell` 里往上叠）。 */
+function paintTableCellFg(theme: Theme, role: TaskTableRole, text: string, bodySlot: string | undefined): string {
 	switch (role) {
 		case "border":
 			return paintBodyRow(theme, text, bodySlot);
@@ -361,7 +399,7 @@ function paintTableCell(theme: Theme, role: TaskTableRole, text: string, bodySlo
 function paintTableRows(rows: readonly TaskTableRow[], theme: Theme, bodySlot: string | undefined): string[] {
 	return rows.map((row, index) => {
 		const gutter = index === 0 ? theme.fg("muted", TREE_LAST) : "  ";
-		const painted = row.map((segment) => paintTableCell(theme, segment.role, segment.text, bodySlot)).join("");
+		const painted = row.map((segment) => paintTableCell(theme, segment.role, segment.text, bodySlot, segment)).join("");
 		return BODY_INDENT + gutter + painted;
 	});
 }

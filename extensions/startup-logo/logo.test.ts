@@ -134,6 +134,25 @@ test("composeHeaderLines：印记下方留一个空行，提示行与说明段�
 	}
 });
 
+test("composeHeaderLines：`leading` 在印记之前补一条空行（静音 pi 内置 header 时用）", () => {
+	// 用户 2026-10-22 定：pi 装内置 header 时自带 `Spacer(1) + header + Spacer(1)`，被静音后
+	// 那条 spacer 也没了，印记会直接贴终端顶边。这条空行由调用方按「本进程是否真静音」传入。
+	const withLeading = composeHeaderLines({ logo: ["a", "b"], hints: "h", onboarding: ["o"], leading: true });
+	assert.deepEqual(withLeading, ["", "a", "b", "", " h", " o"]);
+	assert.equal(withLeading[0], "", "顶部空行必须在第一行");
+	assert.equal(withLeading[1], "a", "顶部空行只一条，紧跟就是印记第一行");
+	// 印记下方那条不受影响：两条空行各管一处，不是同一条规则。
+	assert.equal(withLeading.filter((line) => line === "").length, 2);
+
+	// 不传就是原样（pi 自己那条 spacer 还在时，不要多补一条）。
+	assert.deepEqual(composeHeaderLines({ logo: ["a"], hints: "h" }), ["a", "", " h"]);
+	assert.deepEqual(composeHeaderLines({ logo: ["a"], hints: "h", leading: false }), ["a", "", " h"]);
+
+	// 窄终端回退（只剩 wordmark 一行）也要补；空 logo 加 `leading` 也照样补，不凭空吞掉。
+	assert.deepEqual(composeHeaderLines({ logo: ["w"], leading: true }), ["", "w"]);
+	assert.deepEqual(composeHeaderLines({ logo: [], leading: true }), [""]);
+});
+
 test("poweredByLines：宽终端画三行 `@bachi/` + Pi-Coder 字形，窄终端退回整句", () => {
 	// 三行字形的原始字节（用户 2026-10-06 换的这一稿）。
 	const ART = ["╭─╮╷   ╭─╴╭─╮╶┬╮╭─╴╭─╮", "├─╯│╶─╴│  │ │ ││├╴ ├┬╯", "╵  ╵   ╰─╴╰─╯╶┴╯╰─╴╵╰╴"];

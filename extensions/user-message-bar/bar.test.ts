@@ -17,8 +17,12 @@ import {
 	BAR_INDENT,
 	addBarToLine,
 	buildHeaderLine,
+	darkenAnsiBackground,
+	darkenAnsiForeground,
 	formatClock,
-	headerBackground,
+	formatSessionAge,
+	HEADER_BG_DARKEN,
+	HEADER_THOUGHT_BG_DARKEN,
 	installUserMessageBar,
 	installUserMessageTimestamp,
 	messageClock,
@@ -26,6 +30,8 @@ import {
 	messageTurn,
 	resetUserMessageTurns,
 	resolveBarAnsi,
+	messageAge,
+	setAgeLookup,
 	setCompactionLookup,
 } from "./bar.ts";
 
@@ -278,8 +284,19 @@ test("补丁：原型没有 render 时什么都不做", () => {
 const KEYWORD_FG = "\u001b[38;2;157;121;214m"; // #9d79d6 = nightfox 的 syntaxKeyword
 const ACCENT_FG = "\u001b[38;2;134;171;220m"; // #86abdc = nightfox 的 accent
 const DIM_FG = "\u001b[38;2;109;109;109m"; // #6d6d6d = nightfox 的 dim
+/** 抬头的第一段底色 = `syntaxKeyword` 再压暗 40%：`#9d79d6` 三通道各 × 0.6 → `#5e4980`。 */
+const HEAD_BG_SRC = "\u001b[48;2;157;121;214m";
+const HEAD_BG = "\u001b[48;2;94;73;128m";
+/**
+ * 第二段两个竖线字形的前景：`text` 全暗（压暗 100% → 三通道归零）。
+ * 行首那个引导符不压暗（用户 2026-10-23 定），它直接用 `FG`。
+ */
+const GLYPH_FG = "\u001b[38;2;0;0;0m";
+/** 抬头的第二段底色 = `thinkingText`（nightfox 里 = `comment` = `#6d6d6d`）再压暗 30% → `#4c4c4c`。 */
+const THOUGHT_BG_SRC = "\u001b[48;2;109;109;109m";
+const THOUGHT_BG_SEQ = "\u001b[48;2;76;76;76m";
 
-/** 真实皮肤的最小替身：抬头三个槽位 + `text`（竖线兜底槽）；`userMessageBg` 给了才铺底色。 */
+/** 真实皮肤的最小替身：抬头那几个槽位 + `text`（竖线兜底槽）；`userMessageBg` 给了才铺底色。 */
 function headerTheme(overrides: Record<string, string | undefined> = {}): {
 	getFgAnsi(name: string): string;
 	getBgAnsi(name: string): string;
@@ -290,6 +307,7 @@ function headerTheme(overrides: Record<string, string | undefined> = {}): {
 		dim: DIM_FG,
 		muted: DIM_FG,
 		text: FG,
+		thinkingText: DIM_FG,
 		...overrides,
 	};
 	return {
@@ -319,109 +337,116 @@ test("formatClock：毫秒 / ISO 串都按本地时间输出 HH:MM，非法值�
 	assert.equal(formatClock(Number.NaN), undefined);
 });
 
-test("buildHeaderLine：引导符 ▏ dim、You 加粗 + syntaxKeyword、时间 dim", () => {
+test("buildHeaderLine：`▏You HH:MM #N ` 铺 mdKeyword（压暗 40%）底，文字走 fg、You 加粗、行首竖线不压暗", () => {
 	const line = buildHeaderLine(headerTheme(), "13:33", 46);
 	assert.ok(line);
+	assert.equal(plain(line), "▏You 13:33 ", "第一段含前面那个引导符与尾随那一格");
 	assert.equal(
 		line,
-		`${DIM_FG}\u258F\u001b[22;39m${KEYWORD_FG}\u001b[1mYou\u001b[22m\u001b[39m${DIM_FG} 13:33\u001b[22;39m`,
+		`${FG}${HEAD_BG}\u001b[1m▏You\u001b[22m 13:33 \u001b[49m\u001b[39m`,
+		"一整块：行首引导符不压暗（就是 fg），You 与它同在一段加粗里，底是压暗的 mdKeyword",
 	);
-	assert.equal(plain(line), "▏You 13:33", "顶格：引导符后不空，You 与时间之间空一格");
+	assert.equal(line.includes(KEYWORD_FG), false, "引导符不是另一个色系，是 fg 压暗");
+	assert.equal(line.includes("\u001b[22;39m"), false, "不再用 dim 的 22/39 收尾（字块自己收底）");
 });
 
-test("buildHeaderLine：槽位缺失时按兜底顺序退（syntaxKeyword → accent；dim → muted）", () => {
-	const line = buildHeaderLine(headerTheme({ syntaxKeyword: undefined, dim: undefined }), "13:33", 46);
+const LEAD = "\u001b[38;2;109;109;109m"; // #6d6d6d，nightfox 的 dim
+
+/** 每通道乘 `1 - amount` 再四舍五入：109 × 0.8 = 87.2 → 87。 */
+test("darkenAnsiForeground：truecolor 前景按比例压暗（只动这个色值，序列形状不变）", () => {
+	assert.equal(darkenAnsiForeground(LEAD, 0.2), "\u001b[38;2;87;87;87m");
+	assert.equal(darkenAnsiForeground("\u001b[38;2;200;100;50m", 0.2), "\u001b[38;2;160;80;40m");
+	assert.equal(darkenAnsiForeground("\u001b[38;2;255;255;255m", 0.5), "\u001b[38;2;128;128;128m", "四舍五入");
+	assert.equal(darkenAnsiForeground("\u001b[38;2;0;0;0m", 0.2), "\u001b[38;2;0;0;0m", "黑已经最暗");
+	assert.equal(HEADER_BG_DARKEN, 0.4, "第一段底色的压暗比例是用户定的 40%");
+	assert.equal(HEADER_THOUGHT_BG_DARKEN, 0.3, "第二段底色的压暗比例是用户定的 30%");
+});
+
+test("darkenAnsiBackground：背景序列同样按比例压暗，仍是 48 形态", () => {
+	assert.equal(darkenAnsiBackground(HEAD_BG_SRC, 0.4), HEAD_BG);
+	assert.equal(darkenAnsiBackground(THOUGHT_BG_SRC, 0.3), THOUGHT_BG_SEQ);
+	assert.equal(darkenAnsiBackground("\u001b[48;2;0;0;0m", 0.3), "\u001b[48;2;0;0;0m", "黑已经最暗");
+	// 256 色背景：反算 RGB、压暗、量化回最近的 256 索引
+	assert.equal(darkenAnsiBackground("\u001b[48;5;242m", 0.2), "\u001b[48;5;240m");
+	// 前景序列不归它管
+	assert.equal(darkenAnsiBackground(LEAD, 0.2), LEAD);
+	for (const amount of [0, -0.2, 1.2, Number.NaN, Number.POSITIVE_INFINITY]) {
+		assert.equal(darkenAnsiBackground(HEAD_BG_SRC, amount), HEAD_BG_SRC, `amount=${amount}`);
+	}
+	// `amount = 1` 是合法的「全暗」：三通道归零（用户 2026-10-23 用这个把竖线画成黑色）
+	assert.equal(darkenAnsiBackground(HEAD_BG_SRC, 1), "\u001b[48;2;0;0;0m");
+});
+
+test("darkenAnsiForeground：`dim` 槽位带的属性尾码原样保留（否则压暗会把 faint 抹掉）", () => {
+	assert.equal(darkenAnsiForeground(`${LEAD}\u001b[2m`, 0.2), "\u001b[38;2;87;87;87m\u001b[2m");
+});
+
+test("darkenAnsiForeground：256 色前景按 xterm 调色板反算再量化回去，不冒 truecolor 序列", () => {
+	// 242 = 灰阶 #6c6c6c：压暗 20% ≈ #565656 → 最接近的灰阶是 240（#585858）
+	assert.equal(darkenAnsiForeground("\u001b[38;5;242m", 0.2), "\u001b[38;5;240m");
+	// 立方体 17（#00005f）压暗后仍是立方体里最近的那个，不变成 truecolor
+	const cube = darkenAnsiForeground("\u001b[38;5;17m", 0.2);
+	assert.match(cube, /^\u001b\[38;5;\d+m$/, "仍是 256 色形态");
+});
+
+test("darkenAnsiForeground：基本 16 色、非前景序列、非法比例都原样返回（不猜）", () => {
+	// 基本 16 色的实际色值由终端自己定，按标称值换算会换掉色系
+	assert.equal(darkenAnsiForeground("\u001b[38;5;8m", 0.2), "\u001b[38;5;8m");
+	assert.equal(darkenAnsiForeground("\u001b[38;5;15m", 0.2), "\u001b[38;5;15m");
+	// 背景槽（48）、复位（39）、空串：不是前景色就不碰
+	assert.equal(darkenAnsiForeground("\u001b[48;2;109;109;109m", 0.2), "\u001b[48;2;109;109;109m");
+	assert.equal(darkenAnsiForeground("\u001b[39m", 0.2), "\u001b[39m");
+	assert.equal(darkenAnsiForeground("", 0.2), "");
+	// 首尾相接但参数个数不认识的，不猜
+	assert.equal(darkenAnsiForeground("\u001b[38;2;1;2m", 0.2), "\u001b[38;2;1;2m");
+	// 比例为 0 / 1 / 非数字：不动
+	for (const amount of [0, -0.2, 1.2, Number.NaN, Number.POSITIVE_INFINITY]) {
+		assert.equal(darkenAnsiForeground(LEAD, amount), LEAD, `amount=${amount}`);
+	}
+	// `amount = 1` 是合法的「全暗」：三通道归零（左边界仍然不碰：`0` 表示不压暗）
+	assert.equal(darkenAnsiForeground(LEAD, 1), "\u001b[38;2;0;0;0m");
+	assert.equal(darkenAnsiForeground("\u001b[38;5;242m", 1), "\u001b[38;5;16m", "256 色量化到黑");
+});
+
+test("buildHeaderLine：槽位缺失时按兜底顺序退（syntaxKeyword → accent；thinkingText → dim）", () => {
+	const line = buildHeaderLine(headerTheme({ syntaxKeyword: undefined, thinkingText: undefined }), "13:33", 46, 5, 2);
 	assert.ok(line);
-	assert.equal(line.startsWith(`${DIM_FG}\u258F`), true, "引导符是 dim（dim 缺失时退到 muted）");
-	assert.equal(line.includes(`${ACCENT_FG}\u001b[1mYou`), true, "没有 syntaxKeyword 就用 accent");
-	assert.equal(line.endsWith(` 13:33\u001b[22;39m`), true, "dim 缺失退到 muted");
+	assert.equal(line.includes("\u001b[48;2;80;103;132m"), true, "第一段底色是 accent 压暗 40%（134/171/220 × 0.6）");
+	assert.equal(line.includes(`${FG}\u001b[48;2;80;103;132m`), true, "没有 syntaxKeyword 也不挡前景（文字始终是 fg）");
+	// thinkingText 缺失 → 退到 dim（当前景槽取、转 48），**再**压暗 30%：109 × 0.7 → 76
+	assert.equal(line.includes(`\u001b[48;2;109;109;109m`), false, "不会把未压暗的 dim 直接当底色");
+	assert.equal(line.includes(THOUGHT_BG_SEQ), true, "第二段底色 = dim 再压暗 30%");
 });
 
-test("buildHeaderLine：没有皮肤时输出无色的同一行（时间仍然有用）", () => {
+test("buildHeaderLine：没有皮肤时输出无色的同一行，尾随空格吃掉", () => {
 	assert.equal(buildHeaderLine(undefined, "13:33", 46), "▏You 13:33");
+	assert.equal(buildHeaderLine(undefined, "13:33", 46, 5, 2), "▏You 13:33 #5 ▏2 compactions▕");
 });
 
 const USER_BG = "\u001b[48;2;36;36;36m"; // #242424 = nightfox 的消息底色
-const USER_BG_DARK = "\u001b[48;2;27;27;27m"; // ×0.75 → #1b1b1b
 
-/** 行里所有背景序列（抬头是逐格上底色）。 */
+/** 行里所有背景序列。 */
 const bgSequences = (line: string): string[] => line.match(/\u001b\[48;[25];[0-9;]+m/g) ?? [];
 
-test("buildHeaderLine：抬头底色渐变 = 文字格数 + 20，碰到右边界就截断", () => {
+test("buildHeaderLine：底色只铺两段文字（不按消息底色、不铺整行）", () => {
+	// 皮肤里有消息底色也一样无关：抬头只用自己那两个槽
 	const theme = headerTheme({ userMessageBg: USER_BG });
-	const line = buildHeaderLine(theme, "13:33", 40);
-	assert.ok(line);
-	assert.equal(plain(line), "▏You 13:33".padEnd(40), "整行铺满 width");
-	assert.equal(line.endsWith("\u001b[49m"), true, "行尾 49m 收掉底色，不溢到下一行");
-	assert.equal(line.split("\u001b[49m").length - 1, 1, "只多出这一个关背景");
+	const line = buildHeaderLine(theme, "13:33", 80, 5, 2) ?? "";
+	assert.deepEqual(bgSequences(line), [HEAD_BG, THOUGHT_BG_SEQ], "只有两块：压暗的 mdKeyword + Think 色");
+	assert.equal(plain(line), "▏You 13:33 #5 ▏2 compactions▕", "第二段两头各一个竖线字形（`▏` … `▕`）");
 
-	const bgs = bgSequences(line);
-	// 文字 10 格 + 尾巴 20 格，再往右那一段是背景色
-	assert.equal(bgs.length, 31, "10 文字格 + 20 尾巴 + 1 段行尾背景");
-	assert.equal(bgs[0], USER_BG_DARK, "左端 = 消息底色 ×0.75");
-	assert.notEqual(bgs[9], "\u001b[48;2;0;0;0m", "最后一个字符还没到背景黑（尾巴还没走完）");
-	assert.equal(bgs[29], "\u001b[48;2;0;0;0m", "第 30 格（文字 + 20）正好落到背景黑");
-	assert.equal(bgs[30], "\u001b[48;2;0;0;0m", "再往右一直是背景色");
-	// 同一条直线插值：#1b1b1b → #000000，跨度 30 格
-	assert.deepEqual(
-		bgs.slice(0, 30).map((bg) => Number(bg.split(";")[2])),
-		[27, 26, 25, 24, 23, 22, 21, 20, 20, 19, 18, 17, 16, 15, 14, 13, 12, 11, 10, 9, 8, 7, 7, 6, 5, 4, 3, 2, 1, 0],
-	);
-
-	// 碰到右边界：宽 20 时 10 + 20 已超过行宽，渐变正好铺满整行
-	const clamped = bgSequences(buildHeaderLine(theme, "13:33", 20) ?? "");
-	assert.equal(clamped.length, 20, "渐变正好铺满整行");
-	assert.equal(clamped.at(-1), "\u001b[48;2;0;0;0m");
-
-	// 更窄：文字被截到 8 格，8 + 20 > 8，仍以边界为准；只剩一格时停在起点
-	const narrow = bgSequences(buildHeaderLine(theme, "13:33", 8) ?? "");
-	assert.equal(narrow.length, 8);
-	assert.equal(plain(buildHeaderLine(theme, "13:33", 8) ?? "").length, 8);
-	assert.equal(bgSequences(buildHeaderLine(theme, "13:33", 1) ?? "")[0], USER_BG_DARK);
-});
-
-test("buildHeaderLine：256 色皮肤下渐变落回 256 色号（不硬塞 48;2）", () => {
-	const line = buildHeaderLine(headerTheme({ userMessageBg: "\u001b[48;5;236m" }), "13:33", 12);
-	assert.ok(line);
-	const bgs = bgSequences(line);
-	// 236 = #303030 → ×0.75 = #242424 → 最近的 235（#262626）；终点背景黑 = 16
-	assert.equal(bgs[0], "\u001b[48;5;235m");
-	assert.equal(bgs.length, 12, "宽 12：文字 10 + 尾巴 20 碰到边界 → 渐变铺满整行");
-	assert.equal(bgs.at(-1), "\u001b[48;5;16m", "最后一格落到背景黑");
-	assert.equal(bgs.every((bg) => bg.startsWith("\u001b[48;5;")), true, "全程留在 256 色模式");
-});
-
-test("buildHeaderLine：底色槽缺失或落在 0..15 系统色时不铺底色（与加底色之前逐字一致）", () => {
-	assert.equal(plain(buildHeaderLine(headerTheme(), "13:33", 46) ?? ""), "▏You 13:33");
-	assert.equal(
-		plain(buildHeaderLine(headerTheme({ userMessageBg: "\u001b[48;5;4m" }), "13:33", 46) ?? ""),
-		"▏You 13:33",
-	);
-});
-
-test("buildHeaderLine：换肤后渐变跟着换（缓存按消息底色 ANSI + 格数区分）", () => {
-	const first = buildHeaderLine(headerTheme({ userMessageBg: USER_BG }), "13:33", 12);
-	const second = buildHeaderLine(headerTheme({ userMessageBg: "\u001b[48;2;8;8;8m" }), "13:33", 12);
-	assert.equal(bgSequences(first ?? "")[0], USER_BG_DARK);
-	assert.equal(bgSequences(second ?? "")[0], "\u001b[48;2;6;6;6m");
-	assert.equal(bgSequences(second ?? "").at(-1), "\u001b[48;2;0;0;0m");
-});
-
-test("headerBackground：黑色保持黑色，缺皮肤 / 默认底色（49m）/ 零格一律不给底色", () => {
-	const black = headerBackground(headerTheme({ userMessageBg: "\u001b[48;5;16m" }), 3);
-	assert.ok(black);
-	assert.deepEqual(black.cells, ["\u001b[48;5;16m", "\u001b[48;5;16m", "\u001b[48;5;16m"]);
-	assert.equal(black.end, "\u001b[48;5;16m");
-	assert.equal(headerBackground(headerTheme({ userMessageBg: "\u001b[49m" }), 3), undefined);
-	assert.equal(headerBackground(undefined, 3), undefined);
-	assert.equal(headerBackground(headerTheme({ userMessageBg: USER_BG }), 0), undefined);
+	// 换肤同样与抬头无关：消息底色槽怎么变都不影响这一行
+	const other = buildHeaderLine(headerTheme({ userMessageBg: "\u001b[48;2;8;8;8m" }), "13:33", 80, 5, 2);
+	assert.equal(other, line);
 });
 
 test("buildHeaderLine：按宽度截断，绝不撑宽（pi-tui 超宽会崩）", () => {
 	const theme = headerTheme();
 	const clipped = (width: number): string => plain(buildHeaderLine(theme, "13:33", width) ?? "");
-	assert.equal(clipped(46), "▏You 13:33");
-	assert.equal(clipped(10), "▏You 13:33");
+	// `▏You 13:33 ` 共 11 列（含尾随那格；拿得下才走字块，否则按码点截）
+	assert.equal(clipped(46), "▏You 13:33 ");
+	assert.equal(clipped(11), "▏You 13:33 ");
+	assert.equal(clipped(10), "▏You 13:33", "少一格：裸字时丢掉行尾空格");
 	assert.equal(clipped(8), "▏You 13:");
 	assert.equal(clipped(6), "▏You 1");
 	assert.equal(clipped(5), "▏You ");
@@ -433,41 +458,161 @@ test("buildHeaderLine：按宽度截断，绝不撑宽（pi-tui 超宽会崩）"
 	assert.equal(buildHeaderLine(theme, undefined, 46), undefined);
 });
 
-test("buildHeaderLine：轮次号以 ` #N` 跟在时间后面，放不下就整段丢掉", () => {
+test("buildHeaderLine：轮次号在时间后面，放不下就整段丢掉（连它前面那格）", () => {
 	const line = buildHeaderLine(headerTheme(), "13:33", 46, 12);
 	assert.ok(line);
+	assert.equal(plain(line), "▏You 13:33 #12 ");
 	assert.equal(
-		line,
-		`${DIM_FG}\u258F\u001b[22;39m${KEYWORD_FG}\u001b[1mYou\u001b[22m\u001b[39m${DIM_FG} 13:33 #12\u001b[22;39m`,
+		line.includes(`${FG}${HEAD_BG}\u001b[1m▏You\u001b[22m 13:33 #12 \u001b[49m\u001b[39m`),
+		true,
+		"引导符、You、时间、轮次号在同一个底色块里",
 	);
-	assert.equal(plain(line), "▏You 13:33 #12");
-	// 完整 14 列；13 列时轮次号整段丢掉（不截出 `#1` 假号），时间照常
-	assert.equal(plain(buildHeaderLine(headerTheme(), "13:33", 14, 12) ?? ""), "▏You 13:33 #12");
-	assert.equal(plain(buildHeaderLine(headerTheme(), "13:33", 13, 12) ?? ""), "▏You 13:33");
-	assert.equal(plain(buildHeaderLine(headerTheme(), "13:33", 11, 12) ?? ""), "▏You 13:33");
+	// 完整 15 列；窄了就整段丢号（不截出 `#1` 假号）
+	assert.equal(plain(buildHeaderLine(headerTheme(), "13:33", 15, 12) ?? ""), "▏You 13:33 #12 ");
+	assert.equal(plain(buildHeaderLine(headerTheme(), "13:33", 14, 12) ?? ""), "▏You 13:33 ");
+	assert.equal(plain(buildHeaderLine(headerTheme(), "13:33", 12, 12) ?? ""), "▏You 13:33 ");
 });
 
-test("buildHeaderLine：压缩次数以 ` · N compactions` 跟在轮次号后（0 也画，整段走 dim）", () => {
+test("buildHeaderLine：第二段是 `▏N compactions▕`（两头竖线、前景 text、Think 底色），0 也画", () => {
 	const zero = buildHeaderLine(headerTheme(), "13:33", 46, 5, 0);
 	assert.ok(zero);
-	assert.equal(plain(zero), "▏You 13:33 #5 · 0 compactions");
-	assert.equal(zero.endsWith(`${DIM_FG} 13:33 #5 · 0 compactions\u001b[22;39m`), true, "时间 / 轮次号 / 压缩段同一个 dim 段");
-	assert.equal(plain(buildHeaderLine(headerTheme(), "13:33", 46, 5, 1) ?? ""), "▏You 13:33 #5 · 1 compactions");
+	assert.equal(plain(zero), "▏You 13:33 #5 ▏0 compactions▕", "`0` 左边是引导符，`compactions` 右边是它的镜像");
+	// 三个竖线字形各自压暗 30%（全暗 → #000000），字块里其余字符仍是原样的 fg
+	assert.equal(
+		zero.endsWith(`${FG}${THOUGHT_BG_SEQ}${GLYPH_FG}▏${FG}0 compactions${GLYPH_FG}▕${FG}\u001b[49m\u001b[39m`),
+		true,
+		"第二段：竖线压暗、文字原色，底是 Think 色",
+	);
+	// 三档区分：行首引导符 = 正文色原样，第二段两个字形 = 全黑
+	assert.equal(zero.startsWith(`${FG}${HEAD_BG}\u001b[1m▏You\u001b[22m`), true, "行首引导符不压暗（就是 fg）");
+	assert.equal(zero.includes(`${GLYPH_FG}▏`), true, "第二段开头的引导符全黑");
+	assert.equal(zero.includes(`${GLYPH_FG}▕`), true, "末尾的收尾符全黑");
+	assert.equal(zero.split(`${GLYPH_FG}▏`).length - 1, 1, "行首那个没有跟着一起压暗");
+	assert.equal(zero.includes(`${THOUGHT_BG_SEQ} `), false, "`0` 左边不再是一格空格");
+	assert.equal(zero.includes("compactions "), false, "`compactions` 右边也不再是一格空格");
+	assert.equal(plain(buildHeaderLine(headerTheme(), "13:33", 46, 5, 1) ?? ""), "▏You 13:33 #5 ▏1 compactions▕");
 	// 没有轮次号时也能单独跟时间（例如拿不到轮次的历史消息）
-	assert.equal(plain(buildHeaderLine(headerTheme(), "13:33", 46, undefined, 2) ?? ""), "▏You 13:33 · 2 compactions");
-	// 查不到（undefined / 非有限数）= 不画这一段，与改之前逐字一致
-	assert.equal(plain(buildHeaderLine(headerTheme(), "13:33", 46, 5) ?? ""), "▏You 13:33 #5");
-	assert.equal(plain(buildHeaderLine(headerTheme(), "13:33", 46, 5, Number.NaN) ?? ""), "▏You 13:33 #5");
+	assert.equal(plain(buildHeaderLine(headerTheme(), "13:33", 46, undefined, 2) ?? ""), "▏You 13:33 ▏2 compactions▕");
+	// 查不到（undefined / 非有限数）= 不画第二段
+	assert.equal(plain(buildHeaderLine(headerTheme(), "13:33", 46, 5) ?? ""), "▏You 13:33 #5 ");
+	assert.equal(plain(buildHeaderLine(headerTheme(), "13:33", 46, 5, Number.NaN) ?? ""), "▏You 13:33 #5 ");
 });
 
-test("buildHeaderLine：窄终端先丢压缩段、再丢轮次号，绝不截出假值", () => {
+test("buildHeaderLine：窄终端先丢压缩块、再丢轮次号，绝不截出假值", () => {
 	const clipped = (width: number): string => plain(buildHeaderLine(headerTheme(), "13:33", width, 5, 12) ?? "");
-	// 完整 30 列（`▏You 13:33 #5 · 12 compactions`）
-	assert.equal(clipped(30), "▏You 13:33 #5 · 12 compactions");
-	assert.equal(clipped(29), "▏You 13:33 #5", "少一格：压缩段整段丢掉，轮次号与时间照常");
-	assert.equal(clipped(14), "▏You 13:33 #5");
-	assert.equal(clipped(12), "▏You 13:33", "再窄就丢轮次号");
+	// 完整 30 列（`▏You 13:33 #5 ▏12 compactions `）
+	assert.equal(clipped(30), "▏You 13:33 #5 ▏12 compactions▕");
+	assert.equal(clipped(29), "▏You 13:33 #5 ", "少一格：压缩块整段丢掉，轮次号与时间照常");
+	assert.equal(clipped(14), "▏You 13:33 #5 ");
+	assert.equal(clipped(13), "▏You 13:33 ", "再窄就丢轮次号");
 	assert.equal(clipped(8), "▏You 13:", "最后才截时间");
+});
+
+/* ==========================================================================
+ * 抬头右端的会话时长（用户 2026-10-24 定：`+38m`，只上前景 dim、不铺底色、右对齐）
+ * ========================================================================== */
+
+/** 左段满配（`#5` + `0 compactions`）的可见文本：29 列。 */
+const LEFT_0 = "▏You 13:33 #5 ▏0 compactions▕";
+
+test("formatSessionAge：分钟以下→`+0m`、小时内→`+Nm`、超一小时→`+NhNm`", () => {
+	assert.equal(formatSessionAge(0), "+0m");
+	assert.equal(formatSessionAge(59_999), "+0m", "不足一分钟不报秒");
+	assert.equal(formatSessionAge(60_000), "+1m");
+	assert.equal(formatSessionAge(38 * 60_000 + 42_000), "+38m", "秒被丢掉，不是 38m42s");
+	assert.equal(formatSessionAge(59 * 60_000), "+59m");
+	assert.equal(formatSessionAge(60 * 60_000), "+1h0m", "跨过一小时保留分钟字段，位数不突变");
+	assert.equal(formatSessionAge(2 * 3_600_000 + 35 * 60_000), "+2h35m");
+	// 负值 / NaN / 未定义都当 0：时钟回拨不该画出 `+-3m`
+	assert.equal(formatSessionAge(-1), "+0m");
+	assert.equal(formatSessionAge(Number.NaN), "+0m");
+	assert.equal(formatSessionAge(undefined), "+0m");
+});
+
+test("buildHeaderLine：时长右对齐贴到行尾，只上前景、不铺底色、不带竖线字形", () => {
+	const line = buildHeaderLine(headerTheme(), "13:33", 40, 5, 0, 38 * 60_000) ?? "";
+	assert.equal(plain(line), `${"▏You 13:33 #5 ▏0 compactions▕".padEnd(35)} +38m`, "左段不动，补齐到 width−5 列再写右段（右段自带前导空格）");
+	assert.equal(Array.from(plain(line)).length, 40, "整行恰好 width 列（右对齐不靠终端截断）");
+	// 右段只有 dim 前景 + 末尾 `22;39` 复位：无底色（真实皮肤的 `dim` 槽还会自带 SGR 2，
+	// 所以复位必须带 `22` 否则行尾后面的东西一直是 faint）
+	assert.equal(line.endsWith(`${DIM_FG} +38m\u001b[22;39m`), true, "dim 前导空格 + `+38m`");
+	assert.equal(line.endsWith(`\u001b[49m`), false, "右段后面不收底（它没有底）");
+});
+
+test("buildHeaderLine：时长宽度不够就整段不画（绝不撑宽、也绝不夺走左段的信息）", () => {
+	// 左段 `▏You 13:33 #5 ▏0 compactions▕` = 29 列；右段 ` +38m` = 5 列
+	const exact = plain(buildHeaderLine(headerTheme(), "13:33", 34, 5, 0, 38 * 60_000) ?? "");
+	assert.equal(exact, `${LEFT_0} +38m`, "恰好放下：中间一列补白都不剩，但两者分得开");
+	const tight = plain(buildHeaderLine(headerTheme(), "13:33", 33, 5, 0, 38 * 60_000) ?? "");
+	assert.equal(tight.trimEnd(), LEFT_0, "差一列：右段整段丢，压缩块与轮次号一格不少");
+	assert.equal(tight.includes("+38m"), false);
+	// 窄终端也不会因为右段而丢左段：布局选择仍然只看左边两块
+	assert.equal(plain(buildHeaderLine(headerTheme(), "13:33", 14, 5, 0, 38 * 60_000) ?? "").trimEnd(), "▏You 13:33 #5");
+});
+
+test("buildHeaderLine：没有 dim 槽位 / 没有 age / 没有皮肤时右段都不画，且不抛", () => {
+	// 拿不到 `dim`：不画（拿 `text` 顶上会让它和字块里的正文同色，抢戏）
+	const noDim = buildHeaderLine(headerTheme({ dim: undefined }), "13:33", 40, 5, 0, 38 * 60_000) ?? "";
+	assert.equal(noDim.includes("+38m"), false);
+	// age 缺失：与旧行为逐字节一致（没有右段、也没有行尾补白）
+	assert.equal(plain(buildHeaderLine(headerTheme(), "13:33", 40, 5, 0) ?? ""), "▏You 13:33 #5 ▏0 compactions▕");
+	// 没有皮肤：左段仍是元色的纯文本，右段不画（没有 dim 就没有色）
+	assert.equal(plain(buildHeaderLine(undefined, "13:33", 40, 5, 0, 38 * 60_000) ?? ""), "▏You 13:33 #5 ▏0 compactions▕");
+});
+
+test("messageAge：第一次问就定死，同一个消息对象之后永远返回同一个值", () => {
+	class Component extends FakeUserMessage {
+		override render(width: number): string[] {
+			const pad = Math.max(0, width - this.text.length - 2);
+			return [`${ZONE}${BG} ${FG}${this.text}${FG_RESET}${" ".repeat(pad)}${BG_RESET}`];
+		}
+	}
+	class Mode extends FakeInteractiveMode {
+		override addMessageToChat(message: { role: string; content?: string; timestamp?: number }): void {
+			this.chatContainer.addChild(new Component(message.content ?? ""));
+		}
+	}
+
+	try {
+		setAgeLookup(undefined);
+		installUserMessageTimestamp({ InteractiveMode: Mode, UserMessageComponent: Component });
+
+		let now = 42 * 60_000;
+		setAgeLookup(() => now);
+
+		const mode = new Mode();
+		const first = { role: "user", content: "a", timestamp: localTime(13, 33) };
+		mode.addMessageToChat(first);
+		const component = mode.chatContainer.children[0] as Component;
+
+		assert.equal(messageAge(component), 42 * 60_000);
+		now = 99 * 60_000;
+		assert.equal(messageAge(component), 42 * 60_000, "**冻结**：时钟走了也不重算（否则会改掉视口之上的历史行）");
+
+		// 不同消息各自独立冻结
+		mode.addMessageToChat({ role: "user", content: "b", timestamp: localTime(13, 34) });
+		assert.equal(
+			messageAge(mode.chatContainer.children[1] as object),
+			99 * 60_000,
+			"另一条消息按它自己第一次问到的值",
+		);
+
+		setAgeLookup(() => {
+			throw new Error("stale session");
+		});
+		mode.addMessageToChat({ role: "user", content: "c", timestamp: localTime(13, 35) });
+		assert.equal(messageAge(mode.chatContainer.children[2] as object), undefined, "异常不带进渲染 tick");
+
+		setAgeLookup(() => Number.NaN);
+		mode.addMessageToChat({ role: "user", content: "d", timestamp: localTime(13, 36) });
+		assert.equal(messageAge(mode.chatContainer.children[3] as object), undefined, "非数当不知道");
+
+		setAgeLookup(undefined);
+		mode.addMessageToChat({ role: "user", content: "e", timestamp: localTime(13, 37) });
+		assert.equal(messageAge(mode.chatContainer.children[4] as object), undefined, "没装查询函数时也不画");
+	} finally {
+		setAgeLookup(undefined);
+	}
 });
 
 /** 假 `UserMessageComponent`：只有 render（真组件的形状与本测试无关）。 */
@@ -576,7 +721,7 @@ test("打压缩次数：按消息查「发出时压缩过几次」，没装查�
 	try {
 		mode.addMessageToChat(first);
 		mode.addMessageToChat(second);
-		assert.equal(messageCompactions(mode.chatContainer.children[0] as object), 0, "0 次也要能查出来（抬头要画 · 0 compactions）");
+		assert.equal(messageCompactions(mode.chatContainer.children[0] as object), 0, "0 次也要能查出来（抬头要画第二段 0 compactions）");
 		assert.equal(messageCompactions(mode.chatContainer.children[1] as object), 1);
 	} finally {
 		setCompactionLookup(undefined);
@@ -627,12 +772,13 @@ test("抬头 + 竖线：header 在最上面，OSC 133 起点留在第一行最�
 
 	assert.equal(lines.length, 2, "抬头 + 框内那一行");
 	assert.equal(lines[0]?.startsWith(ZONE), true, "zone 起点挪到抬头行最前");
-	assert.equal(plain(lines[0] ?? ""), "▏You 13:33 #1");
+	assert.equal(plain(lines[0] ?? "").trimEnd(), "▏You 13:33 #1");
+	assert.ok(lines[0]?.includes(HEAD_BG), true, "抬头第一段铺了压暗 40% 的 mdKeyword 底");
 	assert.equal(plain(lines[1] ?? "").startsWith("| "), true, "框内那行照常有竖线 + 缩进");
 	assert.equal(lines[1]?.includes(`${ACCENT_FG}|`) ?? false, true, "竖线颜色是 accent");
 });
 
-test("抬头里的压缩次数：装上查询函数后 `▏You 13:33 #1 · 2 compactions`，竖线照常", () => {
+test("抬头里的压缩次数：装上查询函数后 `▏You 13:33 #1 ▏2 compactions▕`，竖线照常", () => {
 	class Component extends FakeUserMessage {
 		override render(width: number): string[] {
 			const pad = Math.max(0, width - this.text.length - 2);
@@ -653,7 +799,8 @@ test("抬头里的压缩次数：装上查询函数后 `▏You 13:33 #1 · 2 com
 		const mode = new Mode();
 		mode.addMessageToChat({ role: "user", content: "正文", timestamp: localTime(13, 33) });
 		const lines = (mode.chatContainer.children[0] as Component).render(46);
-		assert.equal(plain(lines[0] ?? ""), "▏You 13:33 #1 · 2 compactions");
+		assert.equal(plain(lines[0] ?? "").trimEnd(), "▏You 13:33 #1 ▏2 compactions▕");
+		assert.ok(lines[0]?.includes(THOUGHT_BG_SEQ), true, "第二段铺压暗 30% 的 Think 底色");
 		assert.equal(plain(lines[1] ?? "").startsWith("| "), true, "竖线不受影响");
 	} finally {
 		setCompactionLookup(undefined);
@@ -686,12 +833,12 @@ test("压缩次数在渲染时现查：先建组件、后装查询函数，下�
 	const mode = new Mode();
 	mode.addMessageToChat({ role: "user", content: "正文", timestamp: localTime(13, 33) });
 	const component = mode.chatContainer.children[0] as Component;
-	assert.equal(plain(component.render(46)[0] ?? ""), "▏You 13:33 #1", "查询函数还没装上：先不画那一段");
+	assert.equal(plain(component.render(46)[0] ?? "").trimEnd(), "▏You 13:33 #1", "查询函数还没装上：先不画那一段");
 
 	setCompactionLookup(() => 3);
 	try {
 		const lines = component.render(46);
-		assert.equal(plain(lines[0] ?? ""), "▏You 13:33 #1 · 3 compactions", "下一帧查到了就补上");
+		assert.equal(plain(lines[0] ?? "").trimEnd(), "▏You 13:33 #1 ▏3 compactions▕", "下一帧查到了就补上");
 		assert.equal(plain(lines[1] ?? "").startsWith("| "), true, "竖线照常");
 	} finally {
 		setCompactionLookup(undefined);

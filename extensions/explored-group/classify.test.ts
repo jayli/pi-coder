@@ -237,3 +237,28 @@ test("phrases：兜底 —— 没点没斜杠的裸文件名也要出短语", ()
 	// 真没有位置参数时才回退到不带作用域的形式
 	assert.deepEqual(phrasesForBash("grep -n x", CWD), ['Search "x"']);
 });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// glob 工具（`clients/pi/extensions/glob-tool/`）的分组接入
+// ─────────────────────────────────────────────────────────────────────────────
+
+test("classify：glob 归入 list 类别，pattern 未到时 pending", () => {
+	assert.equal(classifyToolCall("glob", { pattern: "*.ts" }).kind, "list");
+	// 参数还在流：**不能**下「不可折叠」的结论，否则会提前断组
+	assert.equal(classifyToolCall("glob", {}).pending, true);
+	assert.equal(classifyToolCall("glob", { pattern: "" }).pending, true);
+	// 有 path 但没 pattern 仍是 pending（pattern 是必填）
+	assert.equal(classifyToolCall("glob", { path: "src" }).pending, true);
+});
+
+test("phrases：glob 的短语形态", () => {
+	assert.equal(phraseForToolCall("glob", { pattern: "**/*.ts", path: "src" }, CWD), "Glob **/*.ts in src");
+	assert.equal(phraseForToolCall("glob", { pattern: "*.md" }, CWD), "Glob *.md");
+	// 与 find 同样缩略长路径（glob 的 path 常常是绝对路径）
+	assert.equal(
+		phraseForToolCall("glob", { pattern: "**/*.ts", path: "/Users/bachi/jaylli/ttt/a/b/c" }, CWD),
+		"Glob **/*.ts in …/a/b/c",
+	);
+	// 没有 pattern 时出不了短语（调用方跳过该行）
+	assert.equal(phraseForToolCall("glob", { path: "src" }, CWD), null);
+});

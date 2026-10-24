@@ -41,17 +41,15 @@ How you work in any project on this machine. A project's own AGENTS.md/CLAUDE.md
 
 ## Skills
 
-Skills are discovered natively: every skill available in this session is listed in the `<available_skills>` section of the system prompt, each with a `name`, a `description` and a `location` (the absolute path of its `SKILL.md`). There is no `Skill` tool here — loading a skill means `read`ing that path.
+Skills are discovered natively: every skill available in this session is listed in the `<available_skills>` section of the system prompt. There is no `Skill` tool here — loading a skill means `read`ing its `SKILL.md` path.
 
 - **Trigger.** If the task clearly matches a skill's description, you **must** use that skill for that turn: `read` its `SKILL.md` before acting on the task, then follow it. If the user names a skill, use it. If several match, use the minimal set that covers the request and state the order. A skill that is not in `<available_skills>` is not installed — say so rather than inventing a path to `read`.
-- **Check first, even at 1%.** The skill check comes **before any response or action** — including clarifying questions, exploring the codebase, and checking files. If you catch yourself thinking "this is just a simple question", "let me look at the code first", "I need more context", or "this doesn't need a formal skill", that is the rationalization; stop and check. Read the current `SKILL.md` rather than working from memory — skills evolve.
 - **Announce.** Say in one line which skill you are using and why. If you skip a skill that obviously matches, say why instead of silently ignoring it.
-- **Process before implementation.** When several skills apply, the process skill sets the approach and the implementation skills carry it out: "let's build X" → `brainstorming` first; "fix this bug" → `systematic-debugging` first.
-- **Plan mode.** One design flow per task: `brainstorming` and plan mode are either-or. Already loaded `brainstorming` this run → stay in it (clarify point by point, offer 2-3 options with trade-offs, get approval) and do not enter plan mode. Not loaded and the task hits the plan gate → call `enter_plan_mode` as usual. If you are already inside plan mode, that skill's file layout does not apply: write nothing to `docs/superpowers/specs/` and do not commit — every write is blocked there, and the design document is produced by `exit_plan_mode` into `.pi/plans/`. Its "ask one question at a time" is the `ask_user_question` tool here.
+- **Plan mode.** The either-or rule with `brainstorming` lives in `## Uncertainty`. If you are already inside plan mode, that skill's file layout does not apply: write nothing to `docs/superpowers/specs/` and do not commit — every write is blocked there, and the design document is produced by `exit_plan_mode` into `.pi/plans/`. Its "ask one question at a time" is the `ask_user_question` tool here.
 - **Tool mapping.** Skills speak in actions, not tool names: "create a todo" → `task_set` / `task_update` / `task_get`; "dispatch a subagent" → `subagent` (call `subagents_enable` first when the tool is not visible yet; if it stays unavailable, do the work inline or say so — never invent a `Task` call); "verify completion" → the `/goal` command; "load a skill" → `read <absolute SKILL.md path>`.
 - The user's request wins over any skill's guidelines; a skill never authorizes work outside that request.
 - When a skill makes you pause, ask, or leave work unfinished, name it, quote the rule that required it, and report that in your final message.
-- A skill that gates implementation behind design approval (brainstorming and friends) fits architectural work. `brainstorming` specifically **replaces** the plan gate for that run rather than widening or narrowing it — see `## Uncertainty`.
+- A skill that gates implementation behind design approval (brainstorming and friends) fits architectural work.
 
 ## Destructive actions
 
@@ -78,12 +76,12 @@ The delete must be clearly inside the user's request; an unclear target or scope
 
 ### When the sandbox blocks you
 
-Every bash command runs inside `sandbox-exec` (macOS seatbelt; `PI_SANDBOX=off` disables the layer). Writes, reads and network are unrestricted — **only deletion is bounded**: the profile denies `file-write-unlink`, re-allows it for the project dir, the temp roots, regenerable caches and user-authorized directories, then denies it again for the never-delete paths (`NEVER_DELETE_*` in `sandbox.ts`). The system-root catalog (`DANGEROUS_ROOTS` / `DANGEROUS_EXACT`) decides the dialog tier, not the kernel — those paths fail via the boundary anyway. Repo roots (where `.git` lives) are a model-level rule, not a kernel one.
+Every bash command runs inside `sandbox-exec` (macOS seatbelt; `PI_SANDBOX=off` disables the layer). Writes, reads and network are unrestricted — **only deletion is bounded**: it is allowed in the project dir, the temp roots, regenerable caches and user-authorized directories, and denied everywhere else and for the never-delete paths.
 
 - **`rename(2)` is charged as an unlink on the *source*.** So these fail with `Operation not permitted` outside the boundary even though their intent is "write": `sed -i '' 's/a/b/' ~/.some.conf` (atomic replace = temp file + rename), `mv ~/.a ~/.b`, and `git init` / `git commit` in an outside-boundary repo (every ref lands via `*.lock` + rename). An atomic replace really does make the old inode disappear — this is the semantics, not a hole.
 - **The exits**: the denial dialog's remember option, which persists the directory to `~/.pi/agent/sandbox-allowlist.json` (global across projects, honored in headless runs); `/sandbox-boundary allow <dir>` for pre-authorization; or `PI_SANDBOX_EXTRA_WRITE=<: separated paths>` for one session. A replace-style outside-boundary *edit* (`sed -i`, `mv`) needs the same exits — a plain append or overwrite does not, since writes are unrestricted.
 - **Never route around a denial with a different vehicle** — `cp` + `rm` instead of `mv`, a python `os.remove`, flipping `PI_SANDBOX=off` mid-task. That is `## Blast radius`'s "an obstacle is never a reason to destroy", and the kernel only reports `EPERM` without naming the path, so a workaround also destroys the diagnostic.
-- **Never-delete paths have no exit.** Identity, credentials and hand-written config (`~/.zshrc`, `~/.ssh`, `~/.gnupg`, `.env`, …) are refused with no dialog and no override of any kind. This binds shell commands only — pi's own `edit` / `write` are direct `fs` calls and still work on those paths; a shell replace-edit (`sed -i`, `mv`) does not. Tool state directories (`~/.config`, `~/.pi`, `~/.claude`, `~/.codex`) are **not** in this tier (user 2026-09-25): they hold regenerable byproducts (locks, caches, session logs) alongside config, so they get the ordinary three-option dialog and can be remembered.
+- **Never-delete paths have no exit.** Identity, credentials and hand-written config (`~/.zshrc`, `~/.ssh`, `~/.gnupg`, `.env`, …) are refused with no dialog and no override of any kind. This binds shell commands only — pi's own `edit` / `write` are direct `fs` calls and still work on those paths; a shell replace-edit (`sed -i`, `mv`) does not. Tool state directories (`~/.config`, `~/.pi`, `~/.claude`, `~/.codex`) are **not** in this tier: they hold regenerable byproducts (locks, caches, session logs) alongside config, so they get the ordinary three-option dialog and can be remembered.
 - **A directory the user already authorized needs no question from you** — the delete succeeds silently inside the sandbox; asking again re-creates exactly the nagging the tiered design exists to remove.
 
 ## Blast radius
@@ -105,15 +103,17 @@ Classify an action before taking it. The class decides who may authorize it — 
 
 ## Tool choice
 
-`grep`, `find`, `ls` and `read` are first-class tools, not bash conveniences. bash's description says `Execute bash commands (ls, grep, find, etc.)` — that clause is a left-over, **not** a recommendation. A lookup gate also blocks plain single lookups sent through bash, so picking the native tool is the cheaper path too.
+`grep`, `glob`, `find`, `ls` and `read` are first-class tools, not bash conveniences. A lookup gate also blocks plain single lookups sent through bash, so picking the native tool is the cheaper path too.
 
-- **A single-purpose lookup goes to the native tool.** "Find this string" → `grep`; "which files match this glob" → `find`; "what is in this directory" → `ls`; "show me this file" → `read`. They truncate at a stated limit instead of flooding context, and carry no quoting hazards.
-- **Compound probes stay in bash.** Several answers in one round trip, pipelines, output reshaping (`awk`, `sort`, `jq`), anything that writes — a `grep … ; wc -l … ; ls …` chain is not a smell. Do not fragment one compound probe into four native calls.
-- **`cd <dir> && <lookup>` is a single-purpose lookup** — the `cd` is navigation, and the native tools take `path`, which also survives the working directory changing.
+- **A single-purpose lookup goes to the native tool.** "Which files match this pattern" → `glob`; "find this string" → `grep`; "what is in this directory" → `ls`; "show me this file" → `read`. They truncate at a stated limit and carry no quoting hazards.
+- **`glob` before `find` for file names.** Both can do it; they differ in where the candidates come from. `glob` reads the git index (tracked + untracked, never `.git/` internals, no directories). `find` walks the filesystem — it honors `.gitignore` inside a repo too, but it also lists directories and reaches into `.git/`, and it is the one that works outside a repo or on a gitignored build tree.
+- **`glob` the scope first when opening an investigation.** Before guessing a path or `grep -r`-ing a whole tree, one `glob` for the area (`gateway/**/*.py`, `src/**/*.ts`) gives the file list everything else hangs off — cheaper than a `read` that turns out to be ENOENT or a `grep` whose pattern was really a file name. `glob` is an extension tool, not a pi builtin: where it is not in your tool list (subagents whose `tools` allowlist omits it), `find` is the fallback.
+- **Compound probes stay in bash.** Several answers in one round trip, pipelines, output reshaping (`awk`, `sort`, `jq`), anything that writes — `grep … ; wc -l … ; ls …` is not a smell. Do not fragment one compound probe into four native calls.
+- **`cd <dir> && <lookup>` is a single-purpose lookup** — the `cd` is navigation, and the native tools take `path`, which survives a cwd change.
 - **Independent lookups go out in parallel, not chained.**
-- **`.gitignore` bites.** Native `grep` / `find` skip ignored paths (`node_modules/`, `dist/`); point `path` at an ignored tree explicitly to search it (an explicit path is not filtered). A lookup needing a flag the native tools lack (`grep -v`, `find -mtime`, a counting pipe) still belongs to bash — the gate passes those.
-- **Prefer `read` over `cat` / `head` / `sed -n`**, unless the text needs a shell transform. Images arrive as attachments through `read` only. Treat this as a live habit to correct, not a detail already absorbed.
-- **Truncate with `limit`, not `| head`.** A stated limit also reports what it cut; a pipe hides that.
+- **`.gitignore` bites.** Native `grep` / `glob` / `find` skip ignored paths (`node_modules/`, `dist/`); point `path` at an ignored tree explicitly to search it (an explicit path is not filtered). A lookup needing a flag the native tools lack (`grep -v`, `find -mtime`, a counting pipe) still belongs to bash — the gate passes those.
+- **Prefer `read` over `cat` / `head` / `sed -n`**, unless the text needs a shell transform. Images arrive as attachments through `read` only.
+- **Truncate with `limit`, not `| head`.** A stated limit also reports what it cut.
 
 ## Shell commands
 

@@ -406,7 +406,21 @@ import {
 import { getAllowlistStore, getSessionScopes, type AllowlistStore } from "./bash-command-collapse/allowlist.ts";
 import { getSandboxMode } from "./bash-command-collapse/sandbox-mode.ts";
 import { abbreviateCommandPaths, pathAbbrevThreshold } from "./bash-command-collapse/abbrev-path.ts";
-import { detectBashLookup, renderLookupRedirect } from "./bash-command-collapse/lookup-redirect.ts";
+import { detectBashLookup, isSubagentSession, renderLookupRedirect } from "./bash-command-collapse/lookup-redirect.ts";
+
+/**
+ * 取 `tool_call` 上下文绑定的会话文件。
+ *
+ * 为什么不能读 `process.env.PI_SESSION_FILE`：前台派发（`async: false`）的子会话与
+ * 父会话**共用一个进程**，那个 env 始终是父会话的值（2026-10-23 实测）。`ctx` 是绑定到
+ * 当前会话的，它的 `sessionManager.getSessionFile()` 才指向子会话自己的文件。
+ * 取不到就返回 undefined，由 `isSubagentSession` 退回 env 判据。
+ */
+function sessionFileOf(ctx: unknown): string | undefined {
+	const manager = (ctx as { sessionManager?: { getSessionFile?: () => unknown } } | undefined)?.sessionManager;
+	const file = manager?.getSessionFile?.();
+	return typeof file === "string" ? file : undefined;
+}
 import { ensureRegistered, isLeader, markReadyIfSettled, setLeaderInvalidate } from "./explored-group/registry.ts";
 import { EMPTY_COMPONENT, createGroupTree } from "./explored-group/render.ts";
 
@@ -1632,8 +1646,22 @@ export default function (pi: ExtensionAPI) {
 		// 换成下面这句后 headless 实测立刻改选原生工具（「哪几个文件含 X」→ `grep({pattern, path})`），
 		// 而复合探查仍走 bash（「一次给我三件事」→ 仍是 `;` 串联的单条 bash）。
 		// 注意它**只改描述措辞**：bash 照旧能跑 ls/grep/find，loop 与渲染都不受影响。
+		//
+		// 2026-10-24：枚举里补上 `glob`。原句是 2026-10-06 为拉高 grep/find/ls 原生使用率
+		// 写的，那时还没有 `glob` 工具（`clients/pi/extensions/glob-tool/` 2026-10-24 才出现），
+		// 于是这句**每轮都读**的首行枚举把 glob 漏在外面 —— 而它是清单里唯一说「该用哪个查文件」
+		// 的句子。A/B（同题同模型、只加三句 append-system-prompt）：首发从 bash/grep 变成
+		// `glob gateway/**/*.py`。`glob` 排在 `find` 之前，与 `## Tool choice` 那条
+		//「`glob` before `find` for file names」同序。
+		//
+		// 2026-10-24 二改：抽象表述「prefer glob/grep/find/ls/read for single lookups」实测挡不住
+		// `sed -n` / `cat`（全库 `sed`+`cat` 的闸门拦截 100% / 85%，说明它们确实一直走 bash），
+		// 因为「prefer」不指向任何具体命令。改成**逐词点名**，照 Claude Code 的做法
+		// （它的写法是 "Avoid using this tool to run cat, head, tail, sed, awk, or echo"）。
+		// 没有列入 `awk`：那是变换器，闸门刻意放行（原生工具做不了）；也没列 `echo`：
+		// pi 侧的 `## Shell commands` 另有约束。
 		promptSnippet:
-			"Execute a shell command (pipelines, builds, scripts, anything writing or compounding several steps; prefer grep/find/ls/read for single lookups)",
+			"Execute a shell command (pipelines, builds, scripts, anything writing or compounding several steps). Do not run cat/head/tail/sed/grep/find/ls through bash — those have dedicated tools.",
 		// 内置 guideline 只有一条 PI_* 环境变量的提示，保留（不覆盖整组）。
 		promptGuidelines: base.promptGuidelines,
 		constrainedSampling: base.constrainedSampling,
@@ -2266,8 +2294,21 @@ export default function (pi: ExtensionAPI) {
 	//
 	// `PI_BASH_LOOKUP_GATE=off` 关闭。dangerous 模式（shift+tab）同样不拦 —— 那是用户
 	// 明确要「什么都别管」的态，与沙箱开关同一口径。
-	const lookupGateOn = process.env.PI_BASH_LOOKUP_GATE?.trim().toLowerCase() !== "off";
-	pi.on("tool_call", (event) => {
+	//
+	// **pi-subagents 的子会话里一律不拦**：async runner 的子会话有 `PI_SUBAGENT_CHILD=1`，
+	// 而**前台（`async: false`）子会话跑在父进程内、没有这个变量**（2026-10-23 实测），
+	// 所以还要看 `ctx.sessionManager` 的会话文件是不是嵌套的 `run-N/session.jsonl`。
+	// 不能改读 `process.env.PI_SESSION_FILE`：扩展与父会话共用一个 `process.env`，那里
+	// 永远是父会话的值。这条闸是交互会话的规则，子代理的 tools 白名单由它自己的 agent
+	// 定义（注意它们**读得到**蒸馏版规则：白名单里的 `core-rules` 注入 AGENTS.core.md，
+	// Tool choice 段在里面，2026-10-24 实测）。实测（2026-10-23 super-dingding 会话）12 个 worker 子代理
+	// 被拦 64 次，每次都白烧一轮却不改用原生工具。详见 `isSubagentSession` 的注释。
+	//
+	// 每调用一次算：`ctx` 绑定在当前会话上，所以不能算在 handler 外。
+	pi.on("tool_call", (event, ctx) => {
+		const lookupGateOn =
+			process.env.PI_BASH_LOOKUP_GATE?.trim().toLowerCase() !== "off" &&
+			!isSubagentSession(process.env, sessionFileOf(ctx));
 		if (!lookupGateOn || event.toolName !== "bash") return undefined;
 		if (getSandboxMode() === "dangerous") return undefined;
 		const command = (event.input as { command?: unknown } | undefined)?.command;

@@ -438,9 +438,7 @@ test("stripSpokenNoise: 凭据剥掉（Bearer / sk- / 赋值式）", () => {
 	// 这里只断言「密钥字符本身没留下来」。
 	assert.ok(!/sk-abc123/.test(stripSpokenNoise("还是 `Bearer sk-abc123` 认证")), "Bearer 后跟的 key 要剥");
 	assert.ok(
-		!/0123456789abcdef0123456789abcdef/.test(
-			stripSpokenNoise("Key（sk-0123456789abcdef0123456789abcdef）已写入"),
-		),
+		!/0123456789abcdef0123456789abcdef/.test(stripSpokenNoise("Key（sk-0123456789abcdef0123456789abcdef）已写入")),
 		"sk- 前缀的密钥要剥",
 	);
 	assert.equal(stripSpokenNoise("密码：abcd1234 已改"), "已改");
@@ -529,7 +527,7 @@ test("decideSpeak: 整段都是编号的结论不该只剩噪音", () => {
 });
 
 test("cleanSummaryText: 模型不守约、摘下编号时机械层兼底", () => {
-	const raw = "已经提交并推送了（commit `e752224`，+232/−57 到两个远端）。";
+	const raw = "已经提交并推送了（commit `e752224`，+232/−57 到两个目标远端）。";
 	const cleaned = cleanSummaryText(raw);
 	assert.ok(!/e752224|232|57/.test(cleaned), `摘要里的编号也要剥：${cleaned}`);
 	assert.ok(cleaned.includes("已经提交并推送了"), cleaned);

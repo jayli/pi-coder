@@ -163,7 +163,7 @@ export function writeAliyunKey(file: string, key: string | undefined): void {
 	}
 }
 
-/** 给 `/voice key` 的状态行用：`sk-abc…1234`。 */
+/** 给 `/voice key` 的状态行用：`sk-012…cdef`。 */
 export function maskKey(key: string): string {
 	const trimmed = key.trim();
 	if (trimmed.length <= 8) return "****";

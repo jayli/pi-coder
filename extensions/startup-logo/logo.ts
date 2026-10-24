@@ -144,17 +144,30 @@ export interface HeaderSections {
 	hints?: string;
 	/** 已着色的说明行：宽终端是「前缀 + 字形」三行，窄终端退回一整句（见 `poweredByLines`）。 */
 	onboarding?: readonly string[];
+	/**
+	 * 顶部是否补一条空行（默认不补）。
+	 *
+	 * pi 正常装内置 header 时，是 `Spacer(1) + header + Spacer(1)`（`interactive-mode.js` 的 `init()`），
+	 * 所以上面那条空行由 pi 自己出。被 `boot-suppress.ts` 静音后 pi 走 minimal 分支
+	 * （只挂一个空的 `Text("",0,0)`，实测渲染 0 行），这条空行就没了 —— 印记直接贴着终端顶边。
+	 * 于是调用方在**确实静音了**的时候传 `true` 自己补上，位置与宽度与 pi 那条 `Spacer(1)` 一致。
+	 */
+	leading?: boolean;
 }
 
 /**
- * 完整 header 行序：logo（含侧栏文字）→ **空行** → 提示行 → 说明段。
+ * 完整 header 行序：（可选空行）→ logo（含侧栏文字）→ **空行** → 提示行 → 说明段。
  *
  * 印记下方那一条空行**保留**（用户 2026-10-05 定）：大 logo 与下面的文字之间要留一口气。
  * 去掉的只是**提示行与说明段之间**那一条 —— 快捷键提示与 `@bachi/pi-coder` 字形贴成一块。
  * 两处空行不是同一条规则：一次改两处就是这两件事曾经被混为一谈的原因。
  *
- * 缺段时的处理：没有印记段就没有那条空行；提示行与说明段各自能单独出现（窄终端回退时
- * 印记段仍在，所以空行也在）。
+ * 顶部那条（`leading`）是第三条独立规则（用户 2026-10-22 定）：静音了 pi 内置 header 之后，
+ * pi 那条 `Spacer(1)` 也跟着没了，印记直接贴终端顶边很难看 —— 由调用方按「本进程是否真静音」
+ * 传进来，补在标识段之前。
+ *
+ * 缺段时的处理：没有印记段就没有它下面那条空行；提示行与说明段各自能单独出现（窄终端回退时
+ * 印记段仍在，所以空行也在）。顶部那条只看 `leading`，不看其它段是否为空。
  *
  * 提示行与说明行在这里补上 `MARK_INDENT` —— header 的每一行都不顶格，且与印记左边对齐；
  * logo 段自己已经带缩进，所以不重复补。空行保持空行。
@@ -166,6 +179,8 @@ export function composeHeaderLines(sections: HeaderSections): string[] {
 	// 空行只属于「印记段 → 文字段」这一条缝：两边都有内容时才补。
 	if (lines.length > 0 && text.length > 0) lines.push("");
 	lines.push(...text);
+	// 顶部那条：替代 pi 在被静音时没画的 `Spacer(1)`。
+	if (sections.leading) lines.unshift("");
 	return lines;
 }
 

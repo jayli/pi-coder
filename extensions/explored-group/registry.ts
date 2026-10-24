@@ -486,7 +486,7 @@ export function replayMessage(message: unknown): number {
 			//（实测该路由 583 条消息里 91 个空块，539 条工具轮 539/539 都带 thinking）。而 pi 对
 			// 「整段 thinking 全为空」一个组件都不画（`assistant-message.js` 的 `thinkingBlocks.length === 0`
 			// 直接 `continue`），于是这个看不见的块把组拆了 —— 用户看到的是「中间明明没有 Think，
-			// 相邻两个 Explored 却没合并」（2026-10-18 在测试会话里复现：
+			// 相邻两个 Explored 却没合并」（2026-10-18 在 example-workspace 会话里复现：
 			// `read … limit:60` 那一轮的 thinking 是 0 字符）。口径与下面的 `text` 分支一致。
 			if (thinkingText(block).trim() === "") {
 				// 但**最后一块**可能只是还没吐出第一个 delta：pi 在 `content_block_start` 就把块塞进

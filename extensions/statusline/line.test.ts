@@ -244,7 +244,7 @@ describe("formatMainLine", () => {
 	it("paints the badge like the thinking level", () => {
 		assert.ok(
 			formatMainLine(painted, sourceOf(0, FLASH, "xhigh", 1_048_576), gitOf("main"), stateOf()).startsWith(
-				"dim(\u{1f17c}) accent(qwen3.8-flash)dim(/)syntaxFunction(xhigh)dim(/)syntaxFunction(1M)dim( | )",
+				"dim(\u{1f17c}) accent(qwen3.8-flash)dim(/)mdCode(xhigh)dim(/)syntaxFunction(1M)dim( | )",
 			),
 		);
 	});
@@ -276,7 +276,7 @@ describe("formatMainLine", () => {
 	it("paints labels and separators dim, model / branch / percent by role", () => {
 		assert.equal(
 			formatMainLine(painted, sourceOf(0), gitOf("main"), stateOf({ diffStat: { added: 1, deleted: 2 } })),
-			"dim(\u{1f17c}) accent(qwen3.8-flash)dim(/)syntaxFunction(xhigh)dim( | )dim(Ctx) success(0.0%)dim( | )" +
+			"dim(\u{1f17c}) accent(qwen3.8-flash)dim(/)mdCode(xhigh)dim( | )dim(Ctx) success(0.0%)dim( | )" +
 				"dim(\u15cc) accent(main)dim( | )dim(()success(+1)dim(,)error(-2)dim())",
 		);
 	});

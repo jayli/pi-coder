@@ -11,7 +11,7 @@
     "--config.node-linker=hoisted"
   ],
   "extensions": ["-builtin:codemode", "-builtin:tool-search"],
-  "defaultTools": ["read", "bash", "edit", "write", "grep", "find", "ls", "codemode", "tool_search"],
+  "defaultTools": ["read", "bash", "edit", "write", "grep", "find", "glob", "ls", "codemode", "tool_search"],
   "tuiMode": "regular",
   "packages": [
     {
@@ -37,7 +37,7 @@
       ]
     },
     "watchdog": {
-      "enabled": true
+      "enabled": false
     },
     "agentOverrides": {
       "researcher": {
@@ -55,6 +55,13 @@
       },
       "worker": {
         "tools": "inherit"
+      },
+      "reviewer": {
+        "inheritProjectContext": false,
+        "tools": ["read", "grep", "find", "glob", "ls", "watchdog_diff", "contact_supervisor"]
+      },
+      "scout": {
+        "tools": ["read", "grep", "find", "glob", "ls", "bash", "write", "contact_supervisor"]
       }
     }
   }

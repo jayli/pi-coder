@@ -15,7 +15,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { detectBashLookup, renderLookupRedirect } from "./lookup-redirect.ts";
+import { detectBashLookup, isSubagentSession, renderLookupRedirect } from "./lookup-redirect.ts";
 
 /** 该拦：返回建议的工具名。 */
 function gated(command: string): string | null {
@@ -40,15 +40,53 @@ test("拦：带 `cd X &&` 导航前缀的单一探查（实测最常见的形态
 test("拦：`| head -N` 只是截断习语，不算复合（原生工具有 limit）", () => {
 	assert.equal(gated("grep -rn foo . | head -30"), "grep");
 	assert.equal(gated("ls -la src/ | head -5"), "ls");
-	assert.equal(gated('find . -name "*.ts" | head'), "find");
+	assert.equal(gated('find . -name "*.ts" | head'), "glob");
 	assert.equal(gated("grep -rn foo . | tail -3"), "grep");
 });
 
 test("拦：列目录与按名找文件", () => {
 	assert.equal(gated("ls -la src/"), "ls");
 	assert.equal(gated("ls -t sessions/"), "ls");
-	assert.equal(gated('find . -name "*.jsonl"'), "find");
+	// `find … -name` 是「按名字找文件」= glob 的本职（2026-10-24 改：原先一律给 find，
+	// 等于把模型从它刚被拦下的那条路上原地挪一步）。
+	assert.equal(gated('find . -name "*.jsonl"'), "glob");
+	assert.equal(gated('cd /x && find . -name "*.ts"'), "glob");
+	assert.equal(gated('find . -type f -name "*.md"'), "glob");
+	// glob 表达不了的形态仍归 find：`-type d` 找目录、`-iname` 大小写不敏感。
 	assert.equal(gated("find /x -type f"), "find");
+	assert.equal(gated("find /x -type d"), "find");
+	assert.equal(gated('find /x -iname "*.TS"'), "find");
+	// `fd -e ts` 的 `-e` 在 `find` 的 schema 里表达不了（实测放行），只钉这个事实。
+	assert.equal(gated("fd -e ts"), null);
+});
+
+test("hint：find -name → glob 的 pattern/path 必须真能跑通", () => {
+	const g = detectBashLookup('find . -name "*.ts"')!;
+	assert.equal(g.tool, "glob");
+	assert.equal(g.hint?.args?.pattern, "*.ts");
+	// `positionals()` 会把 `-name` 的**值**（`*.ts`）也当位置参数，拿它当 path 就是一条
+	// 跑不通的建议 —— 搜索起点只能取第一个谓词之前的位置参数。
+	assert.equal(g.hint?.args?.path, ".");
+	assert.equal(detectBashLookup('cd /p && find src -name "*.py"')?.hint?.args?.path, "/p/src");
+	// `find -name '*.ts' | head` 是截断习语（原生有 limit），仍是 glob
+	assert.equal(detectBashLookup('find . -name "*.ts" | head')?.tool, "glob");
+	// 拦截语里必须说清「只按名字、不搜内容」与递归语义
+	const text = renderLookupRedirect(g);
+	assert.match(text, /不搜内容/);
+	assert.match(text, /git ls-files/);
+});
+
+test("不转 glob：大括号在 find 与 glob 里语义相反（实测）", () => {
+	// `find -name '{a,b}.ts'` 匹配的是**字面**文件名 `{a,b}.ts`（fnmatch 不展开，
+	// /tmp/fnglob 实测），而 glob 走 minimatch 会展开成 `a.ts` / `b.ts`。
+	// 转过去是静默换结果 —— 本闸的根本取向是「照抄就要能跑通且不漏」，所以保留 find。
+	assert.equal(gated('find . -name "{a,b}.ts"'), "find");
+	assert.equal(gated("find . -name 'test*.js,*.ts'"), "find");
+	// 方括号两边一致（`[!a]` 与 `[^a]` 实测同义），仍转
+	assert.equal(gated('find . -name "[!a]*.ts"'), "glob");
+	assert.equal(gated('find . -name "[^a]*.ts"'), "glob");
+	// 反斜杠转义：`path.matchesGlob` 不认，保留 find
+	assert.equal(gated('find . -name "a\\*b"'), "find");
 });
 
 test("拦：取文件内容（read 一族）", () => {
@@ -179,6 +217,10 @@ test("不拦：从 **stdin** 读的 grep —— 原生 grep 只能搜文件，�
 test("不拦：一次列多个路径 —— 原生 ls 只收一个 path，照抄会静默漏掉其余", () => {
 	assert.equal(gated("ls /a /b"), null);
 	assert.equal(gated("cd /x && ls src test docs"), null);
+	// find/glob 同口径：`find src tests -name "*.ts"` 照抄 `glob({path:"src"})` 会漏掉 tests。
+	// 2026-10-24 补：这是 find 分支一直存在的漏拦（hint 只取第一个起点），改指 glob 后一并堵上。
+	assert.equal(gated('find src tests -name "*.ts"'), null);
+	assert.equal(gated('find a b -type d'), null);
 });
 
 test("拦：`head -n N f` 也要给出 limit（与 `head -N f` 同口径）", () => {
@@ -239,4 +281,52 @@ test("拦截语必须交代 .gitignore 例外（否则「换原生」会变成�
 
 	// 关闭方式要写在拦截语里（用户能自救）
 	assert.ok(renderLookupRedirect(g).includes("PI_BASH_LOOKUP_GATE=off"));
+});
+
+test("子代理会话里不拦：async runner 的 env 标记与前台子会话的嵌套会话文件都认", () => {
+	// 判据 1：pi-subagents 的 async runner 在自己进程上设 PI_SUBAGENT_CHILD=1，
+	// 其后代继承。父会话里该变量不存在（index.js 里 delete 过）。
+	assert.equal(isSubagentSession({ PI_SUBAGENT_CHILD: "1" } as NodeJS.ProcessEnv), true);
+	for (const env of [{}, { PI_SUBAGENT_CHILD: "" }, { PI_SUBAGENT_CHILD: "0" }, { PI_SUBAGENT_CHILD: "true" }]) {
+		assert.equal(
+			isSubagentSession(env as NodeJS.ProcessEnv),
+			false,
+			`${JSON.stringify(env)} 不是子代理会话，闸门必须继续生效`,
+		);
+	}
+});
+
+test("前台子会话（async:false）靠嵌套会话文件认出 —— 实测它拿不到 PI_SUBAGENT_CHILD", () => {
+	// 2026-10-23 实测：async:false 的子会话跑在父进程内，env 里只有 PI_CODING_AGENT /
+	// PI_MODEL / PI_PROVIDER / PI_REASONING_LEVEL / PI_SESSION_FILE / PI_SESSION_ID，
+	// PI_SUBAGENT_CHILD 为空。会话文件形状是唯一可靠的差异。
+	const child =
+		"/Users/bachi/.pi/agent/sessions/--proj--/2026-10-23T14-18-37-618Z_01a16920-c4b2-777e-8749-29083b802c8f/f347e41b-c3c3-4ea5-87c7-c4bec223a0a4/run-0/session.jsonl";
+	assert.equal(isSubagentSession({ PI_SESSION_FILE: child } as NodeJS.ProcessEnv), true);
+	assert.equal(
+		isSubagentSession({ PI_SESSION_FILE: child, PI_SUBAGENT_CHILD: "" } as NodeJS.ProcessEnv),
+		true,
+		"env 标记为空不能把嵌套形状的结果推翻",
+	);
+
+	// 父会话：同目录下的单文件，必须继续受闸门约束
+	const parent =
+		"/Users/bachi/.pi/agent/sessions/--proj--/2026-10-23T12-59-01-185Z_01a168d7-e2c0-71c2-bc93-9d97b484ca51.jsonl";
+	assert.equal(isSubagentSession({ PI_SESSION_FILE: parent } as NodeJS.ProcessEnv), false);
+
+	// 两个反例：名字像但不能误判成子会话
+	for (const almost of [
+		"/Users/bachi/.pi/agent/sessions/--proj--/abc/session.jsonl", // 有子目录但没有 run-N 段
+		"/Users/bachi/.pi/agent/sessions/--proj--/abc/run-0/other.jsonl", // 不是 session.jsonl
+		"/Users/bachi/.pi/agent/sessions/--proj--/abc/run-0/session.jsonl.bak", // 扩展名不对
+	]) {
+		assert.equal(
+			isSubagentSession({ PI_SESSION_FILE: almost } as NodeJS.ProcessEnv),
+			false,
+			`${almost} 不是子会话形状`,
+		);
+	}
+
+	// 没有会话文件时不能当成子会话（否则非 pi 环境里闸门会静默失效）
+	assert.equal(isSubagentSession({} as NodeJS.ProcessEnv), false);
 });

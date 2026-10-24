@@ -300,6 +300,7 @@ export function isPendingArgs(toolName: string, args: unknown): boolean {
 			return !isFilled(obj.path);
 		case "grep":
 		case "find":
+		case "glob":
 			return !isFilled(obj.pattern);
 		default:
 			return false;
@@ -317,6 +318,9 @@ export function classifyToolCall(toolName: string, args: unknown): FoldVerdict {
 	if (toolName === "read") return { kind: "read" };
 	if (toolName === "grep") return { kind: "search" };
 	if (toolName === "find" || toolName === "ls") return { kind: "list" };
+	// `glob`（`clients/pi/extensions/glob-tool/`）与 find/ls 同类：列出路径的只读探查。
+	// 单列一条而不是并进上一行，是为了让它与 "find/ls" 的绑定关系在 diff 里可读。
+	if (toolName === "glob") return { kind: "list" };
 	if (toolName === "bash") {
 		const command = typeof (args as { command?: unknown } | null | undefined)?.command === "string"
 			? (args as { command: string }).command

@@ -1737,7 +1737,7 @@ test("接线：摘要模型失败 → 兜底文本也把 commit 编号 / 凭据�
 	fs.writeFileSync(sayScript, `#!/bin/sh\nprintf '%s\\n' "$@" > "$0.log"\n`);
 	fs.chmodSync(sayScript, 0o755);
 
-	const conclusion = "已提交并推送。\n- commit: `e752224` — `feat(voice): 阿里云口播换模型`，9 个文件（+232/−57）\n- push: `fa90a4d..e752224 main -> main`，两个远端都成功";
+	const conclusion = "已提交并推送。\n- commit: `e752224` — `feat(voice): 阿里云口播换模型`，9 个文件（+232/−57）\n- push: `fa90a4d..e752224 main -> main`，两个目标远端都成功";
 	const harness = await loadHarness({
 		configFile,
 		sayScript,
