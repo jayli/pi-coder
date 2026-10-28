@@ -60,7 +60,7 @@
     "dim": "comment",
     "text": "fg",
     "thinkingText": "comment",
-    "selectedBg": "nfSelectedBg",
+    "selectedBg": "userBg",
     "scrollbarTrack": "bg",
     "scrollbarThumb": "comment",
     "searchMatchBg": "lineHighlight",
