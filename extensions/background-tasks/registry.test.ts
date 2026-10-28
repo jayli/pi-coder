@@ -315,7 +315,7 @@ test("killTask 幂等：已终态的任务不能再杀", () => {
 		fake.children[0].emit("exit", 0, null);
 		const result = registry.killTask("bg_1");
 		assert.equal(result.ok, false);
-		assert.match(result.reason ?? "", /已经/);
+		assert.match(result.reason ?? "", /is already/);
 		registry.dispose();
 	} finally {
 		cleanup();
@@ -328,7 +328,7 @@ test("killTask 未知 id 报错", () => {
 		const registry = createRegistry({ spawn: makeFakeSpawn().spawn });
 		const result = registry.killTask("bg_99");
 		assert.equal(result.ok, false);
-		assert.match(result.reason ?? "", /没有这个任务/);
+		assert.match(result.reason ?? "", /No such task/);
 		registry.dispose();
 	} finally {
 		cleanup();
@@ -428,7 +428,7 @@ test("formatElapsed / truncateCommand / formatTaskLine / formatTaskList", () => 
 		const doneLine = formatTaskLine(task, now());
 		assert.match(doneLine, /exited/);
 		assert.match(doneLine, /exit=2/);
-		assert.equal(formatTaskList([], now()), "没有后台任务。");
+		assert.equal(formatTaskList([], now()), "No background tasks.");
 		registry.dispose();
 	} finally {
 		cleanup();

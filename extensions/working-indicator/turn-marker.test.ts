@@ -11,12 +11,13 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+	TURN_MARKER_ENTRY_TYPE,
 	TURN_MARKER_GLYPH,
 	TURN_MARKER_VERBS,
-	TURN_MARKER_WIDGET_KEY,
 	formatEndClock,
 	formatTurnMarker,
 	pickTurnVerb,
+	turnMarkerTextFromEntry,
 } from "./turn-marker.ts";
 
 test("词表就是用户给的那十个词，顺序与写法都不变", () => {
@@ -66,7 +67,18 @@ test("整行形状：✻ <词> for <时长> · done <时刻>；三段原样拼�
 	assert.equal(formatTurnMarker("Ping-ponging", "1h 2m 3s", "12:00 AM"), "✻ Ping-ponging for 1h 2m 3s · done 12:00 AM");
 });
 
-test("widget key 与行首字形是固定契约（recap / simple-task 同区，改名会让旧 widget 残留）", () => {
-	assert.equal(TURN_MARKER_WIDGET_KEY, "turn-end");
+test("条目类型与行首字形是固定契约（旧会话日志里的历史结束符靠它识别，改名会画不出来）", () => {
+	assert.equal(TURN_MARKER_ENTRY_TYPE, "turn-end");
 	assert.equal(TURN_MARKER_GLYPH, "✻");
+});
+
+test("从会话条目取文本：customType 不对 / data 缺失 / text 非串或空白都返回 null", () => {
+	assert.equal(turnMarkerTextFromEntry({ customType: "turn-end", data: { text: "✻ Spun for 3s · done 1:00 PM" } }), "✻ Spun for 3s · done 1:00 PM");
+	// 别的扩展的条目（同一套渲染器不会分派到，但回放路径可能碰到）
+	assert.equal(turnMarkerTextFromEntry({ customType: "simple-task", data: { text: "x" } }), null);
+	// 形状不对的垃圾：历史是磁盘上的，宁可少画一行也不能在渲染器里抛
+	assert.equal(turnMarkerTextFromEntry({ customType: "turn-end" }), null);
+	assert.equal(turnMarkerTextFromEntry({ customType: "turn-end", data: {} }), null);
+	assert.equal(turnMarkerTextFromEntry({ customType: "turn-end", data: { text: 42 } }), null);
+	assert.equal(turnMarkerTextFromEntry({ customType: "turn-end", data: { text: "   " } }), null);
 });

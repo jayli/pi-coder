@@ -101,6 +101,8 @@ interface Recorder {
 	completeOptions: Array<Record<string, unknown> | undefined>;
 	/** 每次 `setWidget(key, <factory>)` 记一个；undefined 不入列。 */
 	widgets: WidgetFactory[];
+	/** 每次 `setWidget(key, undefined)` 记一个（“摘要被清掉了”的证据）。 */
+	clearedWidgets: number;
 	/** `ui.notify` 收到的文案（成功是一条 `✦ Recap: …`，失败是「没能生成 recap…」）。 */
 	notifies: string[];
 }
@@ -129,6 +131,7 @@ function createContext(recorder: Recorder, branch?: unknown[], complete?: () => 
 		ui: {
 			setWidget: (_key: string, widget: unknown) => {
 				if (widget) recorder.widgets.push(widget as WidgetFactory);
+				else recorder.clearedWidgets += 1;
 			},
 			notify: (message: string) => {
 				recorder.notifies.push(message);
@@ -229,7 +232,7 @@ test("有子代理在跑时不生成摘要；等它结束后重新起 10s 定时
 		assert.ok(shutdown, "应该注册了 session_shutdown");
 		assert.ok(extension.commands.has("recap"), "应该注册了 /recap 命令");
 
-		const recorder: Recorder = { completeCalls: 0, completeOptions: [], widgets: [], notifies: [] };
+		const recorder: Recorder = { completeCalls: 0, completeOptions: [], widgets: [], clearedWidgets: 0, notifies: [] };
 		const ctx = createContext(recorder);
 
 		// 回合结束：起 10s 空闲表（此刻不会有任何输出）。
@@ -289,7 +292,7 @@ test("间隔由渲染时探测邻居决定：无邻居不加、邻居有内容�
 		assert.ok(command, "应该注册了 /recap 命令");
 
 		// /recap 是 force=true 的那条路（不走 10s 闲置闸门），拿到的 widget 工厂就是渲染现场。
-		const recorder: Recorder = { completeCalls: 0, completeOptions: [], widgets: [], notifies: [] };
+		const recorder: Recorder = { completeCalls: 0, completeOptions: [], widgets: [], clearedWidgets: 0, notifies: [] };
 		await command.handler("", createContext(recorder));
 		assert.equal(recorder.widgets.length, 1, "/recap 应该挂上 widget");
 
@@ -359,10 +362,13 @@ test("间隔由渲染时探测邻居决定：无邻居不加、邻居有内容�
  * `/recap` 的重复执行闸门：同一轮对话已经生成过摘要、且它还挂在屏幕上时，再执行不重跑
  * 模型、不重挂 widget、也不发通知 —— 那次生成一旦返回空，失败提示就会把刚生成的摘要顶掉。
  * 判据是「摘要存在 **且** 指纹（最后一轮 user+assistant+model）与上次生成时相同」，
- * 所以新对话一来闸门就放开：正常路径下 `input` 事件已经先把状态清了（这里也顺带覆盖），
- * 非交互来源的新消息则会因为指纹不同而放开。
+ * 所以新对话一来闸门就放开（指纹变了）。
+ *
+ * 另一半是副作用约定：**新发消息立即清掉屏幕上那条摘要**（用户 2026-10-27 定；2026-10-26
+ * 曾改成保留，用户实测后改回）。`input` 取消待执行的生成、清 `currentRecap` / `completedKey`
+ * 并清 widget，所以 `input` 之后闸门是开着的（屏幕上也没东西可保）。
  */
-test("/recap 重复执行不重跑模型、不发提示；有新对话后才重新生成", { skip, timeout: 30_000 }, async () => {
+test("/recap 重复执行不重跑模型、不发提示；新消息清掉已有摘要、有新对话后重新生成", { skip, timeout: 30_000 }, async () => {
 	const workspace = makeWorkspace();
 	try {
 		const bus = createTestBus();
@@ -392,7 +398,7 @@ test("/recap 重复执行不重跑模型、不发提示；有新对话后才重�
 			{ type: "message", message: { role: "user", content: "甲" } },
 			{ type: "message", message: { role: "assistant", content: [{ type: "text", text: "乙" }] } },
 		];
-		const recorder: Recorder = { completeCalls: 0, completeOptions: [], widgets: [], notifies: [] };
+		const recorder: Recorder = { completeCalls: 0, completeOptions: [], widgets: [], clearedWidgets: 0, notifies: [] };
 		const ctx = createContext(recorder, branch);
 
 		// 第一次：正常生成 + 通知。
@@ -407,23 +413,45 @@ test("/recap 重复执行不重跑模型、不发提示；有新对话后才重�
 		assert.equal(recorder.widgets.length, 1, "不该重挂 widget");
 		assert.equal(recorder.notifies.length, 1, "不该再发通知（失败提示会把摘要顶掉）");
 
-		// 新对话 + 交互输入：`input` 先把摘要与状态清掉，再执行就该重新生成。
+		// 新对话 + 交互输入：`input` 立即清掉已有摘要（用户 2026-10-27 定）…
 		branch.push({ type: "message", message: { role: "user", content: "丙" } });
 		branch.push({ type: "message", message: { role: "assistant", content: [{ type: "text", text: "丁" }] } });
 		await onInput({ source: "interactive" }, ctx);
+		assert.equal(recorder.completeCalls, 1, "`input` 本身不该重跑模型");
+		assert.equal(recorder.clearedWidgets, 1, "新发消息应该立即清掉 widget（用户 2026-10-27 定）");
+		assert.equal(recorder.widgets.length, 1, "`input` 只清不重挂");
+		// …对话也换了一轮 ⇒ `/recap` 该重新生成一条新的。
 		await command.handler("", ctx);
-		assert.equal(recorder.completeCalls, 2, "input 清过状态后应该重新生成");
+		assert.equal(recorder.completeCalls, 2, "对话换了一轮后应该重新生成");
 		assert.equal(recorder.notifies.length, 2);
 
 		// 紧接着再按一次：又成了同一轮，不再重复。
 		await command.handler("", ctx);
 		assert.equal(recorder.completeCalls, 2, "同一轮仍不重复");
 
-		// 新对话但没人发过 `input`（非交互来源的消息，清不到状态）→ 指纹不同，闸门同样放开。
+		// 再来一条新消息：摘要被清掉（这是本用例的另一半约定），计时器也被取消。
+		await onInput({ source: "interactive" }, ctx);
+		assert.equal(recorder.clearedWidgets, 2, "新发消息必须清 widget（用户 2026-10-27 定）");
+		// 清掉之后闸门也开了：同一轮对话里再按 `/recap` 会重新生成（屏幕上已经没东西可保）。
+		await command.handler("", ctx);
+		assert.equal(recorder.completeCalls, 3, "摘要被清后 `/recap` 应该重新生成");
+
+		// 非交互来源（rpc / extension）不算"用户继续对话"：不清摘要。
+		const widgetsBeforeRpc = recorder.widgets.length;
+		const clearedBeforeRpc = recorder.clearedWidgets;
+		await onInput({ source: "rpc" }, ctx);
+		assert.equal(recorder.clearedWidgets, clearedBeforeRpc, "非交互输入不该清 widget");
+		assert.equal(recorder.widgets.length, widgetsBeforeRpc, "非交互输入不该重挂 widget");
+
+		// 换会话（`/new` / `/resume`）同样清掉摘要与 widget。
+		await loaded.extensions[0]?.handlers.get("session_start")?.[0]?.({}, ctx);
+		assert.equal(recorder.clearedWidgets, clearedBeforeRpc + 1, "换会话应该清掉 widget（摘要不落盘）");
+
+		// 新对话但没人发过 `input`（非交互来源的消息）→ 指纹不同，闸门同样放开。
 		branch.push({ type: "message", message: { role: "user", content: "戊" } });
 		branch.push({ type: "message", message: { role: "assistant", content: [{ type: "text", text: "己" }] } });
 		await command.handler("", ctx);
-		assert.equal(recorder.completeCalls, 3, "指纹变了就该重新生成");
+		assert.equal(recorder.completeCalls, 4, "指纹变了就该重新生成");
 
 		await loaded.extensions[0]?.handlers.get("session_shutdown")?.[0]?.({}, ctx);
 	} finally {
@@ -456,7 +484,7 @@ test("摘要请求的输出预算要同时容得下思考与正文（96 会被�
 		const command = loaded.extensions[0]?.commands.get("recap");
 		assert.ok(command, "应该注册了 /recap 命令");
 
-		const recorder: Recorder = { completeCalls: 0, completeOptions: [], widgets: [], notifies: [] };
+		const recorder: Recorder = { completeCalls: 0, completeOptions: [], widgets: [], clearedWidgets: 0, notifies: [] };
 		await command.handler("", createContext(recorder));
 
 		const maxTokens = recorder.completeOptions[0]?.maxTokens;
@@ -499,7 +527,7 @@ test("被 max_tokens 截断的摘要以省略号收尾，不把半句当完整�
 		const command = loaded.extensions[0]?.commands.get("recap");
 		assert.ok(command, "应该注册了 /recap 命令");
 
-		const recorder: Recorder = { completeCalls: 0, completeOptions: [], widgets: [], notifies: [] };
+		const recorder: Recorder = { completeCalls: 0, completeOptions: [], widgets: [], clearedWidgets: 0, notifies: [] };
 		await command.handler(
 			"",
 			createContext(recorder, undefined, () => ({

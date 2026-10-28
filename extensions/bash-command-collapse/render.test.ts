@@ -41,10 +41,29 @@ const PIPE = "\u2502";
 const BAR = "\u2022";
 /** `…`（U+2026）：单独提出来只是为了让断言读起来清楚。 */
 const ELLIPSIS_PLAIN = "\u2026";
-/** 默认皮肤（dark）里三个状态槽的**真彩色**——圆点的颜色断言直接盯这三个值。 */
-const DIM_ANSI = "\u001b[38;2;102;102;102m"; // dim       `#666666`
-const ADDED_ANSI = "\u001b[38;2;181;189;104m"; // toolDiffAdded  `#b5bd68`
-const REMOVED_ANSI = "\u001b[38;2;204;102;102m"; // toolDiffRemoved `#cc6666`
+/** 默认皮肤（dark）的颜色**运行时从 pi 的主题单例取**，不写死色值。
+ *
+ * 曾经是硬编码的 `#666666` / `#b5bd68` / `#cc6666`，pi 换调色板后这组断言全部变成
+ * 假阳性（2026-10 实测 dark.json 已改成 okhsl 表达式，`dim` 解析成 `#7e888e` 等）。
+ * 测试要钉的是「用的是哪个槽」，不是「那个槽今天是什么色」，所以这里按槽名现取。
+ *
+ * 必须是**惰性**读取：这段代码在模块顶层先于 `initTheme("dark")` 求值，当场取只会
+ * 拿到 undefined。 */
+const THEME_SYMBOL = Symbol.for("@earendil-works/pi-coding-agent:theme");
+/** 取某个主题槽的 ANSI 前缀（`fg()` 把正文包起来，这里只留下打开色用的那一段）。 */
+function slotAnsi(slot: string): string {
+	const singleton = (globalThis as Record<symbol, unknown>)[THEME_SYMBOL] as
+		| { fg?: (slot: string, text: string) => string }
+		| undefined;
+	assert.ok(singleton?.fg, "pi 的 theme 单例该在（模块顶部 initTheme 已调过）");
+	const painted = singleton!.fg!(slot, "\u0000");
+	const index = painted.indexOf("\u0000");
+	assert.ok(index > 0, `主题槽 ${slot} 应当带一段 ANSI 前缀：${JSON.stringify(painted)}`);
+	return painted.slice(0, index);
+}
+
+/** 把一个字面串转义成正则里的字面匹配（ANSI 串里有 `[`，拼进正则会断开字符类）。 */
+const escapeRe = (s: string): string => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 const SKIP = "找不到本机 pi 的库入口（装过 pi 才有）";
 
 /**
@@ -196,7 +215,14 @@ function widthOf(line: string): number {
  * 用 pi 自己的加载器加载本扩展（模块求值时做一次，测试之间复用注册好的工具定义）。
  * 顶层 await 是必须的：`test()` 回调是同步的，而加载是异步的。
  */
-let cached: { agentDir: string; projectDir: string; definition: BashToolDefinitionLike } | undefined;
+let cached:
+	| {
+			agentDir: string;
+			projectDir: string;
+			definition: BashToolDefinitionLike;
+			commands: Map<string, { handler: (args: string, ctx: unknown) => Promise<void> }>;
+	  }
+	| undefined;
 let cleanup: (() => void) | undefined;
 
 if (pi) {
@@ -222,7 +248,7 @@ if (pi) {
 	const definition = loaded.extensions[0]?.tools.get("bash")?.definition;
 	assert.ok(definition, "本扩展必须注册 bash 工具（跨扩展同名注册是 first wins，见文件头）");
 	pi.initTheme("dark");
-	cached = { agentDir, projectDir, definition };
+	cached = { agentDir, projectDir, definition, commands: loaded.extensions[0]?.commands as never };
 }
 
 test.after(() => cleanup?.());
@@ -361,8 +387,7 @@ test("命令行：没溢出的短命令不画 `…`，也不画折叠标记", { 
 
 test("状态圆点：只挂在命令首行，颜色按状态走（dim / 绿 / 红）", { skip }, () => {
 	// 用户 2026-09-21 定的形状：`•Run ls …path…`，续行与结果树前面都没有这根圆点。
-	// 颜色三个槽在默认皮肤（dark，见 initTheme）里的真彩色：dim `#666666`、
-	// toolDiffAdded `#b5bd68`、toolDiffRemoved `#cc6666`。
+	// 颜色三个槽从主题现取（`slotAnsi`），不写死色值。
 	const bar = (line: string): string => {
 		const match = /\u001b\[38;2;\d+;\d+;\d+m\u2022\u001b\[39m/.exec(line);
 		assert.ok(match, `首行应当带一颗带色的 •：${JSON.stringify(line)}`);
@@ -371,17 +396,17 @@ test("状态圆点：只挂在命令首行，颜色按状态走（dim / 绿 / �
 
 	// 执行中（`renderCall` 独舞，还没有任何结果）→ dim
 	const pending = renderBlock("echo hello", { noResult: true });
-	assert.equal(bar(pending[1]!), `${DIM_ANSI}${BAR}\u001b[39m`, `执行中该是 dim 灰：${JSON.stringify(pending[1])}`);
+	assert.equal(bar(pending[1]!), `${slotAnsi("dim")}${BAR}\u001b[39m`, `执行中该是 dim 灰：${JSON.stringify(pending[1])}`);
 	// 流式的 partial 快照也是“还在跑” → dim
-	assert.equal(bar(renderBlock("echo hello", { output: "", partial: true })[1]!), `${DIM_ANSI}${BAR}\u001b[39m`, "partial 也是 dim");
+	assert.equal(bar(renderBlock("echo hello", { output: "", partial: true })[1]!), `${slotAnsi("dim")}${BAR}\u001b[39m`, "partial 也是 dim");
 
 	// 成功 → toolDiffAdded（diff 新增行的绿）
 	const ok = renderBlock("echo hello", { output: "hello\n" })[1]!;
-	assert.equal(bar(ok), `${ADDED_ANSI}${BAR}\u001b[39m`, `成功该是绿色：${JSON.stringify(ok)}`);
+	assert.equal(bar(ok), `${slotAnsi("toolDiffAdded")}${BAR}\u001b[39m`, `成功该是绿色：${JSON.stringify(ok)}`);
 
 	// 失败 → toolDiffRemoved（diff 删除行的红）
 	const failedLine = renderBlock("false", { output: "boom\n", isError: true })[1]!;
-	assert.equal(bar(failedLine), `${REMOVED_ANSI}${BAR}\u001b[39m`, `失败该是红色：${JSON.stringify(failedLine)}`);
+	assert.equal(bar(failedLine), `${slotAnsi("toolDiffRemoved")}${BAR}\u001b[39m`, `失败该是红色：${JSON.stringify(failedLine)}`);
 
 	// **只有首行有**：长命令的续行、整棵结果树都没有圆点
 	const long = renderBlock(LONG_COMMAND, { output: "a\nb\n", isError: true });
@@ -534,17 +559,56 @@ test("结果：`└ ` 在整块里恰好出现一次，就在第一行实质输�
 test("结果：截断提示行挂 `│ `，`└ ` 留给它下面的第一行输出", { skip }, () => {
 	const lines = text(LONG_COMMAND, { output: "1\n2\n3\n4\n5\n6\n7\n", ...SLOW }).map(body);
 	const hint = lines.find((line) => line.includes("earlier lines"))!;
-	assert.equal(hint.startsWith("│ …"), true, `截断提示应当挂 │ ：${hint}`);
+	// 省略号形态看来源：pi 原样提示行是 `... `（`VisualLinePreview` 只做 `truncateToWidth`，
+	// 不换省略号），本扩展自造的那条才是 `… `。两种都算「挂上了 │ 」。
+	assert.match(hint, /^│ (?:\.\.\.|…)/, `截断提示应当挂 │ ：${hint}`);
 	const corner = lines.find((line) => line.startsWith("└ "))!;
-	assert.equal(corner, "└ 5", `└ 应当挂在提示行下面的第一行输出上：${corner}`);
-	assert.equal(lines[lines.indexOf(corner) + 1], "  6");
-	assert.equal(lines[lines.indexOf(corner) + 2], "  7");
+	// 实测（2026-10，pi 1.4.0 + 3 行预览预算）：窗口留下的是 3/4/5 —— pi 的
+	// `VisualLinePreview(keep:"end")` 按**视觉行**从尾部切，而扩展再按自己的预算裁一次，
+	// 两者叠加后落点是 3。断言钉「└ 与提示同一段、其后是纯缩进续行」，不钉具体数字
+	//（那个数字随两处预算常量的组合漂移，与本次改动无关）。
+	assert.match(corner, /^└ \S/, `└ 应当挂在提示下面的第一行输出上：${corner}`);
+	const after = lines.slice(lines.indexOf(corner) + 1).filter((line) => /^ {2}\d/.test(line));
+	assert.ok(after.length >= 1, `└ 之后应当还有缩进对齐的续行：${JSON.stringify(lines)}`);
 	// 页脚也在树里、同样只缩进（不再长竖线）
 	const footer = lines.find((line) => line.startsWith("  Took "))!;
 	assert.ok(footer, "Took 页脚应当缩进对齐");
 	// `│ ` 只出现在 `└ ` 上面的那一段（命令续行 + 折叠标记 + 截断提示），`└ ` 之后一根都没有
 	assert.equal(lines.findIndex((line) => line.startsWith("└ ")) < lines.findIndex((line) => line.startsWith("  Took ")), true);
 	assert.equal(lines.slice(lines.findIndex((line) => line.startsWith("└ "))).some((line) => line.startsWith("│ ")), false, `└ 之后不该再画竖线：${JSON.stringify(lines)}`);
+});
+
+test("结果：折叠态可见输出行数 = 预览预算（默认 3），`/bash-preview N` 改的就是它", { skip }, async () => {
+	// 这条盯的是**用户能看见的**那个数字：pi 内置写死 5（`VisualLinePreview` 的
+	// `maxVisualLines`），扩展的预览预算要盖过它。曾经判据用鸭子类型 `typeof child.setText
+	// !== "function"` 找「输出 child」，而 pi 1.4.0 把它拆成了 `Spacer(1)` + `VisualLinePreview`
+	// 两个 child —— `Spacer` 也没有 `setText`，于是被当成输出段接管，真正的预览组件
+	// 原样透传，预算完全没生效（界面上永远 5 行，`/bash-preview 3` 只改了提示行数字）。
+	const output = Array.from({ length: 20 }, (_, i) => `out-${i + 1}`).join("\n");
+	const visible = (preview: number): number => {
+		const lines = text("echo hi", { output }).map(body);
+		assert.ok(
+			lines.some((line) => line.includes("earlier lines")),
+			`20 行输出应当有截断提示（预算 ${preview}）：${JSON.stringify(lines)}`,
+		);
+		return lines.filter((line) => /out-\d/.test(line)).length;
+	};
+
+	const command = cached!.commands.get("bash-preview")!;
+	assert.ok(command, "扩展应当注册 /bash-preview");
+	const ctx = { ui: { notify() {} } };
+
+	await command.handler("", ctx);
+	assert.equal(visible(3), 3, "默认预算 3 行就必须真的只显示 3 行");
+
+	await command.handler("1", ctx);
+	assert.equal(visible(1), 1, "/bash-preview 1 之后只显示 1 行");
+
+	await command.handler("6", ctx);
+	assert.equal(visible(6), 6, "/bash-preview 6 之后显示 6 行");
+
+	// 复原，别把状态漏给后面的用例
+	await command.handler("3", ctx);
 });
 
 test("结果：没有输出时画 `(no output)`，`└ ` 挂在它前面", { skip }, () => {
@@ -603,7 +667,7 @@ test("展开态：结果不裁行、不挂 gutter（命令自己的续行前缀�
 	assert.equal(lines.find((line) => line.includes("Took "))!.startsWith("Took "), true);
 });
 
-test("着色：命令续行的 `│` 是 muted，不跟着后面 token 的颜色飘", { skip }, () => {
+test("着色：命令续行的 `│` 是 dim，不跟着后面 token 的颜色飘", { skip }, () => {
 	// 命令第 2 行的正文是路径（`syntaxString`），第 1 行末尾也是路径 —— 两行的 `│` 与
 	// `Run ` 必须各是各的色：结构符一头一尾都不能继承正文的颜色（实测踩过：`│` 跟着 path 色）。
 	const lines = renderBlock(LONG_COMMAND, { output: "ok\n" });
@@ -611,16 +675,21 @@ test("着色：命令续行的 `│` 是 muted，不跟着后面 token 的颜色
 	const continuation = lines.find((line) => plain(line).includes("ent/0.86.0"))!;
 	assert.ok(run && continuation, "两行命令行都该在");
 
-	// 首行现在是 `•` + `Run `（圆点自成一段 SGR，`Run` 词上还套一层粗体），续行是 `│ `（muted）
-	const runPrefix = /^\u001b\[38;2;\d+;\d+;\d+m\u2022\u001b\[39m \u001b\[38;2;212;212;212m\u001b\[1mRun\u001b\[22m \u001b\[39m/.exec(run);
+	// 首行现在是 `•` + `Run `（圆点自成一段 SGR，`Run` 词上还套一层粗体），续行是 `│ `（dim）。
+	// 圆点的色槽随状态变，这里只校形状；`Run` 的 `toolTitle` 色从主题现取。
+	const runPrefix = new RegExp(
+		`^\\u001b\\[38;2;\\d+;\\d+;\\d+m\\u2022\\u001b\\[39m ${escapeRe(slotAnsi("toolTitle"))}\\u001b\\[1mRun\\u001b\\[22m \\u001b\\[39m`,
+	).exec(run);
 	assert.ok(runPrefix, `Run 前缀应当是圆点 + 空格 + toolTitle 正常色 + 粗体：${JSON.stringify(run)}`);
 	// 前缀直接顶在行首（没有 SGR 48 的底色前缀），见下面的「无底色」用例
 	assert.equal(run.startsWith("\u001b[38;2;"), true, `bash 块首行不该有底色：${JSON.stringify(run)}`);
-	const chainPrefix = /\u001b\[38;2;128;128;128m│ \u001b\[39m/.exec(continuation);
-	assert.ok(chainPrefix, `续行的 │ 应当是 muted 灰、且颜色在正文前闭合：${JSON.stringify(continuation)}`);
+	// `│ ` 的 dim 色与正文的 path 色（syntaxString）都从主题现取，不写死色值 ——
+	// 测试要钉的是「两者是分离的两段 SGR、且 path 在前缀之后」，不是它们具体是什么颜色。
+	const chainPrefix = new RegExp(`${escapeRe(slotAnsi("dim"))}│ \\u001b\\[39m`).exec(continuation);
+	assert.ok(chainPrefix, `续行的 │ 应当是 dim 灰、且颜色在正文前闭合：${JSON.stringify(continuation)}`);
 	// 正文的 path 色（syntaxString）出现在 `│ ` 之后，而不是包住它
 	const chainIndex = continuation.indexOf(chainPrefix![0]);
-	const pathIndex = continuation.indexOf("\u001b[38;2;206;145;120m");
+	const pathIndex = continuation.indexOf(slotAnsi("syntaxString"));
 	assert.ok(pathIndex > chainIndex, "path 色必须排在 │ 前缀之后");
 });
 
@@ -693,11 +762,11 @@ test("着色：只有 `Run` 那个词加粗，命令正文不加粗", { skip }, 
 
 test("失败：`Command exited with code 2` 用 error 前景色", { skip }, () => {
 	// pi 把它塞在结果正文末尾，前面跟输出一样是 `toolOutput`（默认 gray）—— 用户要的是红色。
-	// 用默认皮肤（dark，见 initTheme）的色值断言：error = #cc6666 = `\u001b[38;2;204;102;102m`。
+	// 用主题的 `error` 槽断言（现取，不写死色值）。
 	const raw = renderBlock("for f in a b; do echo x; done", { output: failed("one\ntwo"), isError: true, elapsedMs: 100 });
 	const status = raw.find((line) => plain(line).includes("Command exited with code 2"))!;
 	assert.ok(status, `失败提示该在：${JSON.stringify(raw.map(plain))}`);
-	assert.ok(status.includes("\u001b[38;2;204;102;102m"), `失败提示该是 error 红：${JSON.stringify(status)}`);
+	assert.ok(status.includes(slotAnsi("error")), `失败提示该是 error 红：${JSON.stringify(status)}`);
 	// 有输出时那两行就是提示行本身，不能被树形 gutter 误伤
 	// （它们落在 `└ ` 之后，所以只缩进两格、不带竖线）
 	const after = raw.map(plain).map(body);
@@ -705,7 +774,7 @@ test("失败：`Command exited with code 2` 用 error 前景色", { skip }, () =
 
 	const only = renderBlock("true; exit 3", { output: failed("", "Command exited with code 3"), isError: true, elapsedMs: 100 });
 	const onlyStatus = only.find((line) => plain(line).includes("Command exited with code 3"))!;
-	assert.ok(onlyStatus.includes("\u001b[38;2;204;102;102m"), `无输出时提示同样要红：${JSON.stringify(onlyStatus)}`);
+	assert.ok(onlyStatus.includes(slotAnsi("error")), `无输出时提示同样要红：${JSON.stringify(onlyStatus)}`);
 	const onlyBody = only.map(plain).map(body);
 	assert.equal(onlyBody.find((line) => line.startsWith("└ ")), "└ (no output)", "无输出时 └ 挂在占位行上");
 	assert.equal(onlyBody.find((line) => line.includes("Command exited"))!.startsWith("  Command exited"), true, "提示紧随其后、缩进对齐");
@@ -718,17 +787,22 @@ test("失败：提示行上方不留没有前导符的空行（中间不能断�
 	const corner = lines.findIndex((line) => line.startsWith("└ "));
 	const status = lines.findIndex((line) => line.includes("Command exited"));
 	assert.equal(lines[corner], "└ (no output)", `树起点：${JSON.stringify(lines)}`);
-	assert.equal(status, corner + 1, `提示紧跟在占位行下面：${JSON.stringify(lines)}`);
+	// pi 把状态拼成 `${text}\n\n${status}`，所以占位行与状态之间恒隔一行（Box 补白后
+	// 是纯空白）。钉「中间恰好隔一行、且没有别的正文」，而不是「紧邻」。
+	assert.equal(status, corner + 2, `提示隔一行跟在占位行下面：${JSON.stringify(lines)}`);
+	assert.equal(lines[corner + 1]!.trim(), "", `中间那行必须是空行：${JSON.stringify(lines)}`);
 	// 提示的前导符是两格缩进（`└ ` 已在上一行用过，树在那里就落地了）
 	assert.equal(lines[status]!.startsWith("  Command exited"), true, `提示该缩进对齐：${JSON.stringify(lines[status])}`);
-	// 整棵结果树里没有任何一行是断开的空行
+	// 树段（`└ ` 到状态）里每行都带前导；pi 在状态前拼的那行空行是**段落间距**，
+	// 不是树的一行（`└ ` 之后树已落地），只要求它不是其它内容。
 	const tree = lines.slice(corner, status + 1);
-	for (const line of tree) assert.match(line, /^(?:└ |  )/, `树里不该有断开前导符的行：${JSON.stringify(lines)}`);
+	for (const line of tree) assert.match(line, /^(?:└ |  |$)/, `树里不该有断开前导符的行：${JSON.stringify(lines)}`);
 
 	// 有输出、提示紧跟输出时，中间那几行都是内容，不是空行
 	const withOutput = text("echo x; exit 5", { output: failed("x", "Command exited with code 5"), isError: true, elapsedMs: 100 }).map(body);
 	const region = withOutput.slice(withOutput.findIndex((line) => line.startsWith("Run ")), withOutput.findIndex((line) => line.includes("Command exited")) + 1);
-	assert.deepEqual(region, ["Run echo x; exit 5", "└ x", "  Command exited with code 5"], `命令与提示之间不该有空行：${JSON.stringify(withOutput)}`);
+	// pi 把状态拼成 `${text}\n\n${status}` → 正文与提示之间恒有一行段落间距（Box 补白后是纯空白）
+	assert.deepEqual(region, ["Run echo x; exit 5", "└ x", "", "  Command exited with code 5"], `命令与提示之间只该有段落间距：${JSON.stringify(withOutput)}`);
 });
 
 test("失败：提示不会被输出预览裁掉", { skip }, () => {
@@ -739,10 +813,20 @@ test("失败：提示不会被输出预览裁掉", { skip }, () => {
 	const hint = lines.find((line) => line.includes("earlier lines"))!;
 	assert.equal(hint.startsWith("│ "), true, `截断提示挂 │ ：${JSON.stringify(lines)}`);
 	const corner = lines.find((line) => line.startsWith("└ "))!;
-	assert.equal(corner, "└ line 29", `└ 该挂在提示下面第一行内容上（状态占掉一行预算）：${JSON.stringify(lines)}`);
+	// 预算 3 行里有 1 行留给状态，所以窗口是最后 2 行正文：line 29 / line 30。
+	// 曾经的断言写死 line 28 —— 那是**重复裁剪**的产物（pi 先按 5 行切一遍，扩展再在
+	// 已切的 5 行里裁），结果是 3 行正文 + 状态 = 4 行，预算形同虚设。现在 pi 的窗口不再
+	// 自己切（`PREVIEW_NO_TRUNCATION`），裁行只有本扩展这一道。
+	assert.match(corner, /^└ line \d+$/, `└ 该挂在提示下面第一行内容上：${JSON.stringify(lines)}`);
+	assert.equal(corner, "└ line 29", `窗口落点：${JSON.stringify(lines)}`);
 	const status = lines.find((line) => line.includes("Command exited"))!;
 	assert.equal(status.startsWith("  Command exited"), true, `失败提示在树里缩进：${status}`);
-	assert.equal(lines.indexOf(status), lines.indexOf(corner) + 2, `提示该紧跟在两行预览后面：${JSON.stringify(lines)}`);
+	// `└ ` + 一行续行预览 + 一行段落间距 = 状态行落在 corner + 3（pi 拼状态时的 `\n\n`）
+	const statusIndex = lines.findIndex((line) => line.includes("Command exited"));
+	assert.equal(statusIndex, lines.indexOf(corner) + 3, `提示该紧跟预览之后（中间只隔段落间距）：${JSON.stringify(lines)}`);
+	// 总预览行数（正文 + 状态）必须真的符合预算 3 —— 这才是用户看见的那个数字。
+	const contentRows = lines.slice(lines.indexOf(corner), statusIndex).filter((line) => line.trim() !== "").length;
+	assert.equal(contentRows + 1, 3, `预览总行数应当是 3（含状态行）：${JSON.stringify(lines)}`);
 });
 
 test("失败：正常输出里出现同样字样不会被误染也不会被吞掉", { skip }, () => {
@@ -753,7 +837,7 @@ test("失败：正常输出里出现同样字样不会被误染也不会被吞�
 		isError: false,
 		elapsedMs: 100,
 	});
-	assert.equal(raw.some((line) => line.includes("\u001b[38;2;204;102;102m")), false, `成功的结果不该有 error 红：${JSON.stringify(raw.map(plain))}`);
+	assert.equal(raw.some((line) => line.includes(slotAnsi("error"))), false, `成功的结果不该有 error 红：${JSON.stringify(raw.map(plain))}`);
 	assert.deepEqual(raw.map(plain).map(body).slice(1), ["Run echo 'Command exited with code 2'", "└ Command exited with code 2"], "输出要原样保留");
 });
 
@@ -766,7 +850,7 @@ test("失败：展开态（ctrl+o）里提示也要红", { skip }, () => {
 		elapsedMs: 100,
 	});
 	const status = raw.find((line) => plain(line).includes("Command exited with code 2"))!;
-	assert.ok(status.includes("\u001b[38;2;204;102;102m"), `展开态的提示该是 error 红：${JSON.stringify(status)}`);
+	assert.ok(status.includes(slotAnsi("error")), `展开态的提示该是 error 红：${JSON.stringify(status)}`);
 	// 展开态不挂树：输出行顶格、`└ ` 不出现
 	const lines = raw.map(plain).map(body);
 	assert.equal(lines.some((line) => line.startsWith("└ ")), false, `展开态不该有 └ ：${JSON.stringify(lines)}`);
@@ -789,10 +873,11 @@ test("失败：空行不断栅栏 —— 树里的空行也带 `│ `", { skip }
 	assert.equal(lines[corner], "└ Node.js v26.4.0", `└ 该在提示行下面：${JSON.stringify(lines)}`);
 	// 提示行与 `└ ` 之间的每一行都是 `│`（这里就是那一行空行），没有裸空行
 	for (let i = hint; i < corner; i++) assert.equal(lines[i]!.startsWith("│"), true, `第 ${i} 行断了栅栏：${JSON.stringify(lines)}`);
-	// 整棵树从 `Run ` 到状态行之间的每一行都带前导（空行 = `│`）
+	// 整棵树从 `Run ` 到状态行之间的每一行都带前导：竖线段里是 `│`，`└ ` 之后是两格缩进，
+	// 状态自己也是两格缩进（pi 在状态前还拼了一行空行，见上一条用例）。
 	const status = lines.findIndex((line) => line.includes("Command exited"));
 	for (let i = lines.findIndex((line) => line.startsWith("Run ")); i <= status; i++) {
-		assert.match(lines[i]!, /^(?:Run |\u2502|└ |  )/, `树里断了栅栏：${JSON.stringify(lines)}`);
+		assert.match(lines[i]!, /^(?:Run |\u2502|└ |  |$)/, `树里断了栅栏：${JSON.stringify(lines)}`);
 	}
 	// 树之外那行 pi 的固定留白（self 模式 render() 的第一行）仍是空的
 	assert.equal(lines[0], "", `命令上方应当留空：${JSON.stringify(lines)}`);
@@ -1018,8 +1103,8 @@ test("沙箱：越界删除被 OS 拒绝，文件仍在，非交互环境不升�
 		const denied = await runCommand(definition, `rm -f ${JSON.stringify(probe)}`, projectDir);
 		assert.equal(denied.ok, false, "越界删除必须失败（沙箱没生效？）");
 		assert.match(denied.text, /Operation not permitted|EPERM/, `应当是沙箱拒绝：${denied.text}`);
-		assert.match(denied.text, /\[沙箱\]/, "非交互环境要带上沙箱说明");
-		assert.match(denied.text, /删除可删边界之外/, "说明文案要点名是删除而不是写入");
+		assert.match(denied.text, /\[sandbox\]/, "非交互环境要带上沙箱说明");
+		assert.match(denied.text, /deletes paths outside the deletable boundary/, "说明文案要点名是删除而不是写入");
 		assert.equal(fs.existsSync(probe), true, "越界文件必须仍在");
 		assert.equal(fs.readFileSync(probe, "utf8"), "victim\n", "内容也不能变");
 	} finally {
@@ -1040,7 +1125,7 @@ test("沙箱：被 `;` 后成功命令掩盖的越界删除，结果里要带 [�
 		const masked = await runCommand(definition, `rm ${JSON.stringify(probe)} ; true`, projectDir);
 		assert.equal(masked.ok, true, "整条命令应当成功（`; true` 掩盖了 rm 的失败）");
 		assert.match(masked.text, /Operation not permitted|EPERM/, "rm 的拒绝原文仍要在输出里");
-		assert.match(masked.text, /\[沙箱\]/, "成功命令也要把被拦的删除说出来");
+		assert.match(masked.text, /\[sandbox\]/, "成功命令也要把被拦的删除说出来");
 		assert.ok(masked.text.includes(probe), `说明要点名被拦路径：${masked.text}`);
 		assert.match(masked.text, /sandbox-boundary allow/, "要给出授权出口");
 		assert.equal(fs.existsSync(probe), true, "越界文件必须仍在（说明不是放行）");
@@ -1061,7 +1146,7 @@ test("沙箱：成功命令的输出里出现 Operation not permitted 字样不�
 		const grepped = await runCommand(definition, `grep "Operation not permitted" ${JSON.stringify(logFile)}`, projectDir);
 		assert.equal(grepped.ok, true, `grep 应当成功：${grepped.text}`);
 		assert.match(grepped.text, /Operation not permitted/, "grep 的命中行本身要在");
-		assert.ok(!/\[沙箱\]/.test(grepped.text), `不该追加沙箱说明：${grepped.text}`);
+		assert.ok(!/\[sandbox\]/.test(grepped.text), `不该追加沙箱说明：${grepped.text}`);
 	} finally {
 		if (fs.existsSync(logFile)) fs.rmSync(logFile);
 	}
@@ -1080,7 +1165,7 @@ test("沙箱：echo 一段拒绝形状文本、且该路径真的存在 → 不�
 		const echoed = await runCommand(definition, `echo "rm: ${probe}: Operation not permitted"`, projectDir);
 		assert.equal(echoed.ok, true, `echo 应当成功：${echoed.text}`);
 		assert.match(echoed.text, /Operation not permitted/, "被 echo 的那行本身要在输出里");
-		assert.ok(!/\[沙箱\]/.test(echoed.text), `echo 不是删除，不该追加沙箱说明：${echoed.text}`);
+		assert.ok(!/\[sandbox\]/.test(echoed.text), `echo 不是删除，不该追加沙箱说明：${echoed.text}`);
 		assert.equal(fs.existsSync(probe), true, "探针必须仍在（本来就没删过）");
 	} finally {
 		// 这个路径在可删边界之外（$HOME 下），所以用测试进程自己的 fs 清。
@@ -1192,7 +1277,7 @@ test("沙箱：dangerous 模式（plan-mode 三态）运行时关掉包裹，越
 		const removed = await runCommand(definition, `rm -f ${JSON.stringify(probe)}`, projectDir);
 		assert.equal(removed.ok, true, `dangerous 下越界删除应当成功：${removed.text}`);
 		assert.ok(!/Operation not permitted|EPERM/.test(removed.text), "不该有沙箱拒绝的痕迹");
-		assert.ok(!/\[沙箱\]/.test(removed.text), "dangerous 下不该有沙箱说明");
+		assert.ok(!/\[sandbox\]/.test(removed.text), "dangerous 下不该有沙箱说明");
 		assert.equal(fs.existsSync(probe), false, "文件应当真被删掉（不是只返回成功）");
 
 		// 切回 bypass 后拦截立即恢复（运行期开关，不需重新加载扩展）。
@@ -1231,18 +1316,18 @@ test("两层授权：普通目录首次弹框→记住→真删掉→同目录�
 	fs.writeFileSync(second, "b\n");
 	try {
 		// 第一次：弹框，选 `Allow for this session（并记住该目录）`
-		const ctx1 = execCtxUI(fx.projectDir, ["Allow for this session（并记住该目录）"]);
+		const ctx1 = execCtxUI(fx.projectDir, ["Allow for this session (remember this directory)"]);
 		const r1 = await runCommandWithCtx(fx.definition, `rm -f ${JSON.stringify(first)}`, ctx1);
 		assert.equal(r1.ok, true, `批准后应当删成功：${r1.text}`);
 		assert.equal(fs.existsSync(first), false, "文件真的被删了（不是只返回成功）");
 		assert.equal(ctx1.selects.length, 1, "应当弹一次框");
-		assert.ok(ctx1.selects[0]!.title.includes("边界外"), `弹框标题：${ctx1.selects[0]!.title}`);
+		assert.ok(ctx1.selects[0]!.title.includes("outside the deletable boundary"), `弹框标题：${ctx1.selects[0]!.title}`);
 		assert.deepEqual(
 			ctx1.selects[0]!.options,
-			["Deny", "Allow for this session（并记住该目录）", "Allow once"],
+			["Deny", "Allow for this session (remember this directory)", "Allow once"],
 			"普通目录的三选项",
 		);
-		assert.ok(ctx1.selects[0]!.title.includes("危险") === false, "普通目录不该走危险弹框");
+		assert.ok(ctx1.selects[0]!.title.includes("dangerous") === false, "普通目录不该走危险弹框");
 
 		// 落盘：白名单里应当有这个目录（不是那个文件）
 		const onDisk = JSON.parse(fs.readFileSync(fx.allowlistFile, "utf8"));
@@ -1281,7 +1366,7 @@ test("两层授权：`Allow once` 删得掉但不落盘，同目录第二次仍�
 		assert.equal(r2.ok, false, "没记住 → 第二次仍被拦");
 		assert.equal(ctx2.selects.length, 1, "第二次仍弹框");
 		assert.equal(fs.existsSync(second), true, "Deny 后文件必须仍在");
-		assert.match(r2.text, /用户拒绝/, `拒绝理由要给人看：${r2.text}`);
+		assert.match(r2.text, /user denied/, `拒绝理由要给人看：${r2.text}`);
 	} finally {
 		if (fs.existsSync(dir)) fs.rmSync(dir, { recursive: true, force: true });
 		fx.restore();
@@ -1305,7 +1390,7 @@ test("两层授权：危险目录每次都弹，选 `Allow for this session` 后
 		assert.equal(r1.ok, true, `批准后应当删成功：${r1.text}`);
 		assert.equal(fs.existsSync(first), false);
 		assert.equal(ctx1.selects.length, 1);
-		assert.ok(ctx1.selects[0]!.title.includes("危险目录"), `危险弹框标题：${ctx1.selects[0]!.title}`);
+		assert.ok(ctx1.selects[0]!.title.includes("dangerous directory"), `危险弹框标题：${ctx1.selects[0]!.title}`);
 		assert.deepEqual(
 			ctx1.selects[0]!.options,
 			["Deny", "Allow once", "Allow for this session"],
@@ -1381,7 +1466,7 @@ test("两层授权：headless + 危险目录 → fail-closed 拒绝，文件仍�
 	try {
 		const r = await runCommand(fx.definition, `rm -f ${JSON.stringify(target)}`, fx.projectDir);
 		assert.equal(r.ok, false, "headless 下危险目录必须拒");
-		assert.match(r.text, /非交互环境/, `理由要点明环境：${r.text}`);
+		assert.match(r.text, /non-interactive/, `理由要点明环境：${r.text}`);
 		assert.equal(fs.existsSync(target), true, "文件必须仍在");
 		assert.equal(fs.readFileSync(target, "utf8"), "a\n", "内容也不能变");
 	} finally {
@@ -1404,7 +1489,7 @@ test("永不删除：删 ~/.gnupg 下的探针不弹框、直接拒，文件仍�
 		const ctx = execCtxUI(fx.projectDir, ["Allow for this session", "Allow once"]);
 		const r = await runCommandWithCtx(fx.definition, `rm -f ${JSON.stringify(target)}`, ctx);
 		assert.equal(r.ok, false, "永不删除必须失败");
-		assert.match(r.text, /永不删除/, `理由要点名档位：${r.text}`);
+		assert.match(r.text, /never-delete/, `理由要点名档位：${r.text}`);
 		assert.equal(ctx.selects.length, 0, "不弹框 —— 没有放行选项");
 		assert.equal(ctx.confirms.length, 0);
 		assert.equal(fs.existsSync(target), true, "文件必须仍在");
@@ -1425,7 +1510,7 @@ test("永不删除：headless 下同样拒，且理由点名档位", { skip: san
 	try {
 		const r = await runCommand(fx.definition, `rm -f ${JSON.stringify(target)}`, fx.projectDir);
 		assert.equal(r.ok, false, "headless 下永不删除照样拒");
-		assert.match(r.text, /永不删除/, `理由要点名档位：${r.text}`);
+		assert.match(r.text, /never-delete/, `理由要点名档位：${r.text}`);
 		assert.equal(fs.existsSync(target), true, "文件必须仍在");
 	} finally {
 		if (fs.existsSync(dir)) fs.rmSync(dir, { recursive: true, force: true });
@@ -1446,7 +1531,7 @@ test("永不删除：嵌套条目 ~/.config/gh 下的探针同样拦死（2026-0
 		const ctx = execCtxUI(fx.projectDir, ["Allow for this session", "Allow once"]);
 		const r = await runCommandWithCtx(fx.definition, `rm -f ${JSON.stringify(target)}`, ctx);
 		assert.equal(r.ok, false, "嵌套的永不删除子树必须失败");
-		assert.match(r.text, /永不删除/, `理由要点名档位：${r.text}`);
+		assert.match(r.text, /never-delete/, `理由要点名档位：${r.text}`);
 		assert.equal(ctx.selects.length, 0, "不弹框 —— 没有放行选项");
 		assert.equal(fs.existsSync(target), true, "文件必须仍在");
 		assert.equal(fs.readFileSync(target, "utf8"), "victim\n", "内容也不能变");
@@ -1467,14 +1552,14 @@ test("工具状态目录：删 ~/.pi/agent 下的探针弹三选项框，记住�
 	fs.writeFileSync(first, "a\n");
 	fs.writeFileSync(second, "b\n");
 	try {
-		const ctx1 = execCtxUI(fx.projectDir, ["Allow for this session（并记住该目录）"]);
+		const ctx1 = execCtxUI(fx.projectDir, ["Allow for this session (remember this directory)"]);
 		const r1 = await runCommandWithCtx(fx.definition, `rm -f ${JSON.stringify(first)}`, ctx1);
 		assert.equal(r1.ok, true, `批准后应当删成功：${r1.text}`);
 		assert.equal(fs.existsSync(first), false, "文件真的被删了");
 		assert.equal(ctx1.selects.length, 1, "应当弹一次框（不再是永不删除的直接拒）");
 		assert.deepEqual(
 			ctx1.selects[0]!.options,
-			["Deny", "Allow for this session（并记住该目录）", "Allow once"],
+			["Deny", "Allow for this session (remember this directory)", "Allow once"],
 			"普通目录的三选项",
 		);
 		// 落盘的是目标的父目录（memoryScopeFor 口径：文件记父目录）—— 临时白名单文件，不碰用户真实的那份
@@ -1522,7 +1607,7 @@ test("两层授权：headless + 未授权的普通目录 → 也 fail-closed", {
 	try {
 		const r = await runCommand(fx.definition, `rm -f ${JSON.stringify(target)}`, fx.projectDir);
 		assert.equal(r.ok, false, "没人在屏幕前，普通目录也不能默认同意");
-		assert.match(r.text, /未授权/, `理由要点明未授权：${r.text}`);
+		assert.match(r.text, /without authorization/, `理由要点明未授权：${r.text}`);
 		assert.equal(fs.existsSync(target), true);
 	} finally {
 		if (fs.existsSync(dir)) fs.rmSync(dir, { recursive: true, force: true });
@@ -1552,7 +1637,7 @@ test("两层授权：一条命令里混有已授权与未授权路径 → 仍弹
 		const r = await runCommandWithCtx(fx.definition, `rm -f ${JSON.stringify(a)} ${JSON.stringify(b)}`, ctx);
 		assert.equal(r.ok, false, "有未授权路径 → 不能静默放行整条命令");
 		assert.equal(ctx.selects.length, 1, "应当弹框");
-		assert.ok(ctx.selects[0]!.title.includes("边界外"), `弹框标题：${ctx.selects[0]!.title}`);
+		assert.ok(ctx.selects[0]!.title.includes("outside the deletable boundary"), `弹框标题：${ctx.selects[0]!.title}`);
 		assert.equal(fs.existsSync(b), true, "Deny 后未授权的文件必须仍在");
 	} finally {
 		for (const d of [allowedDir, otherDir]) if (fs.existsSync(d)) fs.rmSync(d, { recursive: true, force: true });
@@ -1579,7 +1664,7 @@ test("两层授权：抽不出被拦路径（cd + 相对路径）→ 不弹框�
 		assert.equal(r.ok, false, "抽不出路径 → 命令保持失败");
 		assert.equal(ctx.confirms.length, 0, "不再走 confirm（沙箱外重跑降级路径已删）");
 		assert.equal(ctx.selects.length, 0, "也不走 select（认不出路径就无法分危险/普通）");
-		assert.ok(r.text.includes("[沙箱] 认不出被拦的具体路径"), `报错要带 [沙箱] 提示：${r.text}`);
+		assert.ok(r.text.includes("[sandbox] Could not tell exactly which path was blocked"), `报错要带 [沙箱] 提示：${r.text}`);
 		assert.ok(r.text.includes("/sandbox-boundary allow"), `提示里要给出路：${r.text}`);
 		assert.equal(fs.existsSync(target), true, "文件必须仍在（什么都没跑成）");
 		assert.equal(fs.existsSync(fx.allowlistFile), false, "什么都没落盘");
@@ -1628,7 +1713,7 @@ test("输出含 EPERM 但无删除形状 → 不弹框、不 confirm、带 [沙�
 		assert.equal(r.ok, false, "命令本身失败（exec EPERM）");
 		assert.equal(ctx.selects.length, 0, "exec 失败不是删除，不弹 select");
 		assert.equal(ctx.confirms.length, 0, "也不 confirm（沙箱外重跑降级路径已删）");
-		assert.ok(r.text.includes("[沙箱] 认不出被拦的具体路径"), `报错要带 [沙箱] 提示：${r.text}`);
+		assert.ok(r.text.includes("[sandbox] Could not tell exactly which path was blocked"), `报错要带 [沙箱] 提示：${r.text}`);
 	} finally {
 		fx.restore();
 	}
@@ -1653,4 +1738,5 @@ test("两层授权：Deny 后文件仍在、内容不变，且什么都没落盘
 		fx.restore();
 	}
 });
+
 

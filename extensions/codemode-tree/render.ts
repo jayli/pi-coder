@@ -148,8 +148,8 @@ export function shapeResultLines(lines: string[], theme: { fg: (color: string, t
 	let start = 0;
 	while (start < lines.length && (isBlankLine(lines[start]!) || isExpandHintLine(lines[start]!))) start++;
 
-	const pipe = `${GUTTER_LEAD}${theme.fg("muted", "│ ")}`;
-	const corner = `${GUTTER_LEAD}${theme.fg("muted", "└ ")}`;
+	const pipe = `${GUTTER_LEAD}${theme.fg("dim", "│ ")}`;
+	const corner = `${GUTTER_LEAD}${theme.fg("dim", "└ ")}`;
 
 	// 只有提示行、没有实质内容：整段挂 `│ `，不丢内容。
 	// 但**一个提示行都没有**时（全空输入）要返回空数组 —— pi 的 `updateDisplay()` 靠

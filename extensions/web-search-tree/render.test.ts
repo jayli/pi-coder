@@ -36,9 +36,9 @@ const theme = {
 	fg: (color: string, text: string) => `<${color}>${text}</${color}>`,
 };
 
-/** 有色的 `│ ` / `└ ` 前缀（结构符走 `muted`，与 bash / codemode 同一槽）。 */
-const PIPE = `${GUTTER_LEAD}<muted>│ </muted>`;
-const CORNER = `${GUTTER_LEAD}<muted>└ </muted>`;
+/** 有色的 `│ ` / `└ ` 前缀（结构符走 `dim`，与 bash / codemode 同一槽）。 */
+const PIPE = `${GUTTER_LEAD}<dim>│ </dim>`;
+const CORNER = `${GUTTER_LEAD}<dim>└ </dim>`;
 
 describe("列位常量", () => {
 	it("圆点列 + 结构符列 = 正文偏移（列 0 / 2 / 4）", () => {
@@ -94,21 +94,21 @@ describe("命令行树形前缀", () => {
 	const dot = "<dim>•</dim>";
 
 	it("首行挂圆点 + 空格，其余行按 connected 选 `│ ` 或两格缩进", () => {
-		const loose = withCallGutter(["search 3 queries", "  \"q1\"", "  \"q2\""], dot, "<muted>│ </muted>", false);
+		const loose = withCallGutter(["search 3 queries", "  \"q1\"", "  \"q2\""], dot, "<dim>│ </dim>", false);
 		assert.equal(loose[0], `${dot} search 3 queries`);
 		assert.equal(loose[1], "    \"q1\"", "还没出结果 = 两格缩进（与 search 的 s 同列）");
 
-		const connected = withCallGutter(["search 3 queries", "  \"q1\""], dot, "<muted>│ </muted>", true);
+		const connected = withCallGutter(["search 3 queries", "  \"q1\""], dot, "<dim>│ </dim>", true);
 		assert.equal(connected[1], `${PIPE}  "q1"`, "结果到了 = 树接上，`│` 落在列 2");
 	});
 
 	it("空行保持空行（不补缩进、不画竖线）", () => {
-		const out = withCallGutter(["a", "", "b"], dot, "<muted>│ </muted>", true);
+		const out = withCallGutter(["a", "", "b"], dot, "<dim>│ </dim>", true);
 		assert.equal(out[1], "");
 	});
 
 	it("每一行都以圆点或结构符开头，且正文是原行（没被改动）", () => {
-		const out = withCallGutter(["x", "y", "z"], dot, "<muted>│ </muted>", true);
+		const out = withCallGutter(["x", "y", "z"], dot, "<dim>│ </dim>", true);
 		assert.equal(out[0], `${dot} x`);
 		assert.equal(out[1], `${PIPE}y`);
 		assert.equal(out[2], `${PIPE}z`);
@@ -217,9 +217,9 @@ describe("失败块里的 `success` 绿换成失败红", () => {
 	});
 
 	it("不碰其它颜色段（只换 success）", () => {
-		const lines = [`<muted>│ </muted><accent>"q"</accent><success>5 sources</success>`];
+		const lines = [`<dim>│ </dim><accent>"q"</accent><success>5 sources</success>`];
 		const out = recolorSuccessToFailure(lines, colorTheme);
-		assert.equal(out[0], `<muted>│ </muted><accent>"q"</accent><toolDiffRemoved>5 sources</success>`);
+		assert.equal(out[0], `<dim>│ </dim><accent>"q"</accent><toolDiffRemoved>5 sources</success>`);
 	});
 
 	it("两个色相同时原样返回（不做无谓改写）", () => {

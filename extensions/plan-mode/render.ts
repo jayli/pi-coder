@@ -49,7 +49,7 @@
  * 第一个实质输出行，其下正文用等宽缩进（树在那里「落地」）；这里用户明确要求 `└`
  * 跟到最后一行。两者都是用户定的形状，别互相「统一」掉。
  *
- * 相同的部分照旧沿用 bash 块的约定：结构符 `│` / `└` 走 `muted` 槽且**自成一段 SGR**
+ * 相同的部分照旧沿用 bash 块的约定：结构符 `│` / `└` 走 `dim` 槽且**自成一段 SGR**
  *（不让后面正文的颜色透上来）。
  *
  * 几何（用户 2026-09-29 第二、三轮逐步定下）：标题行从状态圆点起**顶格**（圆点是
@@ -83,16 +83,16 @@ export interface PlanStatusSource {
  *   ☢ dangerous               pi 原生任意权限（沙箱删除拦截关闭）
  *   ⏵ bypass                  沙箱删除拦截开启（安全默认）
  *   ⏸ plan                    等待模型提交计划
- *   ⏸ plan · 待批准            已提交、等用户审批
- *   ⏸ plan · 写文档中          写文档子态（模型正在把计划落成文件）
+ *   ⏸ plan · awaiting approval     已提交、等用户审批
+ *   ⏸ plan · writing doc          写文档子态（模型正在把计划落成文件）
  */
 export function formatPlanStatus(theme: PlanTheme, source: PlanStatusSource): string {
 	if (source.phase === "plan") {
 		const label = theme.fg("warning", "⏸");
 		if (source.docWriting) {
-			return `${label} ${theme.fg("warning", "plan")} ${theme.fg("accent", "· 写文档中")}`;
+			return `${label} ${theme.fg("warning", "plan")} ${theme.fg("accent", "· writing doc")}`;
 		}
-		if (source.pending) return `${label} ${theme.fg("warning", "plan")} ${theme.fg("muted", "· 待批准")}`;
+		if (source.pending) return `${label} ${theme.fg("warning", "plan")} ${theme.fg("muted", "· awaiting approval")}`;
 		return `${label} ${theme.fg("warning", "plan")}`;
 	}
 	if (source.phase === "dangerous") {

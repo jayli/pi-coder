@@ -88,7 +88,7 @@ export class Speaker {
 		try {
 			child = this.spawnFn(this.sayBin, args, { stdio: "ignore", detached: false });
 		} catch (error) {
-			this.onError(`无法启动 say：${error instanceof Error ? error.message : String(error)}`);
+			this.onError(`Could not start say: ${error instanceof Error ? error.message : String(error)}`);
 			return;
 		}
 
@@ -104,7 +104,7 @@ export class Speaker {
 
 		child.on("exit", finish);
 		child.on("error", (error: unknown) => {
-			this.onError(`say 执行失败：${error instanceof Error ? error.message : String(error)}`);
+			this.onError(`say exited with an error: ${error instanceof Error ? error.message : String(error)}`);
 			finish();
 		});
 		// 不 unref：pi 退出时会有 session_shutdown 的 stop()，但万一漏了也别把句尾掐掉。

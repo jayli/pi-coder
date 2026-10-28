@@ -249,12 +249,12 @@ function memoryToolRenderers(toolName: string) {
 							keyLength > 0
 								? theme.fg("syntaxKeyword", row.slice(0, keyLength)) + theme.fg("text", row.slice(keyLength))
 								: theme.fg("text", row);
-						return BODY_INDENT + theme.fg("muted", prefixes[index] ?? TREE_PIPE) + body;
+						return BODY_INDENT + theme.fg("dim", prefixes[index] ?? TREE_PIPE) + body;
 					});
 					if (hidden > 0) {
 						lines.push(
 							BODY_INDENT +
-								theme.fg("muted", prefixes[visible.length] ?? TREE_PIPE) +
+								theme.fg("dim", prefixes[visible.length] ?? TREE_PIPE) +
 								theme.fg("muted", previewMoreLinesHint(hidden)),
 						);
 					}

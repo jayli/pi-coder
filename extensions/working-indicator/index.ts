@@ -138,6 +138,38 @@
  * 开关：`PI_SPINNER_RAINBOW=off` 回到单色 accent；`PI_SPINNER_COLOR_HOLD=<帧数>` 调每种
  * 颜色持续多久（默认 19 帧 ≈ 1.5s；1 = 每帧一换，在 80ms 帧率下是频闪，不是幻彩）。
  *
+ * ## 标签扫光（`label-shadow.ts`）
+ *
+ * 用户 2026-10-28 要的效果：一道有渐变的黑影**从左到右快速划过整个状态词**，像有个东西飞过去
+ * 遮住了光，单词中间被压暗一下又立刻亮回来；**两秒一次**。范围是**所有状态词**（`Working` /
+ * `Thinking` / `Editing` / `Writing` / `Reading` / `Tools Calling`，用户定），压暗方式是**字色
+ * 混向黑**（用户定：不用 `\x1b[2m` 那种由终端自己决定深度的 faint，也不用主题的 muted 槽）。
+ *
+ * 时间轴是**恒定速度**而不是「每周期固定时长」（用户定：不管单词多长，划过的速度一样）：
+ * 默认 20 列/秒，两秒一趟 ⇒ 一趟能走 40 列。`Working`（7 列）约 0.65s 飞过、剩下 1.35s 词上
+ * 无影子；`Subagent watchdog reviewing`（27 列）则扫 1.65s。
+ *
+ * **跨状态连续**（用户 2026-10-28 定）：影子位置只由**回合时钟**决定（`shadowColumnAt`），与标签
+ * 宽度无关。所以扫到单词一半时状态切换了，影子在**原位置**继续往右扫（换个更长的词就是同一道
+ * 影子接着走）；如果新标签比影子位置还短（影子已经飞到它后面），这一帧就不画，**等两秒间隔
+ * 到点再从左边重来** —— 不会出现「影子瞬移回句首」。
+ *
+ * 实现上三件事值得记住：
+ *   - **定时器是自排程的一次性 setTimeout，不是 50ms interval**：`shadowSchedule` 返回
+ *     「下一帧要等多久」，静止段里那个值就是「下一趟开始还有多久」，所以 2/3 的时间一次重绘
+ *     都不发。流式期间 `message_update` 每秒会调几十次 `refresh()`，所以重复排帧要按
+ *     「到点时刻差 < 5ms 就当同一帧」去重，否则定时器一直在被推倒重建。
+ *   - **静止段与带子完全在标签外的那两帧必须走 `paint.plain(label)` 一条路径**：`refresh()` 靠
+ *     `message === lastMessage` 去重，如果静止时把标签拆成 7 个同色段，字符串就每周转都不一样，
+ *     会变成每秒几十次无用重绘。`shadowSegments` 在这两种情况下返回 `null`。
+ *   - **颜色只从主题的活值现取**（`theme.colors[LABEL_COLOR]` + `theme.getColorMode()`）：换肤后
+ *     下一个 1s tick 自然就用新色，不需要额外的失效逻辑；拿不到具体色值（主题 `text` 是空串 /
+ *     终端没报颜色 / pi-tui 缺那几个函数）就退回静态标签 —— 不猜颜色。
+ *
+ * 开关：`PI_LABEL_SHADOW=off` 整个关掉；`PI_LABEL_SHADOW_PERIOD_MS` / `_SPEED`（列/秒）/
+ * `_BAND`（带宽列数）/ `_STRENGTH`（深处压暗比例，默认 0.72）四个旋钮，默认值见
+ * `DEFAULT_SHADOW_TIMING`。
+ *
  * ## bash 执行中 `●`（working 行尾）
  *
  * 需求原文：把 `●` 挂在 `⠼ Tools Calling (13m 59s)` 后面，bash 执行时长超过 1 秒后出现、
@@ -163,24 +195,23 @@
  * ## 回合结束符 `✻ Churned for 3m 37s · done 11:52 PM`（turn-marker.ts）
  *
  * 用户 2026-10-07 定：一轮对话跑完 spinner 直接消失、不留痕迹，要求把它原地换成一条静态
- * 结束符。文本 / 词表 / 时钟都在 `turn-marker.ts`（十个词随机取一个、12 小时制 `11:52 PM`、
- * 整行 dim 色 —— 与 recap 行里 `Recap:` 标签同档；纯模块，单测在 `turn-marker.test.ts`）；
- * 这里只管时机与落点：
- *   - 落点是**编辑器上方的 widget 区**（recap 摘要 / 任务清单同一个区），而不是原来的
- *     statusContainer：pi 在应用层 `agent_end` 就 `clearStatusIndicator("working")`，而
- *     `setWorkingMessage` / `setWorkingVisible` 只在流式期间有效 —— 扩展没有让 statusContainer
- *     在回合外继续渲染的接口。占的行数保持原样：spinner 在时编辑器上方是「空行 + 文案 +
- *     空行」（它自带一条前导空行，下面那条是 widget 区的前导空行），结束符这一格也是三行
- *     —— widget 区的前导空行 + 结束符 + **组件自己补的行尾空行**（用户 2026-10-07 要求：
- *     结束符下面必须有空行，和 spinner 在时一样），所以编辑器不会上移一格。
+ * 结束符。文本 / 词表 / 时钟 / 条目契约都在 `turn-marker.ts`（十个词随机取一个、12 小时制
+ * `11:52 PM`、整行 dim 色 —— 与 recap 行里 `Recap:` 标签同档；纯模块，单测在
+ * `turn-marker.test.ts`）；这里只管时机与落点：
+ *   - 落点是**会话条目**（`pi.appendEntry(TURN_MARKER_ENTRY_TYPE, { text })` +
+ *     `pi.registerEntryRenderer`），不是编辑器上方的 widget（用户 2026-10-26 定，替换
+ *     10-07 的 widget 方案）。widget 那条路的病根：它占的是编辑器上方那一格，`agent_start`
+ *     时必须显式清掉（否则盖在活 spinner 上）⇒ **用户一敲下一句，上一回合的结束符就消失了**。
+ *     会话条目活在 chat 流里，往上滚仍在、`/resume` 与重开也仍在。`type: "custom"` 的条目
+ *     不进模型上下文（pi 的 `convertToLlm` 直接丢弃），所以零 token 成本；也不再需要 widget
+ *     那套「行尾补空行」间隔补偿 —— `CustomEntryComponent` 自带一条前导空行。
  *   - 时机：`agent_settled`（回合真正结束 —— `agent_end` 之后还可能自动重试 / 压缩 / 排队消息）。
  *     时长 = `agent_start` → `agent_settled` 的墙钟，复用 spinner 读秒的同一个 `formatDuration`，
  *     结束时长不会与 spinner 最后一帧对不上。
  *   - 只认正常完成：结局在 `agent_before_settle` 记下（`agent_settled` 不带载荷），`aborted` /
- *     `error` 不画 —— ESC 打断保持现状，spinner 直接消失。
- *   - **还有子代理在跑就不画**（用户 2026-10-08 要求，见下）。
- *   - 清理：`agent_start`（下一回合把位置让回给 spinner）、`session_shutdown`；会话替换时
- *     pi 的 `resetExtensionUI()` 也会清掉扩展 widget。
+ *     `error` 不写 —— ESC 打断保持现状，spinner 直接消失。
+ *   - **还有子代理在跑就不写**（用户 2026-10-08 要求，见下）。
+ *   - 不做任何清理：条目一旦写进会话就是历史，`agent_start` 不再碰它（这正是这次改动的目的）。
  *   - 开关 `PI_TURN_MARKER=off`。
  *
  * ## 为什么有子代理在跑时不画结束符（`subagentsBusy`）
@@ -198,9 +229,9 @@
  * 不 import pi-subagents 的任何文件（它是独立安装的 npm 包，也可能压根没装）。
  *
  * 两条规则（用户 2026-10-08 选）：
- *   - 探到有活 → 不画。子代理唤醒的那一轮结束时（若真跑完了）会画自己的结束符，语义
+ *   - 探到有活 → 不写。子代理唤醒的那一轮结束时（若真跑完了）会写自己的结束符，语义
  *     正好落回「这轮真做完了」。
- *   - 探不到答案（没装 pi-subagents / 协议不认识 / 超时 / 抛异常）→ 当作没有，照常画
+ *   - 探不到答案（没装 pi-subagents / 协议不认识 / 超时 / 抛异常）→ 当作没有，照常写
  *     （fail-open，recap 的既定口径）。
  *
  * 代价：每个正常完成的回合多一次进程内 RPC。装了 pi-subagents 是毫秒级；没装的机器要
@@ -213,6 +244,7 @@
 
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
+import * as piTui from "@earendil-works/pi-tui";
 import {
 	BASH_SPINNER_BLINK_MS,
 	BASH_SPINNER_COLOR,
@@ -240,12 +272,22 @@ import {
 	planSummaryRequest,
 } from "./summary-request.ts";
 import { buildContinuationSummaryPrompt, isContinuationPhrase } from "./summary-continuation.ts";
+import {
+	DEFAULT_SHADOW_TIMING,
+	labelWidth,
+	paintLabel,
+	shadowSchedule,
+	shadowSegments,
+	type ShadowPaint,
+	type ShadowTiming,
+} from "./label-shadow.ts";
 import { hasActiveSubagentWork } from "../recap/subagents.ts";
 import {
-	TURN_MARKER_WIDGET_KEY,
+	TURN_MARKER_ENTRY_TYPE,
 	formatEndClock,
 	formatTurnMarker,
 	pickTurnVerb,
+	turnMarkerTextFromEntry,
 } from "./turn-marker.ts";
 
 /** 工具名 → 文案。没列进来的工具一律回落到 Working（按需求「其他情况都显示 Working」）。 */
@@ -258,6 +300,19 @@ const TOOL_LABELS: Record<string, string> = {
 
 const THINKING_LABEL = "Thinking";
 const DEFAULT_LABEL = "Working";
+/**
+ * **不参与标签扫光**的状态（用户 2026-10-28 定）：`Thinking` 与三个工具态
+ * （`Tools Calling` / `Editing` / `Writing`）。保留扫光的只有 `Working` 与 `Reading`。
+ *
+ * 从 `TOOL_LABELS` 派生而不是重写字符串：工具名 → 文案的映射只该有一处，否则改文案时
+ * 这个集合会暗暗失效（表现是「刚排除掉的状态又开始扫了」，很难想到是这里）。
+ */
+const SHADOW_EXCLUDED_LABELS: ReadonlySet<string> = new Set([
+	THINKING_LABEL,
+	TOOL_LABELS.bash,
+	TOOL_LABELS.edit,
+	TOOL_LABELS.write,
+] as string[]);
 /**
  * 问卷工具名（`ask-user-question/` 扩展注册的）。它在问卷期间把 working indicator 冻结成单帧、
  * 退出时无参恢复成 pi 的**默认**帧（见文件头「spinner 幻彩帧」），所以本扩展要在它结束时补装彩帧。
@@ -360,8 +415,68 @@ const BASH_SPINNER_ENABLED = (process.env.PI_BASH_SPINNER ?? "").toLowerCase() !
  */
 const SPINNER_RAINBOW_ENABLED = (process.env.PI_SPINNER_RAINBOW ?? "").toLowerCase() !== "off";
 /**
+ * 标签扫光开关（`PI_LABEL_SHADOW=off` 关闭，标签回到静态单色）。
+ * 动画的时间轴与形状在 `label-shadow.ts`（纯模块，13 条用例）。
+ */
+const LABEL_SHADOW_ENABLED = (process.env.PI_LABEL_SHADOW ?? "").toLowerCase() !== "off";
+/**
+ * 扫光的可调参数（都能用 env 覆盖，`PI_LABEL_SHADOW_*`）：周期 / 速度（列每秒）/ 带宽 /
+ * 最深处的压暗强度。默认值见 `DEFAULT_SHADOW_TIMING`：两秒一趟、20 列/秒、6 列宽的软边带、
+ * 最深处压到原色的 28%。
+ */
+const SHADOW_TIMING: ShadowTiming = {
+	periodMs: envNumber("PI_LABEL_SHADOW_PERIOD_MS", DEFAULT_SHADOW_TIMING.periodMs),
+	columnsPerSecond: envNumber("PI_LABEL_SHADOW_SPEED", DEFAULT_SHADOW_TIMING.columnsPerSecond),
+	bandColumns: envNumber("PI_LABEL_SHADOW_BAND", DEFAULT_SHADOW_TIMING.bandColumns),
+	maxStrength: envNumber("PI_LABEL_SHADOW_STRENGTH", DEFAULT_SHADOW_TIMING.maxStrength),
+};
+/** 解析 env 里的正数；缺省 / 解析不出就用默认值（`normalizeTiming` 还会再夹一次范围）。 */
+function envNumber(name: string, fallback: number): number {
+	const raw = (process.env[name] ?? "").trim();
+	if (raw === "") return fallback;
+	const value = Number(raw);
+	return Number.isFinite(value) ? value : fallback;
+}
+/**
+ * 影子往哪个方向压暗：把标签本色按 `strength` 混向**黑**（用户 2026-10-28 选的「字色压暗」）。
+ *
+ * 为什么不是 `\x1b[2m`（SGR 2 faint）：那是终端自己决定压多暗，各终端差异极大，而且 faint 与
+ * 正文色不是同一条色相 —— 看着像「字变淡了」而不是「一道影子遮住了光」。混向黑能在深浅两种
+ * 皮肤上都真的变暗，且两个色值都是主题自己的。
+ *
+ * 拿不到主题的具体色值（`text` 被设成空串 / 终端没报颜色 / pi-tui 缺函数）时返回 null，调用方
+ * 退回静态标签 —— 动画是装饰，任何一步拿不到真色值就不猜。
+ */
+function createShadowPaint(theme: ExtensionContext["ui"]["theme"]): ShadowPaint | null {
+	const ops = SHADOW_COLOR_OPS;
+	if (ops === null) return null;
+	let base: unknown;
+	let mode: string;
+	try {
+		base = theme.colors[LABEL_COLOR];
+		mode = theme.getColorMode();
+	} catch {
+		return null;
+	}
+	if (base === undefined) return null;
+	const black = ops.rgbColor(0, 0, 0);
+	// 每个量化档的转义只算一次：一帧最多 8 段，但每秒可能有 20 帧。
+	const ansiCache = new Map<number, string>();
+	const ansiFor = (strength: number): string => {
+		const cached = ansiCache.get(strength);
+		if (cached !== undefined) return cached;
+		const ansi = ops.foregroundAnsi(ops.mixColors(base, black, strength), mode);
+		ansiCache.set(strength, ansi);
+		return ansi;
+	};
+	return {
+		plain: (text) => theme.fg(LABEL_COLOR, text),
+		shaded: (text, strength) => `${ansiFor(strength)}${text}\x1b[39m`,
+	};
+}
+/**
  * 回合结束符开关（`PI_TURN_MARKER=off` 关闭，回到「回合结束 spinner 直接消失」）。
- * 形状 / 词表 / 12 小时制时钟都在 `turn-marker.ts`。
+ * 关掉后不写会话条目，也不注册渲染器。形状 / 条目契约 / 12 小时制时钟都在 `turn-marker.ts`。
  */
 const TURN_MARKER_ENABLED = (process.env.PI_TURN_MARKER ?? "").toLowerCase() !== "off";
 /**
@@ -369,6 +484,13 @@ const TURN_MARKER_ENABLED = (process.env.PI_TURN_MARKER ?? "").toLowerCase() !==
  * （含行首 `✻`）一个色段，所以只有一个槽位。
  */
 const TURN_MARKER_COLOR = "dim";
+/**
+ * 结束符条目的行首缩进（**列数**）。
+ *
+ * 会话条目的渲染器直接返回行，没有 `Text` 的 `paddingX=1` 那一格；而同一屏里的用户消息、
+ * recap 行、工具块都带一格缩进，留一格让结束符与它们对齐（与旧 widget 方案看的行首位置一致）。
+ */
+const TURN_MARKER_INDENT = " ";
 /**
  * 结束符前那次「还有子代理在跑吗」探测的超时（`PI_TURN_MARKER_PROBE_TIMEOUT_MS`）。
  *
@@ -434,6 +556,34 @@ export interface WorkingMessageTheme {
 }
 
 /**
+ * `label-shadow.ts` 需要的颜色运算（真实现来自 pi-tui）。单独列出来是因为这些导出是**较新**的
+ * pi-tui 才有的：扩展拷到别的 pi 上时，缺函数只会让影子退化成静态标签，而不是让整个扩展加载失败
+ * （ESM 的静态命名导入在链接期检查，缺一个导出就整个文件加载不了 —— `theme-extra/colors.ts` 记过同一个坑）。
+ */
+interface ShadowColorOps {
+	parseColor(value: string | number): unknown;
+	mixColors(first: unknown, second: unknown, amount: number): unknown;
+	foregroundAnsi(color: unknown, mode: string): string;
+	rgbColor(r: number, g: number, b: number): unknown;
+}
+
+/** 从 pi-tui 的命名空间对象里组一份 ops；缺任何一个函数就返回 null（= 关掉影子动画）。 */
+function shadowColorOpsFrom(tui: unknown): ShadowColorOps | null {
+	const candidate = tui as Partial<ShadowColorOps> | null | undefined;
+	const { parseColor, mixColors, foregroundAnsi, rgbColor } = candidate ?? {};
+	if (
+		typeof parseColor !== "function" ||
+		typeof mixColors !== "function" ||
+		typeof foregroundAnsi !== "function" ||
+		typeof rgbColor !== "function"
+	)
+		return null;
+	return { parseColor, mixColors, foregroundAnsi, rgbColor };
+}
+
+const SHADOW_COLOR_OPS = shadowColorOpsFrom(piTui);
+
+/**
  * 组装 spinner 文案：标签（`Tools Calling` / `Editing` / …）走正文色，后面的统计段
  * （`(↓ 70 tokens · 10s)`）走 muted 灰。
  *
@@ -455,9 +605,27 @@ export function formatWorkingMessage(
 	label: string,
 	stats: string | null,
 ): string {
-	if (theme === undefined) return stats === null ? label : `${label} ${stats}`;
-	const styledLabel = theme.fg(LABEL_COLOR, label);
-	// 分隔空格放进统计段一起染 muted，免得它孤零零地留在终端默认色上。
+	if (theme === undefined) return labelWithStats(label, stats);
+	return formatStyledWorkingMessage(theme, theme.fg(LABEL_COLOR, label), stats);
+}
+
+/** 纯字符串拼接（`theme === undefined` 的降级形态）：不染色，外层按 pi 默认色渲染。 */
+function labelWithStats(label: string, stats: string | null): string {
+	return stats === null ? label : `${label} ${stats}`;
+}
+
+/**
+ * 与 `formatWorkingMessage` 相同，但标签**已经上过色**（影子动画逐段染色后的结果）。
+ *
+ * 拆成两个函数是因为标签的颜色不再是「一个色」，而是一段段不同深浅的色 —— 统计段的 muted
+ * 处理、分隔空格归属这些细节必须两边完全一致，所以只有「标签怎么染色」这一步不一样。
+ */
+function formatStyledWorkingMessage(
+	theme: WorkingMessageTheme | undefined,
+	styledLabel: string,
+	stats: string | null,
+): string {
+	if (theme === undefined) return labelWithStats(styledLabel, stats);
 	return stats === null ? styledLabel : `${styledLabel}${theme.fg(STATS_COLOR, ` ${stats}`)}`;
 }
 
@@ -699,6 +867,14 @@ export default function (pi: ExtensionAPI) {
 	let ctxRef: ExtensionContext | null = null;
 	let lastMessage: string | null = null;
 	/**
+	 * 标签扫光的「下一帧」定时器（见 `label-shadow.ts`）：一次性、按算出来的列宽自排程，
+	 * 静止段里就排一个「下一趟开始」的长定时器 —— 不做固定频率的 interval（静止的 2/3 时间里
+	 * 一次重绘都不该发）。
+	 */
+	let shadowTimer: ReturnType<typeof setTimeout> | null = null;
+	/** 已经排上的那一帧到点的绝对时刻（`shadowTimer === null` 时为 null）。 */
+	let shadowDueAt = 0;
+	/**
 	 * 弹窗（`ui_prompt_start` → `ui_prompt_end`）期间为 true：所有定时器暂停、spinner 冻结成
 	 * 单帧，`refresh()` 早退。目的：pi 的主屏渲染每次重绘都把视口钉在底部，弹窗期间任何
 	 * 周期性重绘（Loader 的 80ms 动画、本扩展的 1s 读秒）都会把用户手动上翻的滚动位置立刻
@@ -796,6 +972,32 @@ export default function (pi: ExtensionAPI) {
 	}
 
 	/**
+	 * 把当前标签上好色：开了扫光、这个状态不在排除名单里、且主题色解析得出来时逐段压暗，
+	 * 否则就是原来那一整段纯色。`label` 未染色（纯文本），返回的字符串带完整 ANSI。
+	 *
+	 * 被排除的状态返回 `nextChangeMs: null` ⇒ 不排扫光定时器，这段时间一帧都不多画。
+	 * 回到有扫光的状态时，位置由回合时钟现算（见 `label-shadow.ts` 的 `shadowColumnAt`），
+	 * 所以退出 `Thinking` 之后影子接着当前相位走，不会为了「补上漏掉的那几趟」而连扫。
+	 */
+	function paintWorkingLabel(
+		ctx: ExtensionContext,
+		label: string,
+		now: number,
+	): { styled: string; nextChangeMs: number | null } {
+		const plainLabel = (): { styled: string; nextChangeMs: null } => ({
+			styled: ctx.ui.theme.fg(LABEL_COLOR, label),
+			nextChangeMs: null,
+		});
+		if (!LABEL_SHADOW_ENABLED || SHADOW_EXCLUDED_LABELS.has(label)) return plainLabel();
+		const paint = createShadowPaint(ctx.ui.theme);
+		if (paint === null) return plainLabel();
+		// 宽度用 pi-tui 的 `visibleWidth`（与折行/摘要同一套实现），所以宽字符也按整格算。
+		const schedule = shadowSchedule(now - (turnStartedAt ?? now), labelWidth(label, visibleWidth), SHADOW_TIMING);
+		const segments = shadowSegments(label, schedule, SHADOW_TIMING, visibleWidth);
+		return { styled: paintLabel(label, segments, paint), nextChangeMs: schedule.nextChangeMs };
+	}
+
+	/**
 	 * 刷新文案。只在字符串真的变了时才调 `setWorkingMessage`，避免每秒无谓重渲染。
 	 *
 	 * `ctx.ui` 的读取（取主题、写文案）包在 try/catch 里：会话被替换或 `/reload` 之后，
@@ -814,6 +1016,9 @@ export default function (pi: ExtensionAPI) {
 			return;
 		}
 		let message: string;
+		let shadowNextChange: number | null = null;
+		// 不带扫光的标签（watchdog）不参与影子动画，也不排下一帧。
+		let animated = false;
 		try {
 			const now = Date.now();
 			// watchdog 审查中：只显示固定文案，不拼 token/时长，也不跑 bash spinner。
@@ -832,7 +1037,10 @@ export default function (pi: ExtensionAPI) {
 			}
 			driveBashSpinner(now);
 			const parts = buildParts(now);
-			let left = formatWorkingMessage(ctx.ui.theme, parts.label, parts.stats);
+			const painted = paintWorkingLabel(ctx, parts.label, now);
+			shadowNextChange = painted.nextChangeMs;
+			animated = true;
+			let left = formatStyledWorkingMessage(ctx.ui.theme, painted.styled, parts.stats);
 			left += bashSpinnerText(ctx.ui.theme);
 			// 模型摘要到达后顶掉原文；没到 / 失败就是截断后的原文。
 			const summarySource = promptSummaryText ?? promptText;
@@ -844,13 +1052,44 @@ export default function (pi: ExtensionAPI) {
 			stopActivity();
 			return;
 		}
-		if (message === lastMessage) return;
+		if (message === lastMessage) {
+			// 文字没变（比如扫光落在强度全 0 的尾部、或 1s 读秒还没跳），但影子下一位可能已经要变：
+			// 照样把下一帧排上，不然动画会靠每秒的 tick 才动一下。
+			if (animated) armShadowFrame(shadowNextChange);
+			return;
+		}
 		lastMessage = message;
 		try {
 			ctx.ui.setWorkingMessage(message);
 		} catch {
 			stopActivity();
+			return;
 		}
+		if (animated) armShadowFrame(shadowNextChange);
+	}
+
+	/**
+	 * 排扫光的下一帧（一次性定时器，自排程）。`null`（未开动画 / 解不出色值）或弹窗中不排；
+	 * 已经在排的那个先清掉 —— 每次 `refresh()` 算出的都是「从现在算起」的最新延时，
+	 * 多留着旧的那个只会多打一次无用重绘。
+	 */
+	function armShadowFrame(nextChangeMs: number | null): void {
+		if (nextChangeMs === null || uiPromptActive || ctxRef === null || turnStartedAt === null) {
+			stopShadowTimer();
+			return;
+		}
+		const dueAt = Date.now() + Math.max(1, nextChangeMs);
+		// 流式期间 `message_update` 每秒几十次调 `refresh()`：每次都重排会让定时器不停被推倒重建。
+		// 算出来的到点时刻与已排的那个相差不到 5ms 就当同一帧，不动它。
+		if (shadowTimer !== null && Math.abs(dueAt - shadowDueAt) < 5) return;
+		stopShadowTimer();
+		shadowDueAt = dueAt;
+		shadowTimer = setTimeout(() => {
+			shadowTimer = null;
+			refresh();
+		}, Math.max(1, nextChangeMs));
+		// unref：动画不许把进程吊住。
+		shadowTimer.unref?.();
 	}
 
 	function startTimer(ctx: ExtensionContext): void {
@@ -866,7 +1105,17 @@ export default function (pi: ExtensionAPI) {
 			clearInterval(timer);
 			timer = null;
 		}
+		stopShadowTimer();
 		ctxRef = null;
+	}
+
+	/** 停掉扫光的下一帧（幂等）。弹窗 / 回合结束 / 旧 ctx 三处都调它。 */
+	function stopShadowTimer(): void {
+		if (shadowTimer !== null) {
+			clearTimeout(shadowTimer);
+			shadowTimer = null;
+		}
+		shadowDueAt = 0;
 	}
 
 	/**
@@ -886,6 +1135,7 @@ export default function (pi: ExtensionAPI) {
 			clearInterval(timer);
 			timer = null;
 		}
+		stopShadowTimer();
 		stopBashSpinner();
 		try {
 			ctx.ui.setWorkingIndicator({ frames: [ctx.ui.theme.fg("accent", FROZEN_SPINNER_FRAME)] });
@@ -996,42 +1246,58 @@ export default function (pi: ExtensionAPI) {
 	}
 
 	/**
-	 * 回合结束符：把一行静态文案画在 spinner 原来那一行（形状 / 词表见 `turn-marker.ts`）。
+	 * 回合结束符：写一条会话条目（形状 / 词表 / 条目契约见 `turn-marker.ts`）。
 	 *
-	 * 为什么是 widget 而不是继续用 working message：pi 在应用层 `agent_end` 就
-	 * `clearStatusIndicator("working")` 了，而 `setWorkingMessage` / `setWorkingVisible` 只在
-	 * 流式期间有效 —— 扩展没有让 statusContainer 在回合外继续渲染的接口。编辑器上方的 widget
-	 * 区是唯一能常驻的位置，占的行数也正好对得上：spinner 在时上方是「空行 + 文案 + 空行」
-	 * （它自带一条前导空行，下面那条是 widget 区的前导空行），结束符这一格同样是三行 ——
-	 * widget 区的前导空行 + 结束符 + 下面补的行尾空行。本机装的 prompt-editor 没开
-	 * embedWorkingStatus，spinner 走独立行，这条恒定成立。
+	 * 为什么是会话条目而不是 working message / widget（用户 2026-10-26 定）：
+	 *   - working message 走不通 —— pi 在应用层 `agent_end` 就 `clearStatusIndicator("working")`，
+	 *     `setWorkingMessage` / `setWorkingVisible` 只在流式期间有效，扩展没有让 statusContainer
+	 *     在回合外继续渲染的接口。
+	 *   - 旧的 widget 方案能留在编辑器上方，但它占的是**那一格**：下一回合的 `agent_start`
+	 *     必须把它清掉（不清就盖在活 spinner 上）⇒ 用户一敲下一句，上一回合的结束符就消失。
+	 *     用户要的正好相反：这行属于对话流，应该留在历史里。
+	 *   - `type: "custom"` 的会话条目不进模型上下文（pi 的 `convertToLlm` 直接丢弃），所以
+	 *     零 token 成本；它是真历史，往上滚 / `/resume` / 重开都还在。
 	 *
-	 * 用工厂形式（而不是字符串数组）：上色要走 `theme` 的 live proxy，`/theme` 换肤后重渲染
-	 * 就自愈；字符串数组在注册那一刻就把颜色烘死了。
+	 * 只写文本，不写颜色：渲染器拿 `theme` 的 live proxy 上色，`/theme` 换肤后重绘就自愈
+	 * （把转义序列烘进条目的话，历史颜色会永远钉在旧皮肤上）。
 	 *
-	 * 自己补一个前导空格：spinner 与 recap 的缩进来自 `Text` 的 paddingX=1（渲染器给的），
-	 * widget 组件直接返回字符串，没有那一格。
+	 * 无 UI（`pi -p` / json / rpc）不写：结束符是屏幕装饰，那些模式里没人画它，写进去只会
+	 * 让会话日志多出无意义的条目（旧 widget 方案同样靠 `ctx.hasUI` 挡住）。
 	 *
-	 * 整个动作包 try/catch：`hasUI` 与 `ui` 都是 runner 的 assertActive 代理，stale ctx 在
-	 * **读**的这一步就抛，比 widget 的 render 更早；结束符只是装饰，抛了就当没画。
+	 * 包 try/catch：`pi.appendEntry` 在 stale 运行时（会话被替换 / `/reload`）会抛，而结束符
+	 * 只是装饰 —— 抛了就当没写，不能把回合收尾弄挂。
 	 */
-	function showTurnMarker(ctx: ExtensionContext, text: string): void {
+	function writeTurnMarker(ctx: ExtensionContext, text: string): void {
 		try {
 			if (!ctx.hasUI) return;
-			ctx.ui.setWidget(TURN_MARKER_WIDGET_KEY, (_tui, theme) => ({
+			pi.appendEntry<{ text: string }>(TURN_MARKER_ENTRY_TYPE, { text });
+		} catch {
+			// stale runtime / 宿主不支持：静默跳过。
+		}
+	}
+
+	/**
+	 * 结束符条目的渲染器。
+	 *
+	 * pi 会在**加载时**注册它、在会话回放 / 实时追加时按 `customType` 调它，所以它必须是无状态
+	 * 纯函数：只读 `entry.data.text`，不碰本扩展的闭包状态（回放历史条目时那些状态早就没了）。
+	 *
+	 * 形状不对 / 不是本扩展的条目 → 返回 `undefined`（不画，也不报错）。
+	 *
+	 * 宽度拿 `truncateToWidth` 裁一行：结束符恒单行，窄终端下宁可截断也不折行（折行会让下面
+	 * 那条前导空行看上去像两条）。
+	 */
+	if (TURN_MARKER_ENABLED) {
+		pi.registerEntryRenderer<{ text?: unknown }>(TURN_MARKER_ENTRY_TYPE, (entry, _options, theme) => {
+			const text = turnMarkerTextFromEntry(entry);
+			if (text === null) return undefined;
+			return {
 				render: (width: number) => [
-					truncateToWidth(` ${theme.fg(TURN_MARKER_COLOR, text)}`, width, ""),
-					// 行尾一条空行（用户 2026-10-07 要求）：spinner 在时它下面本来就有一条
-					// （widget 区的前导空行），不补的话结束符会与编辑器贴在一起、整块上移一格。
-					// 顺带也是 widget 之间的间隔：recap / simple-task 的 `gap.ts` 看到邻居末行
-					// 是空行就不再补 —— 两个 widget 之间仍恰好一行。
-					"",
+					truncateToWidth(`${TURN_MARKER_INDENT}${theme.fg(TURN_MARKER_COLOR, text)}`, width, ""),
 				],
 				invalidate() {},
-			}));
-		} catch {
-			// stale ctx / 宿主不支持：静默跳过。
-		}
+			};
+		});
 	}
 
 	/**
@@ -1045,15 +1311,6 @@ export default function (pi: ExtensionAPI) {
 			return await hasActiveSubagentWork(pi.events, { timeoutMs: TURN_MARKER_PROBE_TIMEOUT_MS });
 		} catch {
 			return false;
-		}
-	}
-
-	/** 清掉结束符（下一回合开始；会话替换时 pi 的 `resetExtensionUI()` 也会清）。 */
-	function clearTurnMarker(ctx: ExtensionContext): void {
-		try {
-			ctx.ui.setWidget(TURN_MARKER_WIDGET_KEY, undefined);
-		} catch {
-			// stale ctx：不碰 UI。
 		}
 	}
 
@@ -1259,8 +1516,6 @@ export default function (pi: ExtensionAPI) {
 		clearWatchdogHint();
 		// print / json 模式没有 working loader 行，起定时器只是白跑。
 		if (ctx.hasUI) {
-			// 新回合开始，上一回合的结束符退场（本回合结束时再画新的）。
-			clearTurnMarker(ctx);
 			// 回合开始时装帧表：此刻 spinner 还没渲染（流式开始才出现），相位复位看不见；
 			// 换会话后 pi 的 resetExtensionUI() 会把 indicator 还原成默认帧，这里一并补回来。
 			installRainbowSpinner(ctx);
@@ -1345,7 +1600,7 @@ export default function (pi: ExtensionAPI) {
 		clearWatchdogHint();
 	});
 	pi.on("agent_before_settle", async (event) => {
-		// 结局只有这里能拿到（`agent_settled` 不带载荷），结束符按它决定画不画。
+		// 结局只有这里能拿到（`agent_settled` 不带载荷），结束符按它决定写不写。
 		turnOutcome = event.outcome;
 		clearWatchdogHint();
 	});
@@ -1375,18 +1630,17 @@ export default function (pi: ExtensionAPI) {
 		} catch {
 			// 旧 ctx，忽略
 		}
-		// 结束符：spinner 此刻已被 pi 清掉，原地留一行「跑了多久 · 几点结束」。
-		// 只认正常完成；`startedAt === null`（没见到 agent_start，比如中途重载）不画。
+		// 结束符：写一条会话条目，历史里留一行「跑了多久 · 几点结束」。
+		// 只认正常完成；`startedAt === null`（没见到 agent_start，比如中途重载）不写。
 		if (!TURN_MARKER_ENABLED || !completed || startedAt === null) return;
-		// 还有子代理在后台跑就不画（见文件头）：那行「done」此刻是假的，它正贴在
+		// 还有子代理在后台跑就不写（见文件头）：那行「done」此刻是假的，它正贴在
 		// pi-subagents 的 `async subagent` 块下面。探测放在上面两道判断之后，被
 		// 打断 / 报错的回合一次都不问。
 		if (await subagentsBusy()) return;
-		// 探测是异步的（最多一个超时），这中间可能已经有**新回合**起来了 —— 子代理完成会
-		// `triggerTurn` 唤醒一轮、用户也可能直接发了下一句。`agent_start` 清掉 widget 并
-		// 重开表，所以这里再验一次：表又被上过就不再画，否则结束符会盖在活 spinner 上方。
-		if (turnStartedAt !== null) return;
-		showTurnMarker(
+		// 探测是异步的（最多一个超时），这段窗口里可能已经起了**新回合**（子代理完成会
+		// `triggerTurn` 唤醒一轮、用户也可能直接发了下一句）。旧 widget 方案在这里要让位；
+		// 现在写的是会话条目 —— 它就属于刚结束的那一轮，新回合开不开都不该被吞掉。
+		writeTurnMarker(
 			ctx,
 			formatTurnMarker(pickTurnVerb(), formatDuration(settledAt - startedAt), formatEndClock(new Date(settledAt))),
 		);

@@ -186,22 +186,47 @@ test("execute：pattern 为空白时报错", { skip }, async () => {
 	await assert.rejects(run(root, { pattern: "   " }), /pattern is required/);
 });
 
-test("execute：path 指向子目录时输出相对该子目录", { skip }, async () => {
+test("execute：path 指向子目录时输出仍是**相对 cwd** 的路径（对齐 CC）", { skip }, async () => {
 	const root = makeRoot();
 	put(root, "outside.ts");
 	put(root, "sub/inside.ts");
-	assert.deepEqual(lines(await run(root, { pattern: "**/*.ts", path: "sub" })), ["inside.ts"]);
+	assert.deepEqual(lines(await run(root, { pattern: "**/*.ts", path: "sub" })), ["sub/inside.ts"]);
 });
 
-test("execute：path 不存在时报错", { skip }, async () => {
+test("execute：path 在 cwd 之外时退回绝对路径（相对路径会以 .. 开头）", { skip }, async () => {
+	const parent = makeRoot();
+	const root = path.join(parent, "work");
+	fs.mkdirSync(root, { recursive: true });
+	put(parent, "sibling/other.ts");
+	const out = await run(root, { pattern: "**/*.ts", path: "../sibling" });
+	assert.deepEqual(lines(out), [path.join(parent, "sibling/other.ts")]);
+});
+
+test("execute：path 不存在时报 CC 的措辞", { skip }, async () => {
 	const root = makeRoot();
-	await assert.rejects(run(root, { pattern: "**/*.ts", path: "nope" }), /Path not found/);
+	await assert.rejects(run(root, { pattern: "**/*.ts", path: "nope" }), /Directory does not exist: nope/);
 });
 
-test("execute：无匹配时返回固定文案", { skip }, async () => {
+test("execute：path 指向文件时报 CC 的措辞", { skip }, async () => {
 	const root = makeRoot();
 	put(root, "a.ts");
-	assert.equal((await run(root, { pattern: "**/*.nope" })).trim(), "No files found matching pattern");
+	await assert.rejects(run(root, { pattern: "**/*.ts", path: "a.ts" }), /Path is not a directory: a\.ts/);
+});
+
+test("execute：无匹配时返回 CC 的固定文案", { skip }, async () => {
+	const root = makeRoot();
+	put(root, "a.ts");
+	assert.equal((await run(root, { pattern: "**/*.nope" })).trim(), "No files found");
+});
+
+test("execute：默认上限是 1000 条（与内置 find 同值），且带 CC 的 Showing 行与截断前总数", { skip }, async () => {
+	const root = makeRoot();
+	for (let i = 0; i < 1042; i++) put(root, `many/f${String(i).padStart(4, "0")}.txt`);
+	const out = await run(root, { pattern: "many/*.txt" });
+	const rows = out.split("\n");
+	// 1000 条路径 + 1 行提示。
+	assert.equal(rows.length, 1001);
+	assert.match(rows[1000]!, /^\(Showing 1000 of 1042 matching files; 42 more are not listed\. Narrow the pattern or path to see the rest\.\)$/);
 });
 
 test("execute：sort_by_mtime 把最新的排前面", { skip }, async () => {

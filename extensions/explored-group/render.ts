@@ -41,6 +41,30 @@
  * 一律四格缩进、不再画拐角 —— 与 bash / codemode / web-search 结果树的
  *「`└ ` 整块只出现一次」同一条语言。
  *
+ * ## 折行：先缩后折（用户 2026-10-27 定，两轮）
+ *
+ * 成员行超宽时**先缩、尽量不折行** —— 折行会看着像多了一条调用：
+ *
+ *     └ Search "glass_block\|purple_stained_glass" in tools/cloudland-kit-fingerpri
+ *       nt.mjs                    ← 折行：像两条调用，而且续行没有动词可依靠
+ *
+ * 缩略按**三个阶段**推进（实现见 `shrink.ts`），每一步都先试着能不能不折行：
+ *
+ * | 阶段 | 动什么 | 为什么 |
+ * |---|---|---|
+ * | A | **只丢目录层级**，文件名保持全称 | 目录是最不值钱的信息，文件名才是「看的是哪个」 |
+ * | B | **只缩模式串**（省略中间、保头保尾），文件名仍全称 | 用户第二轮：「文件名最好保留全称，然后再去缩略搜索的字符串」 |
+ * | C | 模式串缩到地板还不够，才连文件名一起缩（每轮砍当前最宽的） | 「实在不行…该缩略就缩略文件名」，多个可缩段之间保持平衡 |
+ *
+ * 两种缩法的方向是刻意相反的：**路径砍头保尾**（文件名在末尾，信息量最大），
+ * **模式串省略中间**（正则的开头 `^` / `export ` 与结尾 `$` / `COLUMN_HEIGHT` 都承重）。
+ * 地板：路径 `…` + 8 列、模式串 12 列 —— 都不能缩没了。
+ *
+ * 一行有多条路径时（`Diff a b`、合并的 `Read a, b`）每轮砍当前最宽的那条 —— 于是它们被压到
+ * 相近长度，而不是把第一条砍秃、第二条原样。
+ *
+ * 缩到地板仍装不下（极窄终端、超长正则模式）才退回下面的 break-all 折行。
+ *
  * ## 行合并：连续的 `read` 按来源分段合成一行
  *
  * 用户明确要求：「一次性读两个文件」显示成 `└ Read a, b`。规则：
@@ -50,7 +74,8 @@
  *
  * 合并按**宽度**而不是固定个数：装满一行换下一行。装不下而折出的续行**重画 `Read `**
  *（`Read` 是这一行的动词，不重画就成了光秃秃一串路径）但**不重画 `└ `**；续行的 `Read`
- * 同样带粗体（它仍是那个原生调用的动词）。
+ * 同样带粗体（它仍是那个原生调用的动词）。先缩后折：多个文件名缩过一轮仍装不进同一行的，
+ * 才会按文件分行（短名并在一行、长名各自独占）。
  *
  * ## 状态只在**组头那颗圆点**上表达
  *
@@ -73,10 +98,10 @@
  * 行数上限不是冗余：2026-10-20 先按「组里几条就画几行」改过一版（commit 40367a2），
  * 用户实际体验后判定更差、当天要求恢复 —— 别再把 `… +N` 当废弃逻辑删掉。
  */
-
 import { visibleWidth } from "@earendil-works/pi-tui";
-import { phraseForToolCall } from "./phrases.ts";
+import { phrasePiecesForToolCall } from "./phrases.ts";
 import { groupOf, type Group, type GroupMember } from "./registry.ts";
+import { joinPieces, shrinkPieces, type PhrasePiece } from "./shrink.ts";
 
 /** 分组最多画几行成员（超出的折成一行 `… +N`）；展开态不折。 */
 export const GROUP_MAX_ROWS = 5;
@@ -111,15 +136,15 @@ export function groupDotSlot(group: Group): GroupDotSlot {
 }
 
 /**
- * 该成员此刻的状态（`tool_execution_end` 时由 `index.ts` 写入）。
+ * 该成员此刻的短语片段（标了 `shrink` 的段超宽时可缩，见 `shrink.ts`）。
  *
  * `read` 的路径**不再带 `Read ` 前缀** —— 合并行自己会画一次（`Read a, b`），
  * 每个条目再带一次就成了 `Read a, Read b`。别的类别每行独立，前缀由短语自带。
  */
-function labelFor(member: GroupMember, cwd: string | undefined): string {
-	const phrase = phraseForToolCall(member.toolName, member.args, cwd) ?? member.toolName;
-	if (member.kind === "read" && phrase.startsWith("Read ")) return phrase.slice("Read ".length);
-	return phrase;
+function labelPiecesFor(member: GroupMember, cwd: string | undefined): PhrasePiece[] {
+	const pieces = phrasePiecesForToolCall(member.toolName, member.args, cwd) ?? [{ text: member.toolName }];
+	if (member.kind === "read" && pieces[0]?.text === "Read ") return pieces.slice(1);
+	return pieces;
 }
 
 /**
@@ -128,7 +153,8 @@ function labelFor(member: GroupMember, cwd: string | undefined): string {
  * 返回的是**条目**而不是最终行 —— 宽度切分在渲染时做（条目可能被拆到多行）。
  */
 interface RowEntry {
-	text: string;
+	/** 这一行要画的内容（已含动词），按段存 —— 标了 `shrink` 的段可缩。 */
+	pieces: PhrasePiece[];
 	/** 该条目是否为 read 合并行（决定换行时是否重画 `Read ` 动词）。 */
 	isRead: boolean;
 	/**
@@ -176,12 +202,14 @@ export function nativeVerbFor(toolName: string): string | null {
 
 function buildEntries(group: Group, cwd: string | undefined): RowEntry[] {
 	const entries: RowEntry[] = [];
-	let reads: string[] = [];
+	let reads: PhrasePiece[] = [];
+	let readCount = 0;
 	let readsAreNative = false;
 	const flush = () => {
-		if (reads.length === 0) return;
-		entries.push({ text: `Read ${reads.join(JOINER)}`, isRead: true, boldVerb: readsAreNative ? "Read" : null });
+		if (readCount === 0) return;
+		entries.push({ pieces: [{ text: "Read " }, ...reads], isRead: true, boldVerb: readsAreNative ? "Read" : null });
 		reads = [];
+		readCount = 0;
 		readsAreNative = false;
 	};
 	for (const member of group.members) {
@@ -193,33 +221,20 @@ function buildEntries(group: Group, cwd: string | undefined): RowEntry[] {
 		if (member.kind === "read") {
 			const isNative = member.toolName === "read";
 			// 来源一变就换行：同一行必须是同一种来源，否则「加粗 = 原生工具」立刻失真
-			if (reads.length > 0 && isNative !== readsAreNative) flush();
-			if (reads.length === 0) readsAreNative = isNative;
-			reads.push(labelFor(member, cwd));
+			if (readCount > 0 && isNative !== readsAreNative) flush();
+			if (readCount === 0) readsAreNative = isNative;
+			if (readCount > 0) reads.push({ text: JOINER });
+			reads.push(...labelPiecesFor(member, cwd));
+			readCount++;
 			continue;
 		}
 		flush();
-		entries.push({ text: labelFor(member, cwd), isRead: false, boldVerb: nativeVerbFor(member.toolName) });
+		entries.push({ pieces: labelPiecesFor(member, cwd), isRead: false, boldVerb: nativeVerbFor(member.toolName) });
 	}
 	flush();
 	return entries;
 }
 
-/**
- * 把条目按宽度折成最终行（break-all，与 bash 侧 `hardWrapRows` 同一语义：
- * **装满到恰好放不下再断**，不提前折行，避免「行尾空一大截」）。
- *
- * `read` 合并行（`Read a, b, c`）先剥掉 `Read ` 再按 `, ` 切，逐段排；跨行的续行
- * **重画** `Read `（`Read` 是这一行的动词，不重画就成了光秃秃一串路径）。`└ ` 不在这里画 ——
- * 整块只有第一行带它（见文件头）。
- *
- * 单个条目**自己就超宽**（长路径在窄终端）时走 `hardWrap` 硬折 —— 否则那条会直接超出
- * 终端宽，被 pi 的渲染切掉尾部（实测定宽 40 列时）。
- *
- * **加粗在这里只传递标志、不拼 ANSI**：折行宽度按**剥掉颜色后的可见文本**算，
- * 拼在 `layoutRows` 里会把 ANSI 带进 `visibleWidth` 与 `hardWrap` 的字符循环，
- * 让宽度算法当场失真。上色统一在 `paintRow` 里做。
- */
 /**
  * 折行后的中间形态：**保留「它属于哪个文件」**。
  *
@@ -228,6 +243,10 @@ function buildEntries(group: Group, cwd: string | undefined): RowEntry[] {
  * 就是这个：`cat <77 字文件名>` 在 79 列下折成两块，第二块拿到了自己的 `Read ` 前缀。
  * 同因的第二个症状更隐蔽：条目 A 的尾部碎块会被当成独立条目，与真实的 `b.ts` 用 `, ` 缝成
  * `Read z, b.ts`（看着像读了两个文件，实际是 A 被切断 + 多出一个不存在的名字）。
+ *
+ * 用户 2026-10-27 定「尽量不折行」之后，这一层只在**缩到地板仍装不下**时才会走到
+ *（路径与模式串都已经先被 `shrinkPieces` 缩过了），但它仍然必要 —— 极窄终端、
+ * 超长的模式串都还是折行的。
  */
 interface Chunk {
 	text: string;
@@ -235,21 +254,46 @@ interface Chunk {
 	startsItem: boolean;
 }
 
+/**
+ * 把条目排成最终行：**先缩后折**。
+ *
+ * 1. **能缩就缩**（用户 2026-10-27 定）：条目整体超宽时先缩（`shrinkPieces`，规则见
+ *    `shrink.ts` 的 A/B/C 三阶段 —— 先丢目录、再缩模式串、最后才连文件名一起缩），
+ *    能一行装下就绝不折行 —— `Search "x" in tools/cloudland-kit-fingerpri` / `nt.mjs`
+ *    这种看着像两条调用的折行就是被这一层消掉的。
+ * 2. 缩到地板仍超宽才退回 break-all 硬折（与 bash 侧 `hardWrapRows` 同一语义：
+ *    **装满到恰好放不下再断**，不提前折行）。
+ *
+ * `read` 合并行（`Read a, b, c`）的路径是**分别的段**，所以缩略时每轮砍当前最宽的那条 ——
+ * 多条路径因此被压到相近长度（用户 2026-10-27 定），而不是把第一条砍秃、第二条原样。
+ * 缩到装得下之后仍需换行的（多个文件本来就装不进一行），续行**重画** `Read `
+ *（`Read` 是这一行的动词，不重画就成了光秃秃一串路径）。`└ ` 不在这里画 —— 整块只有第一行带它。
+ *
+ * **加粗在这里只传递标志、不拼 ANSI**：折行宽度按**剥掉颜色后的可见文本**算，
+ * 拼在 `layoutRows` 里会把 ANSI 带进 `visibleWidth` 与 `hardWrap` 的字符循环，
+ * 让宽度算法当场失真。上色统一在 `paintRow` 里做。
+ */
+/** 分隔段（`buildEntries` 插的 `, `）：不是可缩段，切分文件时按它断。 */
+function isJoiner(piece: PhrasePiece): boolean {
+	return piece.text === JOINER && piece.shrink === undefined;
+}
+
 function layoutRows(entries: RowEntry[], budget: number): OutputRow[] {
 	const rows: OutputRow[] = [];
 	for (const entry of entries) {
 		if (!entry.isRead) {
+			const fitted = shrinkPieces(entry.pieces, budget, visibleWidth).pieces;
 			// 折行后只有**第一行**还带着那个动词，续行没有词可加粗（与 read 的 `prefixed` 同义）
-			hardWrap(entry.text, budget).forEach((text, index) => {
+			hardWrap(joinPieces(fitted), budget).forEach((text, index) => {
 				rows.push({ text, boldVerb: index === 0 ? entry.boldVerb : null, isRead: false });
 			});
 			continue;
 		}
-		// 每个文件先各自硬折（区间由 `wrapReadPiece` 整体保留），再逐块贴上首/续标记。
-		// 首块总是被 `hardWrap` 填满，所以续块天然拼不上别的东西、必须独占一行。
-		const chunks: Chunk[] = entry.text
-			.slice("Read ".length)
-			.split(JOINER)
+		// read 合并行：整行先缩（多文件按宽度均摊），装不下再按文件分行。
+		// 缩的预算含 `Read `（它确实占列），但切分前要剥掉 —— 动词由下面的 `prefixed` 画。
+		const fitted = shrinkPieces(entry.pieces, budget, visibleWidth).pieces;
+		const body = fitted[0]?.text === "Read " && !fitted[0].shrink ? fitted.slice(1) : fitted;
+		const chunks: Chunk[] = splitReadPieces(body)
 			.flatMap((piece) =>
 				wrapReadPiece(piece, Math.max(1, budget - "Read ".length), budget)
 					.map((text, index) => ({ text, startsItem: index === 0 })));
@@ -290,6 +334,27 @@ function layoutRows(entries: RowEntry[], budget: number): OutputRow[] {
 		flush();
 	}
 	return rows;
+}
+
+/**
+ * 把 read 合并行的片段按 `, ` 切开 —— **每个文件一段**（各自的路径 + 行号区间拼好）。
+ *
+ * 用片段而不是字符串切，是因为分隔符 `, ` 是 `buildEntries` 显式插的固定段，而文件自己的
+ * 路径里也可能有逗号（`Read a,b.ts`）—— 按分隔段识别就不会误切。
+ */
+function splitReadPieces(pieces: readonly PhrasePiece[]): string[] {
+	const out: string[] = [];
+	let current = "";
+	for (const piece of pieces) {
+		if (isJoiner(piece)) {
+			out.push(current);
+			current = "";
+			continue;
+		}
+		current += piece.text;
+	}
+	out.push(current);
+	return out;
 }
 
 /**
@@ -439,7 +504,7 @@ export function createGroupTree(options: {
 
 			for (const [index, row] of shown.entries()) {
 				const prefix = index === 0 ? ROW_PREFIX : ROW_INDENT;
-				lines.push(`  ${theme.fg("muted", prefix)}${paintRow(row, theme)}`);
+				lines.push(`  ${theme.fg("dim", prefix)}${paintRow(row, theme)}`);
 			}
 			if (hidden > 0) {
 				lines.push(`  ${ROW_INDENT}${theme.fg("muted", `… +${hidden}`)}`);

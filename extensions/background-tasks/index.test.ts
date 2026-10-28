@@ -346,11 +346,11 @@ test("空 command 与不存在的工作目录都被拒绝", { skip }, async () =
 	const h = await loadHarness();
 	const empty = await h.tool("run_in_background", { command: "   " });
 	assert.equal(empty.details.ok, false);
-	assert.match(empty.text, /不能为空/);
+	assert.match(empty.text, /must not be empty/);
 
 	const badCwd = await h.tool("run_in_background", { command: "echo hi", cwd: "definitely-not-here" });
 	assert.equal(badCwd.details.ok, false);
-	assert.match(badCwd.text, /工作目录不存在/);
+	assert.match(badCwd.text, /Working directory does not exist/);
 	await h.shutdown();
 });
 
@@ -369,7 +369,7 @@ test("background_output 增量读到真输出，第二次不重复", { skip }, a
 	// 立刻再读一次：line1 不该重复出现
 	const second = await h.tool("background_output", { id: "bg_1" });
 	assert.doesNotMatch(second.text, /line1/);
-	assert.match(second.text, /没有新输出|line2/);
+	assert.match(second.text, /no new output|line2/);
 
 	await waitFor(() => {
 		const content = fs.readFileSync(path.join(h.logRoot, "test-session", "bg_1.log"), "utf-8");
@@ -407,11 +407,11 @@ test("任务结束：注入 <background-task-notification> 并 triggerTurn 唤�
 	assert.equal(sent.message.display, true, "通知要对用户可见（CC 的 hook feedback 同形）");
 	assert.match(sent.message.content, /<background-task-notification>/);
 	assert.match(sent.message.content, /bg_1/);
-	assert.match(sent.message.content, /成功结束（exit 0）/);
+	assert.match(sent.message.content, /finished successfully \(exit 0\)/);
 	assert.equal(sent.options?.triggerTurn, true, "必须触发一轮模型跟进");
 	// 通知正文不再重复「这是终态事实，不需要再调 background_output 确认状态」（用户 2026-10-18 定：
 	// 同一句话已在 run_in_background 的 description / promptGuidelines 里）。
-	assert.doesNotMatch(sent.message.content, /不需要再调 background_output/, "通知里不该再重复「别轮询」那句");
+	assert.doesNotMatch(sent.message.content, /do not call background_output just to check status/, "通知里不该再重复「别轮询」那句");
 	// 终态报告末尾的总览表：快照跟着通知一起落地（与 run_in_background 同一份形状）。
 	const details = sent.message.details as any;
 	assert.ok(Array.isArray(details.tasks), "通知的 details 要带任务快照（渲染器靠它画表）");
@@ -439,7 +439,7 @@ test("非零退出与失败措辞", { skip }, async () => {
 	const h = await loadHarness();
 	await h.tool("run_in_background", { command: "exit 3" });
 	await waitFor(() => h.sent.length > 0, 8000, "终态通知被注入");
-	assert.match(h.sent[0].message.content, /失败结束/);
+	assert.match(h.sent[0].message.content, /failed \(exit=/);
 	assert.match(h.sent[0].message.content, /exit=3/);
 	await h.shutdown();
 });
@@ -455,7 +455,7 @@ test("background_kill 真把进程停掉，终态是 killed", { skip }, async ()
 	assert.match(killed.text, /SIGTERM/);
 
 	await waitFor(() => h.sent.length > 0, 8000, "killed 的终态通知");
-	assert.match(h.sent[0].message.content, /被终止/);
+	assert.match(h.sent[0].message.content, /was killed/);
 
 	// 进程真的没了（不是只返回成功）
 	await waitFor(() => {
@@ -495,17 +495,17 @@ test("未知 id / 已终态任务的 kill 都给出可读原因", { skip }, asyn
 	const h = await loadHarness();
 	const unknown = await h.tool("background_kill", { id: "bg_404" });
 	assert.equal(unknown.details.ok, false);
-	assert.match(unknown.text, /没有这个任务/);
+	assert.match(unknown.text, /No such task/);
 
 	const unknownRead = await h.tool("background_output", { id: "bg_404" });
 	assert.equal(unknownRead.details.ok, false);
-	assert.match(unknownRead.text, /本会话还没启动过后台任务/);
+	assert.match(unknownRead.text, /no background task has been started in this session/);
 
 	await h.tool("run_in_background", { command: "echo x" });
 	await waitFor(() => h.sent.length > 0, 8000, "任务结束");
 	const again = await h.tool("background_kill", { id: "bg_1" });
 	assert.equal(again.details.ok, false);
-	assert.match(again.text, /已经/);
+	assert.match(again.text, /is already/);
 	await h.shutdown();
 });
 
@@ -551,7 +551,7 @@ test("默认隔离：命令在 $TMPDIR 下的 worktree 里跑，不是会话 cwd
 	const wtPath = result.details.task.worktree?.path;
 	assert.ok(wtPath, "工具结果里应当带上 worktree 路径");
 	assert.equal(fs.realpathSync(path.dirname(wtPath!)), fs.realpathSync(tmpRoot), "worktree 应当落在 $TMPDIR 下");
-	assert.match(result.text, /隔离工作区：/);
+	assert.match(result.text, /Isolated worktree: /);
 
 	// 命令真的跑在 worktree 里：pwd 的落地路径在 worktree 内，不在会话目录里
 	await waitFor(() => fs.existsSync(path.join(wtPath!, "where.txt")), 8000, "命令在 worktree 里写出文件");
@@ -579,7 +579,7 @@ test("无改动的任务终态后 worktree 自动消失（完全无痕）", { sk
 
 	await waitFor(() => h.sent.some((m) => m.message.customType === "background-task"), 10000, "终态通知");
 	const notice = h.sent.find((m) => m.message.customType === "background-task")!.message.content;
-	assert.match(notice, /无改动，已自动清理/);
+	assert.match(notice, /no changes, cleaned up automatically/);
 	await waitFor(() => !fs.existsSync(wtPath!), 5000, "worktree 目录被删掉");
 	assert.deepEqual(fs.readdirSync(fs.realpathSync(tmpRoot)), [], "$TMPDIR 下不能留残留目录");
 	// worktree 元数据也清干净：`git worktree list` 只剩主仓库
@@ -601,7 +601,7 @@ test("改了文件的任务终态后 worktree 保留，通知里给出路径与�
 
 	await waitFor(() => h.sent.some((m) => m.message.customType === "background-task"), 10000, "终态通知");
 	const notice = h.sent.find((m) => m.message.customType === "background-task")!.message.content;
-	assert.match(notice, /1 个文件有改动/);
+	assert.match(notice, /1 files changed/);
 	assert.ok(notice.includes(wtPath!), `通知里应当带上路径，实际：${notice}`);
 	assert.equal(fs.readFileSync(path.join(wtPath!, "artifact.txt"), "utf-8"), "produced\n", "产出必须留着");
 	assert.equal(fs.existsSync(path.join(h.projectDir, "artifact.txt")), false, "不能落到会话目录");
@@ -617,7 +617,7 @@ test("worktree:false 关闭隔离：命令在原 cwd 里跑，看得到未提交
 
 	const result = await h.tool("run_in_background", { command: "cat uncommitted.txt > seen.txt", worktree: false });
 	assert.equal(result.details.task.worktree, undefined, "关闭隔离时不应有 worktree");
-	assert.doesNotMatch(result.text, /隔离工作区：/);
+	assert.doesNotMatch(result.text, /Isolated worktree: /);
 	const seenPath = path.join(h.projectDir, "seen.txt");
 	// 等**内容**而不是等文件存在：shell 的重定向先建空文件，cat 才写进去，
 	// 只等存在会在写入前就断言到空串（实测踩到过）
@@ -638,7 +638,7 @@ test("非 git 目录：静默降级为不隔离，任务照跑并告知原因", 
 	const result = await h.tool("run_in_background", { command: "echo hi" });
 	assert.equal(result.details.ok, true);
 	assert.equal(result.details.task.worktree, undefined);
-	assert.match(result.text, /未隔离（不在 git 仓库里）/);
+	assert.match(result.text, /Not isolated \(not in a git repository\)/);
 	await h.shutdown();
 });
 
@@ -649,14 +649,14 @@ test("非 git 目录：静默降级为不隔离，任务照跑并告知原因", 
 test("/background 列表、详情、kill 三个形态", { skip }, async () => {
 	const h = await loadHarness();
 	await h.command("");
-	assert.match(h.notifies.at(-1)!.text, /没有后台任务/);
-	assert.match(h.notifies.at(-1)!.text, /不经过前台 bash 的 seatbelt 删除边界/, "列表里要印沙箱提示");
+	assert.match(h.notifies.at(-1)!.text, /No background tasks/);
+	assert.match(h.notifies.at(-1)!.text, /not subject to the foreground bash seatbelt delete boundary/, "列表里要印沙箱提示");
 
 	await h.tool("run_in_background", { command: "echo hello-from-bg; sleep 3" });
 	h.notifies.length = 0;
 	await h.command("");
 	const list = h.notifies.at(-1)!.text;
-	assert.match(list, /后台任务 1 个（在跑 1）/);
+	assert.match(list, /Background tasks: 1 \(1 running\)/);
 	assert.match(list, /bg_1\s+running/);
 	assert.match(list, /echo hello-from-bg/);
 
@@ -665,20 +665,20 @@ test("/background 列表、详情、kill 三个形态", { skip }, async () => {
 	const detail = h.notifies.at(-1)!.text;
 	assert.match(detail, /^bg_1\s+running/m);
 	assert.match(detail, /cwd: /);
-	assert.match(detail, /日志: /);
+	assert.match(detail, /Log: /);
 
 	h.notifies.length = 0;
 	await h.command("bg_404");
-	assert.match(h.notifies.at(-1)!.text, /没有这个任务/);
+	assert.match(h.notifies.at(-1)!.text, /No such task/);
 	assert.equal(h.notifies.at(-1)!.level, "warning");
 
 	h.notifies.length = 0;
 	await h.command("kill");
-	assert.match(h.notifies.at(-1)!.text, /用法：\/background kill <id>/);
+	assert.match(h.notifies.at(-1)!.text, /Usage: \/background kill <id>/);
 
 	h.notifies.length = 0;
 	await h.command("kill bg_1");
-	assert.match(h.notifies.at(-1)!.text, /已向 bg_1 发送 SIGTERM/);
+	assert.match(h.notifies.at(-1)!.text, /Sent SIGTERM to bg_1/);
 	await waitFor(() => h.sent.length > 0, 8000, "kill 后的终态通知");
 	await h.shutdown();
 });
@@ -1274,7 +1274,8 @@ test("总览表：边框走 bash 输出色，其余：id accent / 状态按结�
 	assert.match(row1, /text\(\s*4s\)/, "时长走 text 前景色");
 	assert.match(row1, /text\(npm test/, "命令走 text 前景色");
 	assert.match(painted.find((line: string) => line.includes("┌"))!, /toolOutput\(┌/, "边框走 bash 输出色（皮肤没定义 bashOutput 时回退 toolOutput）");
-	assert.match(painted.find((line: string) => line.includes("mdCode("))!, /mdCode\( id\s+\)/, "表头走 mdCode（左空格已进同一格）");
+	assert.match(painted.find((line: string) => line.includes("text( id"))!, /text\( id\s+\)/, "表头走 text 前景色（左空格已进同一格）");
+	assert.ok(!painted.some((line: string) => line.includes("mdCode(")), "表头不再走 mdCode");
 	// 表格格子里不再出现 muted（首行的 `└ ` 属于正文树连接符，不算表格格子）
 	const tableLines = painted.slice(painted.findIndex((line: string) => line.includes("┌")));
 	assert.ok(tableLines.length > 0);
@@ -1309,8 +1310,8 @@ test("总览表：边框走皮肤 vars.bashOutput 的真转义，与正文同色
 		// 其余格子不受影响：id 仍是 accent、表头仍是 text
 		assert.ok(!border.includes("text(┌"), "边框不该走 text 槽");
 		assert.match(lines.find((line: string) => line.includes("npm test"))!, /#7777cc\(bg_1\)/, "id 仍走 accent");
-		// 表头：先在 mdCode 上色，再叠表头底色的形态标记（本假主题只认 `bg-<slot>` 前缀）
-		assert.match(lines.find((line: string) => line.includes(" id"))!, /bg-userMessageBg\(#00aaaa\( id/, "表头走 mdCode + surface 底色");
+		// 表头：先在 text 前景色上色，再叠表头底色的形态标记（本假主题只认 `bg-<slot>` 前缀）
+		assert.match(lines.find((line: string) => line.includes(" id"))!, /bg-userMessageBg\(#111111\( id/, "表头走 text 前景色 + surface 底色");
 	} finally {
 		theme.cleanup();
 	}
@@ -1332,13 +1333,13 @@ test("总览表：表头四个格子加粗 + 刷 surface 底色，竖线与其�
 	const lines = definition
 		.renderResult(result, { expanded: false, isPartial: false }, paintedTheme, renderContext())
 		.render(80) as string[];
-	// 表头行（第二个表格行，第一个是顶边框）：四个格子各自 `bg:userMessageBg(bold(mdCode(词)))`
-	const header = lines.find((line: string) => line.includes("mdCode("))!;
+	// 表头行（第二个表格行，第一个是顶边框）：四个格子各自 `bg:userMessageBg(bold(text(词)))`
+	const header = lines.find((line: string) => line.includes("bg:userMessageBg("))!;
 	assert.ok(header, `应找到表头行：${JSON.stringify(lines)}`);
 	for (const word of ["id", "command", "status", "time"]) {
 		assert.ok(
-			header.includes(`bg:userMessageBg(bold(mdCode( ${word} `),
-			`表头「${word}」应加粗 + 刷底色（含左右各 1 空格）：${JSON.stringify(header)}`,
+			header.includes(`bg:userMessageBg(bold(text( ${word} `),
+			`表头「${word}」应加粗 + 刷底色 + text 前景色（含左右各 1 空格）：${JSON.stringify(header)}`,
 		);
 	}
 	// 只染四个格子：表头行里 `bg:` 只包住格内文字与两侧空格，竖线仍是 border 片段
@@ -1377,6 +1378,29 @@ test("预览截断：超过 10 行只画 10 行 + 提示行，展开态（ctrl+o
 	assert.equal(expandedLines.length, 14, `展开态全画：${JSON.stringify(expandedLines)}`);
 	assert.ok(expandedLines.join("\n").includes("line-14"), "展开态含最后一行");
 	assert.ok(!expandedLines.some((line: string) => line.includes("to expand")), "展开态不出提示行");
+	await h.shutdown();
+});
+
+test("日志行永不折行：太长就把前面换成 …，树仍然只多一行", { skip }, async () => {
+	const h = await loadHarness();
+	const definition = h.extension.tools.get("background_output")!.definition as any;
+	// 真会话的日志路径（比窄窗口的正文预算长得多），背景输出本身很短
+	const logPath = "/Users/bachi/.pi/agent/bg-tasks/01a18021-01d6-7772-a70f-50049cc64d61/bg_2.log";
+	const result = {
+		content: [{ type: "text", text: `bg_2  exited  exit=0\noffset 0 → 6\nLog: ${logPath}\n\nhello` }],
+		details: { ok: true },
+	};
+
+	const lines = definition
+		.renderResult(result, { expanded: false, isPartial: false }, plainTheme, renderContext())
+		.render(80)
+		.map(plain);
+
+	// 正文四行（bg_2 / offset / Log / 空行）+ hello：Log 那一行**不得**折成两行
+	assert.equal(lines.length, 5, `Log 行折行了：${JSON.stringify(lines)}`);
+	assert.match(lines[2]!, /^  │ Log:\u2026/, `Log 行应缩略成 Log:…：${JSON.stringify(lines[2])}`);
+	assert.ok(lines[2]!.includes("bg_2.log"), `尾部路径要留着：${JSON.stringify(lines[2])}`);
+	assert.ok(plain(lines[2]!).length <= 80, `缩略后不超宽：${JSON.stringify(lines[2])}`);
 	await h.shutdown();
 });
 
@@ -1449,6 +1473,26 @@ test("终态通知：圆点顶格 + 对号在行末 + 树形正文，无底色�
 	assert.ok(lines[1]!.startsWith("  │ 后台任务 bg_1 已成功结束"), `首行挂 │：${JSON.stringify(lines[1])}`);
 	assert.ok(lines[2]!.startsWith("  └ 完整日志"), `末行挂 └：${JSON.stringify(lines[2])}`);
 	assert.ok(!lines.join("\n").includes("background-task-notification>"), "包裹标签不该显示");
+	await h.shutdown();
+});
+
+test("终态通知：Full log 长路径也缩略成一行", { skip }, async () => {
+	const h = await loadHarness();
+	const renderer = h.extension.messageRenderers.get("background-task") as any;
+	const logPath = "/Users/bachi/.pi/agent/bg-tasks/01a18021-01d6-7772-a70f-50049cc64d61/bg_2.log";
+	const message = {
+		customType: "background-task",
+		content: `<background-task-notification>\nBackground task bg_2 finished successfully (exit 0), ran 3s.\nFull log: ${logPath}\n</background-task-notification>`,
+		display: true,
+		details: { kind: "terminal", task: { id: "bg_2", status: "exited", exitCode: 0 } },
+	};
+	const lines = renderer(message, { expanded: false, outputPad: 1 }, plainTheme).render(80).map(plain);
+
+	// 标题 + 两行正文（末行挂 └）：Full log 行不折行，树仍然只两行
+	assert.equal(lines.length, 3, `Full log 行折行了：${JSON.stringify(lines)}`);
+	assert.match(lines[2]!, /^ {2}└ Full log:\u2026/, `缩略形态：${JSON.stringify(lines[2])}`);
+	assert.ok(lines[2]!.endsWith("bg_2.log"), `尾部留文件名：${JSON.stringify(lines[2])}`);
+	assert.ok(lines[2]!.length <= 80, `不超宽：${JSON.stringify(lines[2])}`);
 	await h.shutdown();
 });
 
@@ -1546,9 +1590,9 @@ test("正文颜色：工具块正文走 bash 输出色（皮肤 vars.bashOutput�
 		);
 		// 不再走 text 槽（那是改成 bash 输出色前的旧行为，也是本条的回归点）
 		assert.ok(!lines.join("\n").includes("text(line-1)"), "正文不该再走 text 槽");
-		// 结构符仍是 muted，不受影响
-		assert.match(lines[0]!, /#444444\(\u2502 \)/, "│ 仍单独取 muted 槽");
-		assert.match(lines[1]!, /#444444\(\u2514 \)/, "└ 仍单独取 muted 槽");
+		// 结构符仍是 dim（用户 2026-10-25：树符从 muted 改 dim），不受正文色影响
+		assert.match(lines[0]!, /#999999\(\u2502 \)/, "│ 仍单独取 dim 槽");
+		assert.match(lines[1]!, /#999999\(\u2514 \)/, "└ 仍单独取 dim 槽");
 	} finally {
 		theme.cleanup();
 	}
@@ -1580,7 +1624,7 @@ test("正文颜色：皮肤没定义 vars.bashOutput 时回退 toolOutput（不�
 	await h.shutdown();
 });
 
-test("终态通知：无底色，正文走 bash 输出色、结构符走 muted 槽", { skip }, async () => {
+test("终态通知：无底色，正文走 bash 输出色、结构符走 dim 槽", { skip }, async () => {
 	const h = await loadHarness();
 	const renderer = h.extension.messageRenderers.get("background-task") as any;
 	const theme = skinTheme({ bashOutput: "#333333" });
@@ -1597,7 +1641,7 @@ test("终态通知：无底色，正文走 bash 输出色、结构符走 muted �
 		).render(80);
 		// 不再套 customMessageBg：整块不该出现任何背景槽
 		assert.ok(!lines.join("\n").includes("customMessageBg"), "不该再套 customMessageBg 底色");
-		assert.match(lines[1]!, /#444444\(\u2514 \)/, "└ 单独取 muted 槽（树前缀含尾空格，与 plan 块同形）");
+		assert.match(lines[1]!, /#999999\(\u2514 \)/, "└ 单独取 dim 槽（树前缀含尾空格，与 plan 块同形）");
 		assert.ok(
 			lines[1]!.includes(`${BASH_OUTPUT_ANSI}后台任务 bg_1`),
 			`正文走 vars.bashOutput（与 bash 输出正文同色）：${JSON.stringify(lines[1])}`,
@@ -1689,7 +1733,7 @@ test("dock：PI_BACKGROUND_TASKS_DOCK=off 时一行都不发布，工具照旧",
 	process.env.PI_BACKGROUND_TASKS_DOCK = "off";
 	const h = await loadHarness();
 	const result = await h.tool("run_in_background", { command: "sleep 30" });
-	assert.match(result.text, /已在后台启动 bg_1/, "关掉 dock 不影响工具本身");
+	assert.match(result.text, /Started bg_1 in the background/, "关掉 dock 不影响工具本身");
 	await new Promise((resolve) => setTimeout(resolve, 1300));
 	assert.equal(h.statuses.get(DOCK_KEY), undefined, "dock 关掉后不该发布任何状态");
 	assert.equal(h.statusSets.length, 0, "一次 setStatus 都不该调");
@@ -1752,9 +1796,9 @@ test("dock：agent_settled 后给跑满阈值的任务补第二行，agent_start
 	await waitFor(() => noteLine(h) !== undefined, 6000, "阈值过后补第二行");
 	assert.match(noteLine(h)!, /Task is still running/);
 	// harness 的 theme 是着色的（其它用例断言 `warning(running)` 同源），所以 `└` 外面
-	// 包着 muted(...)；只断言图形与缩进位置，不断言颜色包裹的写法。
+	// 包着 dim(...)；只断言图形与缩进位置，不断言颜色包裹的写法。
 	assert.match(noteLine(h)!, /^\s+\S*\(?\u2514/, "第二行以 └ 开头（带缩进）");
-	assert.match(noteLine(h)!, /muted\(\u2514\)/, "└ 单独取 muted 槽");
+	assert.match(noteLine(h)!, /dim\(\u2514\)/, "└ 单独取 dim 槽");
 	assert.match(h.statuses.get(DOCK_KEY)!, /running/, "第一行仍然报告任务在跑");
 
 	// 新一轮开始：那句话立刻变假，必须消失。

@@ -268,15 +268,15 @@ export function reconstructGoal(entries: readonly unknown[]): GoalState {
 
 /** /goal 无参时的状态文本（CC status：条件、时长、轮数、最近理由）。 */
 export function renderStatus(state: GoalState, now: number, config: GoalConfig, continuations: number): string {
-	if (state.condition === "") return "没有设定 /goal。用法：/goal <完成条件>；/goal clear 清除。";
+	if (state.condition === "") return "No /goal is set. Usage: /goal <completion condition>; /goal clear clears it.";
 	const minutes = state.setAt > 0 ? Math.max(0, Math.round((now - state.setAt) / 60_000)) : 0;
 	const lines = [
 		`◎ /goal ${state.status === "active" ? "active" : state.status}`,
-		`条件：${state.condition}`,
-		`已运行 ${minutes} 分钟，评估 ${state.evaluatedTurns} 轮，续跑 ${continuations}/${config.cap} 次`,
+		`Condition: ${state.condition}`,
+		`Running for ${minutes} min, ${state.evaluatedTurns} evaluations, ${continuations}/${config.cap} auto-continuations`,
 	];
 	if (state.lastVerdict !== undefined) {
-		lines.push(`最近裁决：${state.lastVerdict}${state.lastReason ? ` —— ${state.lastReason}` : ""}`);
+		lines.push(`Last verdict: ${state.lastVerdict}${state.lastReason ? ` — ${state.lastReason}` : ""}`);
 	}
 	return lines.join("\n");
 }

@@ -505,7 +505,7 @@ export default function voiceExtension(pi: ExtensionAPI): void {
 	});
 
 	pi.registerCommand("voice", {
-		description: "语音播报：状态 / 开关 / 试听 / 音色列表 / 阿里云 Key",
+		description: "Voice announcements: status / on-off / sample / voice list / Aliyun key",
 		async handler(args, ctx) {
 			const file = configPath();
 			const config = loadConfig(file);
@@ -515,41 +515,41 @@ export default function voiceExtension(pi: ExtensionAPI): void {
 				const state = isEnabled(process.env, config) ? "on" : "off";
 				const aliyunKey = readAliyunKey(keystorePath());
 				const lines = [
-					`语音播报：${state}`,
+					`Voice announcements: ${state}`,
 					aliyunKey
-						? `引擎：阿里云 ${TTS_MODEL}（音色 ${config.aliyunVoice}${
-								config.aliyunInstruction ? ` · 指令「${config.aliyunInstruction}」` : ""
-							}）· key ${maskKey(aliyunKey)}`
-						: `引擎：系统 say（音色 ${config.voice || "默认"}${config.rate ? ` · 语速 ${config.rate}` : ""}）· 未配 aliyunKey`,
-					`上限：${config.maxChars} 字 · ${config.speakQuestions ? "播" : "不播"}问句 · 配置文件：${file}`,
+						? `Engine: Aliyun ${TTS_MODEL} (voice ${config.aliyunVoice}${
+								config.aliyunInstruction ? ` · instruction "${config.aliyunInstruction}"` : ""
+							}) · key ${maskKey(aliyunKey)}`
+						: `Engine: system say (voice ${config.voice || "default"}${config.rate ? ` · rate ${config.rate}` : ""}) · aliyunKey not set`,
+					`Limit: ${config.maxChars} chars · questions ${config.speakQuestions ? "spoken" : "not spoken"} · config file: ${file}`,
 					config.summarize
-						? `摘要：结论 ${config.summaryThreshold} 字起做口播稿（上限 ${config.summaryMaxChars} 字，模型 ${DEFAULT_SUMMARY_MODEL} / low 推理）`
-						: "摘要：关闭（直接念本地精简结果）",
+						? `Summary: spoken script from ${config.summaryThreshold} chars (limit ${config.summaryMaxChars} chars, model ${DEFAULT_SUMMARY_MODEL} / low effort)`
+						: "Summary: off (reads the locally trimmed result)",
 				];
 				if (!ctx.hasUI) {
 					ctx.ui.notify(lines.join(" | "), "info");
 					return;
 				}
-				const choice = await ctx.ui.select("Voice", [...lines, "开/关播报", "试听一句", "列中文音色"]);
+				const choice = await ctx.ui.select("Voice", [...lines, "Toggle announcements", "Play a sample", "List Chinese voices"]);
 				if (!choice || lines.includes(choice)) return;
-				if (choice === "开/关播报") {
+				if (choice === "Toggle announcements") {
 					const next = saveConfig(file, { enabled: !isEnabled(process.env, config) });
-					ctx.ui.notify(`语音播报：${next.enabled ? "on" : "off"}`, "info");
+					ctx.ui.notify(`Voice announcements: ${next.enabled ? "on" : "off"}`, "info");
 					return;
 				}
-				if (choice === "试听一句") {
-					speaker.speak("这是一句试听，语音播报已经可以用了。", { voice: config.voice, rate: config.rate });
+				if (choice === "Play a sample") {
+					speaker.speak("This is a sample; voice announcements are ready to use.", { voice: config.voice, rate: config.rate });
 					return;
 				}
-				if (choice === "列中文音色") {
+				if (choice === "List Chinese voices") {
 					const voices = parseVoiceList(listVoices());
 					const zh = voices.filter((v) => v.locale.startsWith("zh"));
 					const preferred = PREFERRED_VOICES.filter((name) => voices.some((v) => v.name === name));
 					const summary = [
-						`中文音色 ${zh.length} 个（共 ${voices.length}）`,
-						`推荐：${preferred.join(" / ") || "Tingting"}`,
-						`其他：${zh.map((v) => v.name).join(" / ")}`,
-						`改音色：编辑 ${file} 的 voice 字段`,
+						`Chinese voices: ${zh.length} (of ${voices.length} total)`,
+						`Preferred: ${preferred.join(" / ") || "Tingting"}`,
+						`Others: ${zh.map((v) => v.name).join(" / ")}`,
+						`To change voice: edit the voice field in ${file}`,
 					];
 					ctx.ui.notify(summary.join("\n"), "info");
 					return;
@@ -563,8 +563,8 @@ export default function voiceExtension(pi: ExtensionAPI): void {
 					const current = readAliyunKey(keystore);
 					ctx.ui.notify(
 						current
-							? `阿里云口播：已配置（${maskKey(current)}）→ ${TTS_MODEL}，音色 ${config.aliyunVoice}\n文件：${keystore}\n清除：/voice key clear`
-							: `阿里云口播：未配置 → 走系统 say（不联网）\n文件：${keystore}\n设置：/voice key sk-xxxxxxxx`,
+							? `Aliyun voice: configured (${maskKey(current)}) -> ${TTS_MODEL}, voice ${config.aliyunVoice}\nFile: ${keystore}\nClear: /voice key clear`
+							: `Aliyun voice: not configured -> using system say (no network)\nFile: ${keystore}\nSet: /voice key sk-xxxxxxxx`,
 						"info",
 					);
 					return;
@@ -573,15 +573,15 @@ export default function voiceExtension(pi: ExtensionAPI): void {
 					writeAliyunKey(keystore, value === "clear" ? undefined : value);
 				} catch (error) {
 					ctx.ui.notify(
-						`阿里云 Key 写入失败：${error instanceof Error ? error.message : String(error)}`,
+						`Failed to write the Aliyun key: ${error instanceof Error ? error.message : String(error)}`,
 						"error",
 					);
 					return;
 				}
 				ctx.ui.notify(
 					value === "clear"
-						? "已清除 aliyunKey —— 口播回到系统 say"
-						: `已写入阿里云 Key（${maskKey(value)}）—— 口播走 ${TTS_MODEL}（${config.aliyunVoice}）`,
+						? "Cleared aliyunKey - announcements fall back to system say"
+						: `Wrote the Aliyun key (${maskKey(value)}) - announcements use ${TTS_MODEL} (${config.aliyunVoice})`,
 					"info",
 				);
 				return;
@@ -589,19 +589,19 @@ export default function voiceExtension(pi: ExtensionAPI): void {
 
 			if (sub === "on" || sub === "off") {
 				const next = saveConfig(file, { enabled: sub === "on" });
-				ctx.ui.notify(`语音播报：${next.enabled ? "on" : "off"}`, "info");
+				ctx.ui.notify(`Voice announcements: ${next.enabled ? "on" : "off"}`, "info");
 				return;
 			}
 
 			if (sub === "summary") {
 				const next = saveConfig(file, { summarize: !config.summarize });
-				ctx.ui.notify(`口播摘要：${next.summarize ? "on" : "off"}`, "info");
+				ctx.ui.notify(`Spoken summary: ${next.summarize ? "on" : "off"}`, "info");
 				return;
 			}
 
 			if (sub === "test") {
 				const text = args.trim().slice("test".length).trim();
-				speaker.speak(text || toSpeakable("这是一句试听，语音播报已经可以用了。"), {
+				speaker.speak(text || toSpeakable("This is a sample; voice announcements are ready to use."), {
 					voice: config.voice,
 					rate: config.rate,
 				});
@@ -612,7 +612,7 @@ export default function voiceExtension(pi: ExtensionAPI): void {
 				const voices = parseVoiceList(listVoices());
 				const zh = voices.filter((v) => v.locale.startsWith("zh"));
 				ctx.ui.notify(
-					`中文音色 ${zh.length} 个 / 共 ${voices.length} 个：\n${zh.map((v) => `${v.name} (${v.locale})`).join("\n")}`,
+					`Chinese voices: ${zh.length} of ${voices.length}:\n${zh.map((v) => `${v.name} (${v.locale})`).join("\n")}`,
 					"info",
 				);
 				return;
@@ -620,11 +620,14 @@ export default function voiceExtension(pi: ExtensionAPI): void {
 
 			if (sub === "stop") {
 				speaker.stop();
-				ctx.ui.notify("已停止播报", "info");
+				ctx.ui.notify("Stopped speaking", "info");
 				return;
 			}
 
-			ctx.ui.notify(`用法：/voice [on|off|summary|key <sk-xxx|clear>|test <文字>|voices|stop]，配置文件 ${file}`, "info");
+			ctx.ui.notify(
+				`Usage: /voice [on|off|summary|key <sk-xxx|clear>|test <text>|voices|stop], config file ${file}`,
+				"info",
+			);
 		},
 	});
 }

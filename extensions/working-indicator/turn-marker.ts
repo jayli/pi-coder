@@ -7,17 +7,24 @@
  *     ✻ Churned for 3m 37s · done 11:52 PM
  *
  * 落点在 `working-indicator/index.ts`（它持有回合时钟 `turnStartedAt`）；本文件只管
- * **文本**，不碰 UI、不 import 任何 pi / pi-tui 模块，所以 `node --test` 能直接跑：
+ * **文本与条目契约**，不碰 UI、不 import 任何 pi / pi-tui 模块，所以 `node --test` 能直接跑：
  *
  *     node --test clients/pi/extensions/working-indicator/turn-marker.test.ts
  *
- * 四个决定（都是用户选的，改之前先看这里）：
+ * 五个决定（都是用户选的，改之前先看这里）：
  *   - **词随机取**：十个词的表，每回合随机一个（不是轮换、不是固定）；
  *   - **行首 `✻`**：Claude Code 回合结束行同款六角星（不是字面 `*`、不是 recap 的 `✦`）；
  *   - **颜色 dim**：整行（含 `✻`）走 `dim`，与 recap 行里 `Recap:` 标签同档 —— 比摘要
  *     正文（`text`）与 `✦`（`accent`）都安静，符合「痕迹」而不是「结论」的定位；
- *   - **只在正常完成时出**：`outcome === "completed"` 才画，ESC / 报错保持现状；
- *     并且**还有子代理在跑时也不画**（用户 2026-10-08 定）。后者不是文本逻辑，落点在
+ *   - **落在会话日志里，不是 widget**（用户 2026-10-26 定，替换 10-07 的 widget 方案）：
+ *     结束符通过 `pi.appendEntry(TURN_MARKER_ENTRY_TYPE, …)` 写进会话日志、由
+ *     `registerEntryRenderer` 画出来。原来的 `ui.setWidget("turn-end", …)` 在下一回合
+ *     的 `agent_start` 必须被清掉（它占的是编辑器上方那一格，不清就会盖在 spinner 上）
+ *     ⇒ 用户敲下一句就消失。会话条目活在 chat 流里，滚动仍在、`/resume` 与重开也仍在。
+ *     `type: "custom"` 的条目**不进模型上下文**（pi 的 `convertToLlm` 直接丢弃），所以
+ *     没有 token 成本；顺带也不需要「行尾补空行」那套 widget 间隔补偿了。
+ *   - **只在正常完成时写**：`outcome === "completed"` 才写，ESC / 报错保持现状；
+ *     并且**还有子代理在跑时也不写**（用户 2026-10-08 定）。后者不是文本逻辑，落点在
  *     `index.ts`（它拿得到 pi 的事件总线）、探测用 `recap/subagents.ts` 的
  *     `hasActiveSubagentWork`，本文件不参与 —— 记在这里只是因为「什么时候才有一行
  *     结束符」是读本文开头必须知道的前提。
@@ -48,10 +55,37 @@ export const TURN_MARKER_VERBS = [
 export const TURN_MARKER_GLYPH = "✻";
 
 /**
- * 结束符的 widget key。落在编辑器上方的 widget 区（与 recap 摘要 / 任务清单同一个区，
- * pi 会给这个区补一个前导空行），位置就是 spinner 原来看得见的那一行。
+ * 结束符会话条目的 `customType`（`pi.appendEntry` / `pi.registerEntryRenderer` 的键）。
+ *
+ * 落在 chat 流里（不再占编辑器上方的 widget 格），与 recap 摘要 / 任务清单那些 widget 无关。
+ * 这串字符串同时是**已写入会话日志的旧条目的识别符**，改名会让历史结束符在 resume 后
+ * 不再渲染（条目还在，只是没有渲染器）—— 所以它不是个内部细节，改之前先想清楚。
  */
-export const TURN_MARKER_WIDGET_KEY = "turn-end";
+export const TURN_MARKER_ENTRY_TYPE = "turn-end";
+
+/**
+ * 写进条目 `data` 的形状。只存**拼好的整行文案**：词、时长、时刻都已经是成品；
+ * 留着结构化字段会诱使将来在渲染器里「重算」，而重算就需要那些上下文（时长、随机种子），
+ * 那是回合级的真相，条目里不该二次推导。
+ */
+export interface TurnMarkerEntryData {
+	/** 整行文本，已经过 `formatTurnMarker`（**不含**前导空格与颜色转义）。 */
+	text: string;
+}
+
+/**
+ * 从会话条目里取出要画的文本；不是本扩展的条目 / 形状不对时返回 `null`。
+ *
+ * 渲染器是 pi 按 `customType` 分派进来的，理论上形状总是对；但会话文件是**磁盘上的历史**
+ * （手改、旧版本、将来改过字段），所以这里仍然校验一遍并拒绝垃圾 —— 宁可不画，
+ * 也不能在渲染器里抛错（`CustomEntryComponent` 会把异常渲染成一条红色报错）。
+ */
+export function turnMarkerTextFromEntry(entry: { customType?: unknown; data?: unknown }): string | null {
+	if (entry.customType !== TURN_MARKER_ENTRY_TYPE) return null;
+	const data = entry.data as Partial<TurnMarkerEntryData> | undefined;
+	const text = data?.text;
+	return typeof text === "string" && text.trim() !== "" ? text : null;
+}
 
 /** `Math.random` 兼容的取数函数；单测里喂固定值把边界钉死。 */
 export type RandomFn = () => number;

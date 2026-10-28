@@ -137,6 +137,7 @@ import {
 	classifyBgNotificationOutcome,
 	classifyBgToolOutcome,
 	classifyBgWaitOutcome,
+	fitLogLine,
 	previewMoreLinesHint,
 	type BgToolOutcome,
 } from "./render.ts";
@@ -189,16 +190,16 @@ function taskDetails(task: BackgroundTask, now: number) {
 function buildNotification(task: BackgroundTask, now: number, extraLines: readonly string[] = []): string {
 	const outcome =
 		task.status === "killed"
-			? `被终止（${task.signal ?? "SIGTERM"}）`
+			? `was killed (${task.signal ?? "SIGTERM"})`
 			: task.exitCode === 0
-				? "成功结束（exit 0）"
-				: `失败结束（exit=${task.exitCode ?? "?"}${task.signal ? ` signal=${task.signal}` : ""}）`;
+				? "finished successfully (exit 0)"
+				: `failed (exit=${task.exitCode ?? "?"}${task.signal ? ` signal=${task.signal}` : ""})`;
 	return [
 		"<background-task-notification>",
-		`后台任务 ${task.id} 已${outcome}，运行 ${formatElapsed((task.endedAt ?? now) - task.startedAt)}。`,
-		`命令：${truncateCommand(task.command, 120)}`,
+		`Background task ${task.id} ${outcome}, ran ${formatElapsed((task.endedAt ?? now) - task.startedAt)}.`,
+		`Command: ${truncateCommand(task.command, 120)}`,
 		...extraLines,
-		`完整日志：${task.logPath}`,
+		`Full log: ${task.logPath}`,
 		"</background-task-notification>",
 	].join("\n");
 }
@@ -324,14 +325,14 @@ function tableWidthFor(bodyWidth: number): number {
 }
 
 /**
- * 表格一格的色槽（用户 2026-10-17 定，三轮；2026-10-22 补表头底色）：
+ * 表格一格的色槽（用户 2026-10-17 定，三轮；2026-10-22 补表头底色；2026-10-28 改表头字色）：
  *
- * - **列标题走 `mdCode`**（行内代码色）—— 列名是字段名，与正文里反引号包住的标识符同一个观感；
+ * - **列标题走 `text` 前景色**（即 fg）—— 底色已经把标题行与任务行分开了，字再上色就多一层强调；
  *   2026-10-22 加：整个格子**加粗 + 刷皮肤的 surface 底色**（`userMessageBg`）—— 表头是标题行，
  *   一格一块淡色底才看着像表头。只染格子，竖线仍是 border 片段。
  * - **边框走 bash 工具调用的正文输出色**（`bashOutput` → `toolOutput`，即 `pickBodySlot`）——
  *   表格就是挂在正文树尾的延续，框线与上面那几行输出同一个色；
- * - 其余无色的格子（表头以外的时长 / 命令 / 折叠提示）走 `text` 前景色；
+ * - 其余无色的格子（时长 / 命令 / 折叠提示）也走 `text` 前景色；
  * - 原本带语义色的格子保持不变 —— `id` 走 `accent`，状态词按结局 `warning` / `success` / `error`。
  */
 function paintTableCell(
@@ -343,7 +344,7 @@ function paintTableCell(
 ): string {
 	const painted = paintTableCellFg(theme, role, text, bodySlot);
 	// 表头底色取皮肤的 **surface** 槽（`userMessageBg`），不是 `dim` 色阶：dim 在 1337 上
-	// 是 `#6d6d6d`，压在 mdCode 的深青上对比度就没了。`theme.bg()` 只认 7 个官方
+	// 是 `#6d6d6d`，与 fg（`#f8f8f2`）的对比度只剩一半，标题字会发灰。`theme.bg()` 只认 7 个官方
 	// `ThemeBg`，所以这里用槽名（不走 theme-extra 的 `vars` 自定色）。
 	//
 	// 嵌套顺序是 bg(bold(fg(text)))：三种重置码互不干扰（`\x1b[49m` / `\x1b[22m` /
@@ -375,7 +376,9 @@ function paintTableCellFg(theme: Theme, role: TaskTableRole, text: string, bodyS
 		case "border":
 			return paintBodyRow(theme, text, bodySlot);
 		case "header":
-			return theme.fg("mdCode", text);
+			// 表头是标题行（用户 2026-10-22 定底色、2026-10-28 定字色）：底色已把它区分出来了，
+			// 字不再用 mdCode，而是与正文其他无色格子同一个前景色（`text` 槽 = fg）。
+			return theme.fg("text", text);
 		case "id":
 			return theme.fg("accent", text);
 		case "status-running":
@@ -398,7 +401,7 @@ function paintTableCellFg(theme: Theme, role: TaskTableRole, text: string, bodyS
  */
 function paintTableRows(rows: readonly TaskTableRow[], theme: Theme, bodySlot: string | undefined): string[] {
 	return rows.map((row, index) => {
-		const gutter = index === 0 ? theme.fg("muted", TREE_LAST) : "  ";
+		const gutter = index === 0 ? theme.fg("dim", TREE_LAST) : "  ";
 		const painted = row.map((segment) => paintTableCell(theme, segment.role, segment.text, bodySlot, segment)).join("");
 		return BODY_INDENT + gutter + painted;
 	});
@@ -430,7 +433,7 @@ function paintTableRows(rows: readonly TaskTableRow[], theme: Theme, bodySlot: s
  * 打对号会被读成「已经结束」），`✘` 对工具块也是多余的（圆点已经表达结局，且「没办成」
  * 是模型自己下一步就能纠正的普通分支，正文里已写了原因）。正文是**结果全文**，前面挂
  * `BODY_INDENT` 那 2 列再折行挂树（于是
- * `│` 落在工具名首字母正下方）—— 除末行外 `│ `，**末行 `└ `**。结构符走 `muted` 槽且
+ * `│` 落在工具名首字母正下方）—— 除末行外 `│ `，**末行 `└ `**。结构符走 `dim` 槽且
  * **自成一段 SGR**，不让正文色透上来。正文走**结果正文色**：与 bash 工具调用后显示的
  * 输出结果同色（`bashOutput`，主题没定义时退回 `toolOutput`，见 `pickBodySlot`；用户
  * 2026-10-06 定，改成这条之前的旧行为是 `text` 槽 = fg）。
@@ -514,7 +517,9 @@ function bgToolRenderers(
 					const rows: string[] = [];
 					for (const line of sourceLines) {
 						// 空行也占一行（wrapTextWithAnsi("") → [""]）：段落间距是可读性的一部分
-						rows.push(...wrapTextWithAnsi(line, bodyWidth));
+						// 日志路径行**不折行**：放不下就把路径前段换成 `…`（尾部即文件名），
+						// 否则树会被切出一个孤零零的 `og`（用户 2026-10-28 定）。
+						rows.push(...wrapTextWithAnsi(fitLogLine(line, bodyWidth, piTui.visibleWidth), bodyWidth));
 					}
 					if (rows.every((row) => row.trim() === "")) {
 						cache.set(width, []);
@@ -554,13 +559,13 @@ function bgToolRenderers(
 					const lines = visible.map(
 						(row, index) =>
 							BODY_INDENT +
-							theme.fg("muted", prefixes[index] ?? TREE_PIPE) +
+							theme.fg("dim", prefixes[index] ?? TREE_PIPE) +
 							paintBodyRow(theme, row, bodySlot),
 					);
 					if (hidden > 0) {
 						lines.push(
 							BODY_INDENT +
-								theme.fg("muted", prefixes[visible.length] ?? TREE_PIPE) +
+								theme.fg("dim", prefixes[visible.length] ?? TREE_PIPE) +
 								theme.fg("muted", previewMoreLinesHint(hidden)),
 						);
 					}
@@ -716,10 +721,10 @@ export default function backgroundTasks(pi: ExtensionAPI): void {
 				// 只有「保留了」的路径与分支是模型下一步可能真去用的，所以带上细节。
 				notice =
 					outcome.kind === "removed"
-						? "隔离工作区：无改动，已自动清理。"
+						? "Isolated worktree: no changes, cleaned up automatically."
 						: outcome.kind === "kept"
-							? `隔离工作区：${outcome.reason}，已保留在 ${wt.path}${outcome.branch ? `（分支 ${outcome.branch}）` : ""}`
-							: `隔离工作区：删除失败（${outcome.reason}），已保留在 ${wt.path}`;
+							? `Isolated worktree: ${outcome.reason}, kept at ${wt.path}${outcome.branch ? ` (branch ${outcome.branch})` : ""}`
+							: `Isolated worktree: removal failed (${outcome.reason}), kept at ${wt.path}`;
 			}
 
 			// 只认当前 registry 的任务：会话替换后新建了 registry，
@@ -802,10 +807,10 @@ export default function backgroundTasks(pi: ExtensionAPI): void {
 		}),
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
 			const command = String(params?.command ?? "").trim();
-			if (!command) return textResult("command 不能为空。", { ok: false });
+			if (!command) return textResult("command must not be empty.", { ok: false });
 			const reg = ensureRegistry(ctx);
 			const cwd = params?.cwd ? path.resolve(ctx.cwd, String(params.cwd)) : ctx.cwd;
-			if (!fs.existsSync(cwd)) return textResult(`工作目录不存在：${cwd}`, { ok: false });
+			if (!fs.existsSync(cwd)) return textResult(`Working directory does not exist: ${cwd}`, { ok: false });
 
 			// 隔离是增强而非前提：不在 git 仓库 / 建失败都**静默降级**在原 cwd 跑，
 			// 只把事实告诉模型（另一个选择是拒绝任务，但那会把 /tmp 里跑脚本也一并挡掉）。
@@ -815,7 +820,7 @@ export default function backgroundTasks(pi: ExtensionAPI): void {
 			if (wantWorktree) {
 				const prepared = await prepareWorktree({ cwd, runDir: cwd });
 				if (prepared.ok) created = prepared.worktree;
-				else isolationNote = `未隔离（${prepared.reason}），命令在 ${cwd} 里跑。`;
+				else isolationNote = `Not isolated (${prepared.reason}); the command runs in ${cwd}.`;
 			}
 
 			const task = reg.startTask({
@@ -829,18 +834,20 @@ export default function backgroundTasks(pi: ExtensionAPI): void {
 			if (task.spawnError) {
 				// 任务没跑起来，它建的那份 worktree 也就没人清 —— 当场清掉
 				if (created) void cleanupWorktree(task.worktree!, `pi/bg_${task.id}`);
-				return textResult(`启动失败：${task.spawnError}`, { ok: false, task: taskDetails(task, Date.now()) });
+				return textResult(`Failed to start: ${task.spawnError}`, { ok: false, task: taskDetails(task, Date.now()) });
 			}
 			bumpDock();
 			// 总览表的**快照**（用户 2026-10-16 选「快照而非实时」）：渲染器只读这份，不读注册表。
 			const now = Date.now();
 			return textResult(
 				[
-					`已在后台启动 ${task.id}（pid ${task.pid ?? "?"}）。`,
-					`命令：${truncateCommand(task.command, 120)}`,
-					...(created ? [`隔离工作区：${created.path}（从 HEAD 新建的 git worktree，未提交的改动不在里面）`] : []),
+					`Started ${task.id} in the background (pid ${task.pid ?? "?"}).`,
+					`Command: ${truncateCommand(task.command, 120)}`,
+					...(created
+						? [`Isolated worktree: ${created.path} (a fresh git worktree at HEAD; uncommitted changes are not in it)`]
+						: []),
 					...(isolationNote ? [isolationNote] : []),
-					`日志：${task.logPath}`,
+					`Log: ${task.logPath}`,
 				].join("\n"),
 				{ ok: true, task: taskDetails(task, now), ...taskSnapshotDetails(reg, now) },
 			);
@@ -874,18 +881,21 @@ export default function backgroundTasks(pi: ExtensionAPI): void {
 			const task = reg.resolveTask(id);
 			if (!task) {
 				const known = reg.listTasks().map((entry) => entry.id).join(", ");
-				return textResult(`没有这个任务：${id}${known ? `（已知：${known}）` : "（本会话还没启动过后台任务）"}`, { ok: false });
+				return textResult(`No such task: ${id}${known ? ` (known: ${known})` : " (no background task has been started in this session)"}`, { ok: false });
 			}
 			const offset = typeof params?.offset === "number" ? params.offset : undefined;
 			const result = reg.readOutput(task, offset);
 			const notes: string[] = [];
-			if (result.droppedBefore > 0) notes.push(`（请求点之前有 ${result.droppedBefore} 字符已超出内存缓冲，完整内容在日志文件里）`);
-			if (result.truncatedToTail) notes.push(`（本次输出超过 ${MAX_READ_CHARS} 字符，只返回了尾部）`);
-			const body = result.text.length > 0 ? result.text : "（没有新输出）";
+			if (result.droppedBefore > 0)
+				notes.push(
+					`(${result.droppedBefore} characters before the request point already dropped from the in-memory buffer; the full content is in the log file)`,
+				);
+			if (result.truncatedToTail) notes.push(`(output exceeded ${MAX_READ_CHARS} characters; only the tail is returned)`);
+			const body = result.text.length > 0 ? result.text : "(no new output)";
 			const header = [
-				`${task.id}  ${result.status}${result.status === "running" ? `  已运行 ${formatElapsed(Date.now() - task.startedAt)}` : `  exit=${result.exitCode ?? task.signal ?? "?"}`}`,
+				`${task.id}  ${result.status}${result.status === "running" ? `  running for ${formatElapsed(Date.now() - task.startedAt)}` : `  exit=${result.exitCode ?? task.signal ?? "?"}`}`,
 				`offset ${result.from} → ${result.to}${notes.length > 0 ? `  ${notes.join(" ")}` : ""}`,
-				`日志：${task.logPath}`,
+				`Log: ${task.logPath}`,
 			].join("\n");
 			return textResult(`${header}\n\n${body}`, { ok: true, task: taskDetails(task, Date.now()), read: result });
 		},
@@ -912,11 +922,11 @@ export default function backgroundTasks(pi: ExtensionAPI): void {
 			const id = String(params?.id ?? "").trim();
 			const signal = (String(params?.signal ?? "SIGTERM").trim() || "SIGTERM") as NodeJS.Signals;
 			const result = reg.killTask(id, signal);
-			if (!result.ok) return textResult(result.reason ?? `杀不掉 ${id}`, { ok: false });
+			if (!result.ok) return textResult(result.reason ?? `Cannot kill ${id}`, { ok: false });
 			const task = reg.resolveTask(id);
 			bumpDock();
 			return textResult(
-				`已向 ${id} 发送 ${signal}（整个进程组）；${formatElapsed(Date.now() - (task?.startedAt ?? Date.now()))} 后仍未退出会补 SIGKILL。`,
+				`Sent ${signal} to ${id} (whole process group); if it has not exited after ${formatElapsed(Date.now() - (task?.startedAt ?? Date.now()))}, SIGKILL follows.`,
 				{ ok: true, task: task ? taskDetails(task, Date.now()) : undefined },
 			);
 		},
@@ -925,12 +935,12 @@ export default function backgroundTasks(pi: ExtensionAPI): void {
 	// ── /background 命令（仿 CC 的 /bashes）────────────────────────────────
 
 	pi.registerCommand("background", {
-		description: "后台任务：/background 列表；/background <id> 详情+输出尾部；/background kill <id> 停掉",
+		description: "Background tasks: /background lists them; /background <id> shows details plus the output tail; /background kill <id> stops one",
 		getArgumentCompletions: (prefix: string) => {
 			if (!registry) return null;
 			const trimmed = prefix.trim();
 			const items: Array<{ value: string; label: string; description?: string }> = [];
-			if ("kill".startsWith(trimmed)) items.push({ value: "kill ", label: "kill", description: "停掉一个后台任务" });
+			if ("kill".startsWith(trimmed)) items.push({ value: "kill ", label: "kill", description: "Stop a background task" });
 			for (const task of registry.listTasks()) {
 				if (trimmed && !task.id.startsWith(trimmed) && !`kill ${task.id}`.startsWith(trimmed)) continue;
 				items.push({ value: task.id, label: task.id, description: `${task.status} ${truncateCommand(task.command, 40)}` });
@@ -947,11 +957,11 @@ export default function backgroundTasks(pi: ExtensionAPI): void {
 				const tasks = reg.listTasks();
 				const running = reg.runningCount();
 				const lines = [
-					`后台任务 ${tasks.length} 个（在跑 ${running}）：`,
+					`Background tasks: ${tasks.length} (${running} running)`,
 					formatTaskList(tasks, now),
 					"",
-					"日志目录：" + (logDir || resolveLogRoot()),
-					"提示：后台命令不经过前台 bash 的 seatbelt 删除边界。",
+					"Log directory: " + (logDir || resolveLogRoot()),
+					"Note: background commands are not subject to the foreground bash seatbelt delete boundary.",
 				];
 				ctx.ui.notify(lines.join("\n"), "info");
 				return;
@@ -960,18 +970,18 @@ export default function backgroundTasks(pi: ExtensionAPI): void {
 			if (parts[0] === "kill") {
 				const id = parts[1];
 				if (!id) {
-					ctx.ui.notify("用法：/background kill <id>", "warning");
+					ctx.ui.notify("Usage: /background kill <id>", "warning");
 					return;
 				}
 				const result = reg.killTask(id);
 				bumpDock();
-				ctx.ui.notify(result.ok ? `已向 ${id} 发送 SIGTERM` : (result.reason ?? `杀不掉 ${id}`), result.ok ? "info" : "warning");
+				ctx.ui.notify(result.ok ? `Sent SIGTERM to ${id}` : (result.reason ?? `Cannot kill ${id}`), result.ok ? "info" : "warning");
 				return;
 			}
 
 			const task = reg.resolveTask(parts[0]);
 			if (!task) {
-				ctx.ui.notify(`没有这个任务：${parts[0]}。用 /background 看列表。`, "warning");
+				ctx.ui.notify(`No such task: ${parts[0]}. Run /background to list them.`, "warning");
 				return;
 			}
 			// 详情：状态行 + 输出尾部（从 0 读会推进 readOffset，所以这里直接读日志文件尾部，
@@ -979,17 +989,17 @@ export default function backgroundTasks(pi: ExtensionAPI): void {
 			let tail = "";
 			try {
 				const content = fs.readFileSync(task.logPath, "utf-8");
-				tail = content.length > 4000 ? `…（前面 ${content.length - 4000} 字符略）\n${content.slice(-4000)}` : content;
+				tail = content.length > 4000 ? `… (${content.length - 4000} earlier characters omitted)\n${content.slice(-4000)}` : content;
 			} catch {
-				tail = "（日志读不到）";
+				tail = "(log unreadable)";
 			}
 			ctx.ui.notify(
 				[
 					formatTaskLine(task, now),
 					`cwd: ${task.cwd}`,
-					`日志: ${task.logPath}`,
+					`Log: ${task.logPath}`,
 					"",
-					tail.trimEnd() || "（还没有输出）",
+					tail.trimEnd() || "(no output yet)",
 				].join("\n"),
 				"info",
 			);
@@ -1063,7 +1073,8 @@ export default function backgroundTasks(pi: ExtensionAPI): void {
 				const bodyWidth = Math.max(1, total - BODY_INDENT.length - GUTTER_WIDTH);
 				const rows: string[] = [];
 				for (const line of sourceLines) {
-					rows.push(...wrapTextWithAnsi(line, bodyWidth));
+					// `Full log: <路径>` 同样不折行（与工具块里的 `Log:` 同一套处理）。
+					rows.push(...wrapTextWithAnsi(fitLogLine(line, bodyWidth, piTui.visibleWidth), bodyWidth));
 				}
 				// 通知正文恒为四行量级，不做预览截断（它是要用户读的事实陈述）
 				// 正文颜色：与 bash 工具调用后的输出同色（bashOutput，没定义时 toolOutput）
@@ -1089,7 +1100,7 @@ export default function backgroundTasks(pi: ExtensionAPI): void {
 							// 不闭合时**每一行**都是 `│ `（包括末行），`└ ` 交给表格首行。
 							// 行数算错（比如把折行碎片漏算）会让树提前收口，所以行数交给
 							// `bgResultTreePrefixes`，索引超出范围时兜底 `│ `。
-							theme.fg("muted", prefixes[index] ?? TREE_PIPE) +
+							theme.fg("dim", prefixes[index] ?? TREE_PIPE) +
 							paintBodyRow(theme, rows[index]!, bodySlot),
 					);
 				}

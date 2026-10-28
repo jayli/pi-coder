@@ -130,10 +130,10 @@ function readKeystoreObject(file: string): Record<string, unknown> {
 	try {
 		parsed = JSON.parse(text);
 	} catch {
-		throw new Error(`${file} 不是合法 JSON，拒绝覆盖（请先修好它）`);
+		throw new Error(`${file} is not valid JSON; refusing to overwrite (fix it first)`);
 	}
 	if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-		throw new Error(`${file} 不是 JSON 对象，拒绝覆盖`);
+		throw new Error(`${file} is not a JSON object; refusing to overwrite`);
 	}
 	return parsed as Record<string, unknown>;
 }
@@ -264,7 +264,7 @@ export async function synthesizeSpeech(options: SynthesizeOptions): Promise<{ ur
 	}
 	const url = (payload as { output?: { audio?: { url?: unknown } } } | undefined)?.output?.audio?.url;
 	if (typeof url !== "string" || url.length === 0) {
-		throw new Error(`响应里没有 output.audio.url${describePayload(payload)}`);
+		throw new Error(`Response has no output.audio.url${describePayload(payload)}`);
 	}
 	return { url };
 }
@@ -299,7 +299,7 @@ export async function downloadAudio(options: {
 }): Promise<AudioClip> {
 	const fetchImpl = options.fetchImpl ?? (fetch as unknown as FetchLike);
 	const response = await fetchImpl(options.url, { signal: options.signal });
-	if (!response.ok) throw new Error(`下载合成音频失败：HTTP ${response.status}`);
+	if (!response.ok) throw new Error(`Failed to download the synthesized audio: HTTP ${response.status}`);
 	const bytes = new Uint8Array(await response.arrayBuffer());
 
 	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-voice-"));
@@ -383,7 +383,7 @@ export class AliyunSpeaker {
 		const apiKey = this.readKey();
 		if (!apiKey) {
 			// router 已经查过一次 key；这里再查一次是防「直接 new AliyunSpeaker 用」的误用。
-			this.onError("没有配置 aliyunKey，无法走阿里云口播");
+			this.onError("aliyunKey is not configured; cannot use Aliyun announcements");
 			return;
 		}
 
@@ -444,7 +444,7 @@ export class AliyunSpeaker {
 
 		// 失败提示放在状态清理**之后**：router 的回调可能紧接着让 say 开口，
 		// 那时这一句已经不「当前」了，不会再把状态栏抹掉。
-		if (failure) this.onError(`阿里云口播失败：${failure}`);
+		if (failure) this.onError(failure);
 	}
 
 	private playClip(file: string, controller: AbortController): Promise<void> {
@@ -534,7 +534,7 @@ export function createSpeakerRouter(options: SpeakerRouterOptions): SpeakerLike 
 			const fallback = pending;
 			pending = undefined;
 			if (!fallback) return; // 已经过期（被打断 / 顶掉）：只当没发生过
-			onError(`${message}（退回系统 say）`);
+			onError(`${message} (falling back to system say)`);
 			options.say.speak(fallback.text, fallback.speakOptions);
 		},
 	});

@@ -133,7 +133,7 @@ export function createWorktree(options: CreateWorktreeOptions): CreateWorktreeRe
 
 	const rootResult = runGit(["rev-parse", "--show-toplevel"], cwd);
 	if (rootResult.code !== 0 || !rootResult.stdout.trim()) {
-		return { ok: false, reason: "不在 git 仓库里" };
+		return { ok: false, reason: "not in a git repository" };
 	}
 	// --show-toplevel 可能返回 /private/var/... 而 cwd 是 /var/...（macOS 的 /tmp 软链），
 	// 两边都用 realpath 归一，否则下面的 relative() 会算出爬出仓库的 ../..
@@ -141,7 +141,7 @@ export function createWorktree(options: CreateWorktreeOptions): CreateWorktreeRe
 	const head = runGit(["rev-parse", "HEAD"], repoRoot);
 	if (head.code !== 0 || !head.stdout.trim()) {
 		// 空仓库（还没有任何 commit）：没有 HEAD 可作基线，降级不隔离
-		return { ok: false, reason: "仓库还没有任何提交（HEAD 不存在）" };
+		return { ok: false, reason: "the repository has no commits yet (HEAD does not exist)" };
 	}
 	const baseCommit = head.stdout.trim();
 
@@ -149,7 +149,7 @@ export function createWorktree(options: CreateWorktreeOptions): CreateWorktreeRe
 	try {
 		worktreePath = fs.mkdtempSync(path.join(options.tmpRoot ?? os.tmpdir(), "pi-bg-"));
 	} catch (error) {
-		return { ok: false, reason: `建临时目录失败：${message(error)}` };
+		return { ok: false, reason: `could not create the temp directory: ${message(error)}` };
 	}
 
 	const add = runGit(["worktree", "add", "--detach", worktreePath, baseCommit], repoRoot);
@@ -157,7 +157,7 @@ export function createWorktree(options: CreateWorktreeOptions): CreateWorktreeRe
 		// 半成品目录：git 可能已经建了一部分，清掉自己的这一份，不留残骸
 		fs.rmSync(worktreePath, { recursive: true, force: true });
 		runGit(["worktree", "prune"], repoRoot);
-		return { ok: false, reason: `git worktree add 失败：${firstLine(add.stderr) || `exit ${add.code}`}` };
+		return { ok: false, reason: `git worktree add failed: ${firstLine(add.stderr) || `exit ${add.code}`}` };
 	}
 
 	const linkedDirs = linkIgnoredDirs(
@@ -293,8 +293,8 @@ export function cleanupWorktree(
 			}
 			const reason =
 				changes.commits > 0
-					? `${changes.dirtyFiles} 个文件有改动，另有 ${changes.commits} 个新提交`
-					: `${changes.dirtyFiles} 个文件有改动`;
+					? `${changes.dirtyFiles} files changed, plus ${changes.commits} new commit${changes.commits === 1 ? "" : "s"}`
+					: `${changes.dirtyFiles} files changed`;
 			return { kind: "kept", reason, changes, branch } satisfies CleanupOutcome;
 		}
 		const remove = runGit(["worktree", "remove", "--force", worktree.path], worktree.repoRoot);
@@ -306,7 +306,7 @@ export function cleanupWorktree(
 		}
 		return {
 			kind: "left",
-			reason: firstLine(remove.stderr) || `git worktree remove 失败（exit ${remove.code}）`,
+			reason: firstLine(remove.stderr) || `git worktree remove failed (exit ${remove.code})`,
 		} satisfies CleanupOutcome;
 	});
 }

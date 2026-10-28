@@ -91,7 +91,7 @@
 import type { ExtensionAPI, ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
-import { matchesKey, wrapTextWithAnsi } from "@earendil-works/pi-tui";
+import { matchesKey, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 
 import {
@@ -121,6 +121,7 @@ import {
 	truncatePlanForDialog,
 } from "./plan-text.ts";
 import { buildPlanDocPath } from "./plan-doc.ts";
+import type { FrameDeps } from "./frame.ts";
 import { brainstormingLoadedInRun, messagesFromBranch } from "./brainstorm.ts";
 import { buildApprovalTitle, buildConsentTitle } from "./consent.ts";
 import {
@@ -133,6 +134,24 @@ import {
 	type PlanToolOutcome,
 } from "./render.ts";
 import { THINKING_FALLBACK_KEY, keybindingsPath, rebindThinkingKey } from "./keybinding.ts";
+
+/**
+ * 弹框正文线框的几何来源（见 `frame.ts`）：框宽取**对话框内容宽**，折行与量宽直接用
+ * pi-tui 的实现 —— 与弹框自己的组件同口径，框里的折行才不会与预算算出来的行数打架。
+ *
+ * 为什么是 `columns - 2` 而不是终端列数：`ExtensionSelectorComponent` 把 title 塞进
+ * `new Text(title, 1, 0)`，那个 `paddingX = 1` 让正文可用宽度是「列数 - 2」。按整宽画框
+ * 会每行溢出 2 列、被组件再折一次，右边框全掉到下一行（实测）。与 `plan-text.ts` 的
+ * `dialogPlanBudget` 同一个口径：那里的 `contentWidth` 也是减掉这 2 列再减 `FRAME_INSET`。
+ */
+function dialogFrame(): FrameDeps {
+	const columns = process.stdout.columns || Number(process.env.COLUMNS) || 80;
+	return {
+		columns: Math.max(1, columns - 2),
+		wrap: wrapTextWithAnsi,
+		measure: visibleWidth,
+	};
+}
 
 /** 关掉整个扩展。 */
 const DISABLED = (process.env.PI_PLAN_MODE ?? "").trim().toLowerCase() === "off";
@@ -147,9 +166,9 @@ const EXIT_TOOL = "exit_plan_mode";
 const ENTRY_TYPE = "plan-mode";
 
 /** 审批对话框的三个选项（顺序即默认选中顺序：第一项是推荐路线）。 */
-const CHOICE_EXECUTE = "写计划文档并实施";
-const CHOICE_DOC_ONLY = "只写计划文档";
-const CHOICE_REJECT = "打回";
+const CHOICE_EXECUTE = "Write the plan and implement";
+const CHOICE_DOC_ONLY = "Write the plan only";
+const CHOICE_REJECT = "Reject";
 
 /**
  * 同意弹框的两个选项（第一项是默认选中项 = 接受模型的请求）。
@@ -160,8 +179,8 @@ const CHOICE_REJECT = "打回";
  * CC 才敢把判据写松（还留了 “err on the side of planning”）—— 误判的代价被弹框吸收了。
  * 没有这道弹框时，判据一松就直接变成打扰（实测 15.5% 的用户指令进了 plan）。
  */
-const CONSENT_PLAN = "进 plan mode（只读探索）";
-const CONSENT_IMPL = "直接实施";
+const CONSENT_PLAN = "Enter plan mode (read-only)";
+const CONSENT_IMPL = "Implement directly";
 
 /**
  * `enter_plan_mode` 的工具描述 = 全部路由判据。
@@ -317,7 +336,7 @@ function planResultText(result: PlanToolResultLike): string {
  * **从圆点起顶格**；正文是**结果全文**（用户选的：给模型的指令也一并显示），前面挂
  * `BODY_INDENT` 那 2 列再折行挂树（于是 `│` 落在工具名首字母正下方）——
  * 除末行外 `│ `，**末行 `└ `**（与 bash 块「`└` 只落在第一个实质输出行」刻意分叉，
- * 见 render.ts 文件头）。结构符走 `muted` 槽且**自成一段 SGR**，不让正文色透上来。
+ * 见 render.ts 文件头）。结构符走 `dim` 槽且**自成一段 SGR**，不让正文色透上来。
  *
  * 正文走 `text` 槽（用户 2026-09-29 定）而不是 `toolOutput`：计划正文是要用户逐字读、
  * 并据此拍板的内容，不该跟 read / grep 的输出正文一样被压暗。`text` 在本机三套皮肤里
@@ -374,7 +393,7 @@ function planToolRenderers(toolName: string) {
 					// 长句会在第一片就画上 `└`，看着像树提前结束了。
 					const prefixes = planResultTreePrefixes(rows.length);
 					const lines = rows.map(
-						(row, index) => BODY_INDENT + theme.fg("muted", prefixes[index] ?? TREE_PIPE) + theme.fg("text", row),
+						(row, index) => BODY_INDENT + theme.fg("dim", prefixes[index] ?? TREE_PIPE) + theme.fg("text", row),
 					);
 					cache.set(width, lines);
 					return lines;
@@ -402,7 +421,7 @@ export default function planMode(pi: ExtensionAPI) {
 	let inputUnsubscribe: (() => void) | null = null;
 
 	pi.registerFlag("plan", {
-		description: "启动即进入 plan mode（只读探索）",
+		description: "Start in plan mode (read-only)",
 		type: "boolean",
 		default: false,
 	});
@@ -498,8 +517,8 @@ export default function planMode(pi: ExtensionAPI) {
 		if (ctx?.hasUI) {
 			ctx.ui.notify(
 				reason === "model"
-					? "模型判断这个任务需要先规划，已进入 plan mode（只读）。shift+tab 可随时退出。"
-					: "已进入 plan mode：只读探索，模型会先给方案。shift+tab 切换。",
+					? "The model judged this task needs planning first; entered plan mode (read-only). shift+tab exits at any time."
+					: "Entered plan mode: read-only, the model proposes a plan first. shift+tab toggles.",
 				"info",
 			);
 		}
@@ -545,7 +564,7 @@ export default function planMode(pi: ExtensionAPI) {
 			leavePlan(
 				ctx,
 				cancelPlan(state),
-				"☢ dangerous 模式：沙箱删除拦截已关闭，任意权限（pi 原生形态）。再按 shift+tab 回 ⏵ bypass。",
+				"☢ dangerous mode: sandbox delete interception is off, any permission (pi's native behaviour). Press shift+tab back to ⏵ bypass.",
 				"warning",
 			);
 			return;
@@ -556,7 +575,7 @@ export default function planMode(pi: ExtensionAPI) {
 		persist();
 		render(ctx);
 		if (ctx?.hasUI) {
-			ctx.ui.notify("已退出 dangerous 模式，现在是 ⏵ bypass：沙箱删除拦截已开启。再按 shift+tab 进 plan mode。", "info");
+			ctx.ui.notify("Left dangerous mode; now ⏵ bypass: sandbox delete interception is on. Press shift+tab to enter plan mode.", "info");
 		}
 	}
 
@@ -567,7 +586,7 @@ export default function planMode(pi: ExtensionAPI) {
 	 */
 	function togglePlanCommand(ctx: ExtensionContext | undefined): void {
 		if (state.phase === "plan") {
-			leavePlan(ctx, exitPlanTo(state, "bypass"), "已退出 plan mode（/plan），现在是 ⏵ bypass：沙箱删除拦截已开启。");
+			leavePlan(ctx, exitPlanTo(state, "bypass"), "Left plan mode (/plan); now ⏵ bypass: sandbox delete interception is on.");
 			return;
 		}
 		enterPlanMode(ctx, "user");
@@ -656,7 +675,7 @@ export default function planMode(pi: ExtensionAPI) {
 	// =========================================================================
 
 	pi.registerCommand("plan", {
-		description: "切换 plan mode（只读探索 → 批准 → 写计划文档）；离开 plan 回 bypass（dangerous 只能 shift+tab 切）",
+		description: "Toggle plan mode (read-only -> approval -> write the plan doc); leaving plan returns to bypass (dangerous is shift+tab only)",
 		handler: async (_args, ctx) => {
 			currentCtx = ctx;
 			togglePlanCommand(ctx);
@@ -664,29 +683,29 @@ export default function planMode(pi: ExtensionAPI) {
 	});
 
 	pi.registerCommand("plan-status", {
-		description: "显示当前权限模式（dangerous / bypass / plan）",
+		description: "Show the current permission mode (dangerous / bypass / plan)",
 		handler: async (_args, ctx) => {
 			currentCtx = ctx;
 			if (state.phase === "dangerous") {
-				ctx.ui.notify("当前模式：☢ dangerous（沙箱删除拦截关闭，任意权限）。shift+tab 回 bypass。", "warning");
+				ctx.ui.notify("Current mode: ☢ dangerous (sandbox delete interception off, any permission). shift+tab returns to bypass.", "warning");
 				return;
 			}
 			if (state.phase === "bypass") {
-				ctx.ui.notify("当前模式：⏵ bypass（沙箱删除拦截开启）。shift+tab 进 plan mode。", "info");
+				ctx.ui.notify("Current mode: ⏵ bypass (sandbox delete interception on). shift+tab enters plan mode.", "info");
 				return;
 			}
 			const lines: string[] = [];
 			if (state.docWriting) {
-				lines.push(`plan mode: plan（写文档子态）`);
-				lines.push(`目标文档：${state.pendingDocPath ?? "（路径丢失）"}`);
+				lines.push(`plan mode: plan (doc-writing sub-state)`);
+				lines.push(`Target doc: ${state.pendingDocPath ?? "(path lost)"}`);
 			} else {
-				lines.push("plan mode: plan（只读探索）");
+				lines.push("plan mode: plan (read-only)");
 			}
 			if (state.pending) {
 				const first = state.pending.split("\n").find((line) => line.trim() !== "") ?? "";
-				lines.push(`待批计划：${first.trim().slice(0, 60)}（共 ${state.pending.split("\n").length} 行）`);
+				lines.push(`Pending plan: ${first.trim().slice(0, 60)} (${state.pending.split("\n").length} lines total)`);
 			}
-			if (state.planSummary) lines.push(`总结：${state.planSummary}`);
+			if (state.planSummary) lines.push(`Summary: ${state.planSummary}`);
 			ctx.ui.notify(lines.join("\n"), "info");
 		},
 	});
@@ -752,18 +771,22 @@ export default function planMode(pi: ExtensionAPI) {
 					// `ui.select` 把整个 title 包成一段 accent，所以正文必须自己在 title 里上色
 					// （内层显式颜色覆盖外层）。理由见 consent.ts。
 					const choice = await ctx.ui.select(
-						buildConsentTitle(ctx.ui.theme, {
-							title: "模型请求进入 plan mode（只读探索）。",
-							reason,
-							planLine: `${CONSENT_PLAN}：先只读探索、出方案，你批准后才动手`,
-							implLine: `${CONSENT_IMPL}：跳过规划，现在就按你的指令直接改`,
-						}),
+						buildConsentTitle(
+							ctx.ui.theme,
+							{
+								title: "Plan mode:",
+								reason,
+								planLine: `${CONSENT_PLAN}: explore read-only and propose a plan; work starts only after you approve`,
+								implLine: `${CONSENT_IMPL}: skip planning and act on your instruction now`,
+							},
+							dialogFrame(),
+						),
 						[CONSENT_PLAN, CONSENT_IMPL],
 					);
 					// esc（undefined）当作否决，与 CC 的 “must consent” 一致 ——
 					// 「嫌烦想跳过」这条最常见路径只需一个键。
 					if (choice !== CONSENT_PLAN) {
-						ctx.ui.notify("已跳过 plan mode，直接实施。", "info");
+						ctx.ui.notify("Skipped plan mode; implementing directly.", "info");
 						return {
 							content: [
 								{
@@ -856,7 +879,7 @@ export default function planMode(pi: ExtensionAPI) {
 			// 非交互运行（`pi -p`）没有对话框可弹：自动按推荐路线（写文档并实施）走，
 			// 比死锁好 —— 模型已经规划完，卡在这里只会让整个运行白跑。
 			const choice = ctx.hasUI
-				? await ctx.ui.select(buildApprovalTitle(ctx.ui.theme, dialogPlan), [
+				? await ctx.ui.select(buildApprovalTitle(ctx.ui.theme, dialogPlan, dialogFrame()), [
 						CHOICE_EXECUTE,
 						CHOICE_DOC_ONLY,
 						CHOICE_REJECT,
@@ -989,9 +1012,9 @@ export default function planMode(pi: ExtensionAPI) {
 			// 回到 dangerous 意味着沙箱删除拦截已关，不能让用户以为还在保护下。
 			const landed =
 				outcome.returnPhase === "dangerous"
-					? "☢ dangerous（沙箱删除拦截已关闭）"
-					: "⏵ bypass（沙箱删除拦截已开启）";
-			ctx.ui.notify(`计划文档已写好：${outcome.docPath}\n实施阶段回到 ${landed}`, "info");
+					? "☢ dangerous (sandbox delete interception off)"
+					: "⏵ bypass (sandbox delete interception on)";
+			ctx.ui.notify(`Plan doc written: ${outcome.docPath}\nBack to ${landed} for implementation`, "info");
 		}
 		return {
 			content: [{ type: "text", text: buildDocWrittenMessage(outcome.docMode, outcome.docPath) }],
@@ -1038,7 +1061,8 @@ function ensureThinkingKeyRebound(ctx: ExtensionContext): void {
 		// 已经绑过（无论是谁绑的）→ 静默。只有「配置坏了、我们不敢动」才需要提醒。
 		if (outcome.needsAttention === true && ctx.hasUI) {
 			ctx.ui.notify(
-				`plan mode 占用了 shift+tab，但无法自动改绑（${outcome.reason}）。请手动把 app.thinking.cycle 改绑到 ${THINKING_FALLBACK_KEY}（${path}）。`,
+				`plan mode takes over shift+tab, but the keybinding could not be rebound automatically (${outcome.reason}). ` +
+					`Please rebind app.thinking.cycle to ${THINKING_FALLBACK_KEY} yourself (${path}).`,
 				"warning",
 			);
 		}
@@ -1050,14 +1074,14 @@ function ensureThinkingKeyRebound(ctx: ExtensionContext): void {
 		writeFileSync(path, value, "utf8");
 		if (ctx.hasUI) {
 			ctx.ui.notify(
-				`plan mode 占用了 shift+tab；思考等级循环已改绑到 ${THINKING_FALLBACK_KEY}（${path}，/reload 后生效）`,
+				`plan mode takes over shift+tab; the thinking-level cycle was rebound to ${THINKING_FALLBACK_KEY} (${path}, takes effect after /reload)`,
 				"info",
 			);
 		}
 	} catch {
 		if (ctx.hasUI) {
 			ctx.ui.notify(
-				`plan mode 占用了 shift+tab。请在 ${path} 里把 app.thinking.cycle 改绑到 ${THINKING_FALLBACK_KEY}。`,
+				`plan mode takes over shift+tab. Rebind app.thinking.cycle to ${THINKING_FALLBACK_KEY} in ${path}.`,
 				"warning",
 			);
 		}

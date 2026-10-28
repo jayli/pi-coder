@@ -34,8 +34,8 @@ description: 从一份现成配色（vim colorscheme / tmTheme plist / codex 主
 | `warning` | 警告 | `#fdb082` |
 | `toolTitle` | 工具标题 | `#8cdaff` |
 | `mdHeading` | Markdown 标题 | `#ff8942` |
-| `mdLink` | Markdown 链接 | `#6699cc` |
-| `mdCode` | Markdown 行内代码 | `#0d92c1` |
+| `mdLink` | Markdown 链接 | `#63a8f8` |
+| `mdCode` | Markdown 行内代码 | `#63a8f8` |
 | `mdListBullet` | Markdown 列表符号 | `#fbdfb5` |
 | `bashMode` | bash 模式编辑器边框 | `#fc9354` |
 | `syntaxComment` | 注释 | `#6d6d6d` |

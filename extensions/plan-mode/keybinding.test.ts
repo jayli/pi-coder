@@ -49,7 +49,7 @@ describe("rebindThinkingKey：不该改的", () => {
 		const { value, outcome } = rebindThinkingKey(raw, PATH);
 		assert.equal(outcome.changed, false);
 		assert.equal(value, raw);
-		assert.match(outcome.reason ?? "", /已有绑定/);
+		assert.match(outcome.reason ?? "", /is already bound/);
 		assert.notEqual(outcome.needsAttention, true, "这是想要的状态，不该提醒用户");
 	});
 

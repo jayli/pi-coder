@@ -12,11 +12,11 @@
  *
  * 断言口径（A/B 逐行对照，比"看起来对不对"硬）：
  *   - 每一行的可见宽度与补丁前**完全一致**（pi-tui 对超宽行直接抛错，多一格都不行）；
- *   - 去掉零宽序列后，正文与补丁前逐字相同，只有行首那两格从「空格 + 正文」变成「竖线 + 空格」，
- *     而那多出来的一格是从**行尾补白**里吃的（宽度不变）；
- *   - 竖线颜色 = 皮肤 `accent`（强调色；这里注入的是一份自造皮肤，色值可控）；
- *   - OSC 133 zone 标记仍在首行最前面（不能被竖线挤到后面）；
- *   - 会话替换窗口内（旧 ctx 已作废、新 ctx 未到）渲染不抛异常、只是不画竖线（2026-09-20 回归）。
+ *   - 正文首行从「空格 + 正文」变成「`›` + 空格 + 正文」，续行用两格空格对齐；
+ *     多出来的格从**行尾补白**里吃（宽度不变），整条消息只有一个 `›`；
+ *   - `›` 颜色 = 皮肤 `muted`（弱化文字色；这里注入的是一份自造皮肤，色值可控）；
+ *   - OSC 133 zone 标记仍在首行最前面；
+ *   - 会话替换窗口内（旧 ctx 已作废、新 ctx 未到）渲染不抛异常、只是不画标记（2026-09-20 回归）。
  * 找不到本机 pi 的库入口就整体 skip（不假装通过）。
  */
 
@@ -31,33 +31,22 @@ const EXTENSION_PATH = path.join(path.dirname(fileURLToPath(import.meta.url)), "
 const SKIP = "找不到本机 pi 的库入口（装过 pi 才有）";
 const ESC = "\u001b";
 
-const BAR = "\u258f";
-/** 自造皮肤的 `accent`（`#95c4ce` = 本机 `pi-coder-summer-night` 的 sky）—— 默认取色槽。 */
+const BAR = "\u203a";
+/** 自造皮肤的 `muted`（`#818596`）—— 默认取色槽。 */
+const MUTED = "#818596";
+const MUTED_FG = "\u001b[38;2;129;133;150m";
+/** 自造皮肤的 `accent`（`#95c4ce` = 本机 `pi-coder-summer-night` 的 sky），用来否定默认取错槽。 */
 const ACCENT = "#95c4ce";
-const ACCENT_FG = "\u001b[38;2;149;196;206m";
-/** 抬头里 `You` （及引导符）用的 `syntaxKeyword`（`#9d79d6` = nightfox 的关键字紫）。 */
-const KEYWORD = "#9d79d6";
-const KEYWORD_FG = "\u001b[38;2;157;121;214m";
-/** 抬头第一段的底色 = `syntaxKeyword` 再压暗 40%（`#5e4980`，用户 2026-10-24 定）。 */
-const HEAD_BG = "\u001b[48;2;94;73;128m";
-/** 抬头第二段的底色 = `thinkingText`（nightfox 里就是 `comment` 那个灰）再压暗 30%（`#4c4c4c`）。 */
-const THOUGHT_BG = "\u001b[48;2;76;76;76m";
-/** 第二段两个竖线字形的前景：`text` 全暗（`#000000`）；行首那个引导符不压暗，用 `TEXT_FG`。 */
-const GLYPH_FG = "\u001b[38;2;0;0;0m";
-/** 两段文字共用的前景：皮肤的 `text`。 */
-const TEXT_FG = "\u001b[38;2;198;200;209m";
-/** 抬头第二段（think 底色）的来源色 `thinkingText` / 兜底 `dim`（`#6d6d6d` = nightfox 的 comment）。 */
-const DIM = "#6d6d6d";
-/** `dim` 槽位的前景 ANSI（pi 的 `getFgAnsi` 会给它再挂一个 SGR 2）—— 抬头右端的时长走它。 */
-const DIM_FG = "\u001b[38;2;109;109;109m";
-/** 默认取用的颜色（= accent），A/B 对照与 `undoBar` 用它。 */
-const BAR_FG = ACCENT_FG;
-/** 自造皮肤的 `toolDiffAdded`（`#89b8c2` = 该皮肤的 teal）：仅当 `accent` 缺失时的兜底槽。 */
+/** 默认取用的颜色（= muted）。 */
+const BAR_FG = MUTED_FG;
+/** 自造皮肤的 `toolDiffAdded`（`#89b8c2` = 该皮肤的 teal）：用于验证显式换色。 */
 const DIFF_ADDED = "#89b8c2";
 const DIFF_ADDED_FG = "\u001b[38;2;137;184;194m";
 /** `#2d2c5d` = 该皮肤的 select 色：背景槽，用来验证显式指定背景槽时的 38/48 转换。 */
 const SELECTED_BG = "#2d2c5d";
 const SELECTED_BG_FG = "\u001b[38;2;45;44;93m";
+/** `#6d6d6d` = nightfox 的 comment：`dim` / `thinkingText` 用的那个灰（Theme 构造器的兜底会读）。 */
+const DIM = "#6d6d6d";
 
 /**
  * pi 的库入口（非 CLI）：bundle 是 `pi` 实际跑的形态，dist 是 node 构建形态。
@@ -116,6 +105,7 @@ type Handler = (event: unknown, ctx: unknown) => Promise<unknown> | unknown;
 
 interface LoadedExtension {
 	handlers: Map<string, Handler[]>;
+	commands: Map<string, { handler: (args: string, ctx: unknown) => Promise<unknown> | unknown }>;
 	errors: Array<{ path: string; error: string }>;
 }
 
@@ -158,10 +148,9 @@ function createTheme(): unknown {
 	return new pi.Theme(
 		{
 			accent: ACCENT,
-			syntaxKeyword: KEYWORD,
 			dim: DIM,
 			text: "#c6c8d1",
-			muted: "#818596",
+			muted: MUTED,
 			thinkingText: DIM,
 			thinkingXhigh: "#626262",
 			toolDiffAdded: DIFF_ADDED,
@@ -197,7 +186,9 @@ function makeWorkspace(): { agentDir: string; projectDir: string; cleanup: () =>
 	return {
 		agentDir,
 		projectDir,
-		cleanup: () => fs.rmSync(root, { recursive: true, force: true }),
+		cleanup: () => {
+			fs.rmSync(root, { recursive: true, force: true });
+		},
 	};
 }
 
@@ -260,18 +251,16 @@ function renderUserMessage(text: string, width: number): string[] {
 }
 
 /**
- * 走**真正被打过补丁的** `InteractiveMode.prototype.addMessageToChat` 画一条用户消息，
- * 再把其中那个组件渲染出来 —— 这是「时间戳怎么落到组件上」的完整链路（没有 timestamp
- * 的直构造组件永远看不到抬头）。
+ * 走**真正被打过补丁的** `InteractiveMode.prototype.addMessageToChat` 把**多条**用户消息画进同一个
+ * 聊天容器，返回各自的组件 —— 用来验证「第一条 vs 后面的」那条空行。
  *
  * 假 `this` 只需要原函数在 `case "user"` 里真正读的那几样：容器、outputPad、两个渲染上下文
  * 方法，以及 `getUserMessageText`（直接借 pi 原型上的那个）。
  */
-function renderThroughAddMessageToChat(
-	message: { role: string; content: string; timestamp?: number },
+function mountManyThroughAddMessageToChat(
+	messages: Array<{ role: string; content: string }>,
 	markdownTheme: unknown,
-	width: number,
-): string[] {
+): Array<{ render(width: number): string[] }> {
 	assert.ok(pi);
 	const children: unknown[] = [];
 	const fake = {
@@ -291,12 +280,16 @@ function renderThroughAddMessageToChat(
 		message: unknown,
 		options?: unknown,
 	) => void;
-	add.call(fake, message);
-	const component = children.find((child) => child instanceof pi!.UserMessageComponent) as
-		| { render(width: number): string[] }
-		| undefined;
-	assert.ok(component, "addMessageToChat 应该画出一个 UserMessageComponent");
-	return component.render(width);
+	const mounted: Array<{ render(width: number): string[] }> = [];
+	for (const message of messages) {
+		const before = children.length;
+		add.call(fake, message);
+		for (const child of children.slice(before)) {
+			if (child instanceof pi.UserMessageComponent) mounted.push(child as { render(width: number): string[] });
+		}
+	}
+	assert.equal(mounted.length, messages.length, "每条消息都画出了一个 UserMessageComponent");
+	return mounted;
 }
 
 /** 去掉 CSI 颜色与 OSC 133 标记（用户消息首尾各挂一个）。 */
@@ -304,7 +297,7 @@ const plainText = (line: string): string =>
 	line.replace(/\u001b\][^\u0007]*\u0007/g, "").replace(/\u001b\[[0-9;:?]*[a-zA-Z]/g, "");
 
 /**
- * 可见列数：剥掉零宽序列后按列数算（fixture 里只有 ASCII、汉字与 `▏`；汉字 2 列，其余 1 列）。
+ * 可见列数：剥掉零宽序列后按列数算（fixture 里只有 ASCII、汉字与 `›`；汉字 2 列，其余 1 列）。
  * 独立实现一份是为了验证 pi 自己算出来的宽度与我们一致 —— 它是会不会撞上 pi-tui 超宽抛错的判据。
  */
 const visibleWidth = (line: string): number => {
@@ -324,15 +317,7 @@ const visibleWidth = (line: string): number => {
 	return width;
 };
 
-/** 竖线（含取色与前景复位）及其后面那一格缩进空白：正好就是扩展写进每一行的那一段。 */
-const barOf = (fg: string): string => `${fg}${BAR}\u001b[39m `;
-
-/**
- * 把打完补丁的那一行**逐字节还原**成未打补丁的样子：竖线 + 缩进换回行首内边距那一格空格，
- * 再从行尾补白里还回它吃掉的一格。还原不回来就说明补丁动了别的东西。
- */
-const undoBar = (line: string, fg: string): string =>
-	line.replace(barOf(fg), " ").replace(/\u001b\[49m$/, (reset) => ` ${reset}`);
+const hasBody = (line: string | undefined): boolean => plainText(line ?? "").trim().length > 0;
 
 const MESSAGE = "第一行正文\n第二行更长的正文正文正文正文正文正文正文正文正文";
 const WIDTH = 46;
@@ -346,7 +331,7 @@ test("PI_USER_MESSAGE_BAR=off 时连补丁都不装", { skip, timeout: 30_000 },
 		const extension = await loadExtension(workspace);
 		assert.equal(extension.handlers.size, 0, "off 时连 session_start 都不注册");
 		const lines = renderUserMessage(MESSAGE, WIDTH);
-		assert.equal(lines.some((line) => line.includes(BAR)), false, "不画竖线");
+		assert.equal(lines.some((line) => line.includes(BAR)), false, "不画标记");
 	} finally {
 		delete process.env.PI_USER_MESSAGE_BAR;
 		workspace.cleanup();
@@ -365,20 +350,20 @@ test("扩展能被 pi 的加载器加载，并把补丁装在 pi 自己的 UserM
 	}
 });
 
-test("补丁前 pi 的渲染原样（扩展刚加载、还没拿到皮肤时不加竖线）", { skip, timeout: 30_000 }, async () => {
+test("补丁前 pi 的渲染原样（扩展刚加载、还没拿到皮肤时不加标记）", { skip, timeout: 30_000 }, async () => {
 	const workspace = makeWorkspace();
 	try {
 		await loadExtension(workspace);
 
 		const lines = renderUserMessage(MESSAGE, WIDTH);
 		assert.equal(lines.length >= 3, true, "至少上下留白 + 一行正文");
-		assert.equal(lines.some((line) => line.includes(BAR)), false, "没有皮肤时不画竖线");
+		assert.equal(lines.some((line) => line.includes(BAR)), false, "没有皮肤时不画标记");
 	} finally {
 		workspace.cleanup();
 	}
 });
 
-test("拿到皮肤后：每行行首一条竖线 + 正文前一格缩进，颜色是强调色 accent，行宽与正文一字不差", { skip, timeout: 30_000 }, async () => {
+test("拿到皮肤后：只有正文首行是加粗的 muted `› `，续行两格对齐，行宽与正文不变", { skip, timeout: 30_000 }, async () => {
 	const workspace = makeWorkspace();
 	try {
 		const extension = await loadExtension(workspace);
@@ -387,13 +372,19 @@ test("拿到皮肤后：每行行首一条竖线 + 正文前一格缩进，颜�
 		const after = renderUserMessage(MESSAGE, WIDTH);
 
 		assert.equal(after.length, before.length, "行数不变");
+		const bodyIndexes = after.flatMap((line, index) => (hasBody(line) ? [index] : []));
+		assert.equal(bodyIndexes.length > 1, true, "测试消息应包含正文首行与续行");
+		const firstBody = bodyIndexes[0]!;
+		assert.equal(after.filter((line) => line.includes(`${BAR_FG}\u001b[1m${BAR}\u001b[22m\u001b[39m`)).length, 1, "整条消息只有一个加粗的 muted 标记");
+		assert.equal(plainText(after[firstBody] ?? "").startsWith(`${BAR} `), true, "正文首行是标记 + 一格空白");
+		for (const index of bodyIndexes.slice(1)) {
+			assert.equal(plainText(after[index] ?? "").startsWith("  "), true, `第 ${index} 行续行用两格对齐`);
+		}
 		for (const [i, line] of after.entries()) {
-			assert.equal(line.includes(`${BAR_FG}${BAR}\u001b[39m`), true, `第 ${i} 行的竖线用的是 accent 色`);
-			assert.equal(plainText(line).startsWith(`${BAR} `), true, `第 ${i} 行行首是竖线 + 一格空白`);
-			// 竖线跟着消息底色：不插任何背景开关序列，底色块左边缘不被抠出缺角
+			assert.equal(line.includes("\u258f"), false, `第 ${i} 行不再出现旧竖线`);
 			assert.equal(line.split("\u001b[49m").length - 1, 1, `第 ${i} 行只有行尾那一个关背景`);
-			assert.equal(undoBar(line, BAR_FG), before[i], `第 ${i} 行只多了竖线 + 缩进、没动别的`);
 			assert.equal(visibleWidth(line), visibleWidth(before[i] ?? ""), `第 ${i} 行可见宽度不变`);
+			if (!hasBody(line)) assert.equal(line, before[i], `第 ${i} 行是留白，逐字节不变`);
 		}
 		assert.equal(after[0].startsWith(`${ESC}]133;A\u0007`), true, "zone 标记仍在首行最前");
 		const joined = after.map(plainText).join("\n");
@@ -406,7 +397,7 @@ test("拿到皮肤后：每行行首一条竖线 + 正文前一格缩进，颜�
 
 /**
  * 正文折到满行的那些行：Box 给孩子的宽度是 `width - 2`，正文总能留下至少一格行尾补白，
- * 所以竖线 + 缩进永远吃得下。这里用一条长正文把 pi 的折行真的跑出来，逐行验宽度。
+ * 所以首行标记与续行缩进永远吃得下。这里用一条长正文把 pi 的折行真的跑出来，逐行验宽度。
  */
 test("正文折行到满行时也能空出那一格：每行仍然正好 width 列", { skip, timeout: 30_000 }, async () => {
 	const workspace = makeWorkspace();
@@ -417,10 +408,14 @@ test("正文折行到满行时也能空出那一格：每行仍然正好 width �
 		const lines = renderUserMessage(long, WIDTH);
 
 		assert.equal(lines.length > 3, true, "长正文应该折成多行");
+		const firstBody = lines.find(hasBody);
 		for (const [i, line] of lines.entries()) {
 			assert.equal(visibleWidth(line), WIDTH, `第 ${i} 行正好 ${WIDTH} 列（超一格 pi-tui 就抛错）`);
-			assert.equal(plainText(line).startsWith(`${BAR} `), true, `第 ${i} 行行首是竖线 + 缩进`);
+			if (hasBody(line)) {
+				assert.equal(plainText(line).startsWith(line === firstBody ? `${BAR} ` : "  "), true, `第 ${i} 行行首对齐`);
+			}
 		}
+		assert.equal(lines.filter((line) => line.includes(BAR)).length, 1, "长正文也只有一个首行标记");
 	} finally {
 		workspace.cleanup();
 	}
@@ -434,10 +429,10 @@ test("PI_USER_MESSAGE_BAR_COLOR=toolDiffAdded 显式换成另一个前景槽（�
 		await fireSessionStart(extension, createTheme());
 		const lines = renderUserMessage(MESSAGE, WIDTH);
 
-		for (const line of lines) {
-			assert.equal(line.includes(`${DIFF_ADDED_FG}${BAR}`), true, "竖线用 toolDiffAdded");
-			assert.equal(line.includes(ACCENT_FG), false, "没有用默认的 accent");
-		}
+		const marked = lines.find((line) => line.includes(BAR));
+		assert.ok(marked);
+		assert.equal(marked.includes(`${DIFF_ADDED_FG}\u001b[1m${BAR}\u001b[22m`), true, "标记用 toolDiffAdded 且加粗");
+		assert.equal(marked.includes(MUTED_FG), false, "没有用默认的 muted");
 	} finally {
 		delete process.env.PI_USER_MESSAGE_BAR_COLOR;
 		workspace.cleanup();
@@ -452,11 +447,11 @@ test("PI_USER_MESSAGE_BAR_COLOR=selectedBg 也能用：背景槽转成前景（3
 		await fireSessionStart(extension, createTheme());
 		const lines = renderUserMessage(MESSAGE, WIDTH);
 
-		for (const line of lines) {
-			assert.equal(line.includes(`${SELECTED_BG_FG}${BAR}`), true, "竖线用 selectedBg 的 38 等值");
-			assert.equal(line.includes(BAR_FG), false, "没有用默认的 accent");
-			assert.equal(line.includes(`\u001b[48;2;45;44;93m${BAR}`), false, "不该把背景槽直接当背景铺上去");
-		}
+		const marked = lines.find((line) => line.includes(BAR));
+		assert.ok(marked);
+		assert.equal(marked.includes(`${SELECTED_BG_FG}\u001b[1m${BAR}\u001b[22m`), true, "标记用 selectedBg 的 38 等值且加粗");
+		assert.equal(marked.includes(BAR_FG), false, "没有用默认的 muted");
+		assert.equal(marked.includes(`\u001b[48;2;45;44;93m${BAR}`), false, "不该把背景槽直接当背景铺上去");
 	} finally {
 		delete process.env.PI_USER_MESSAGE_BAR_COLOR;
 		workspace.cleanup();
@@ -467,16 +462,16 @@ test("PI_USER_MESSAGE_BAR_COLOR=selectedBg 也能用：背景槽转成前景（3
  * 回归：会话被替换的那一瞬间（`/clear`、`/new`、`/resume`、`/fork`、`/reload`），pi 会让旧 ctx
  * 作废、但旧消息还挂在 `chatContainer` 上、新 ctx 还没到手 —— 这段时间里的渲染 tick 一读旧 ctx
  * 就会抛，而这个异常从渲染回调抛出没人接得住，直接把 pi `exit(1)`（2026-09-20 实测）。
- * 所以「拿不到皮肤」必须是这一帧不画竖线，而不是把异常放出去。
+ * 所以「拿不到皮肤」必须是这一帧不画标记，而不是把异常放出去。
  */
-test("旧 ctx 已作废时渲染不抛、也不画竖线（渲染 tick 落进替换窗口不能掀翻 pi）", { skip, timeout: 30_000 }, async () => {
+test("旧 ctx 已作废时渲染不抛、也不画标记（渲染 tick 落进替换窗口不能掀翻 pi）", { skip, timeout: 30_000 }, async () => {
 	const workspace = makeWorkspace();
 	try {
 		const extension = await loadExtension(workspace);
 		await fireSessionStartWithCtx(extension, staleCtx());
 
 		const lines = renderUserMessage(MESSAGE, WIDTH); // 以前这里抛 → 直达 pi 的 uncaughtException
-		assert.equal(lines.some((line) => line.includes(BAR)), false, "读不到皮肤就不画竖线");
+		assert.equal(lines.some((line) => line.includes(BAR)), false, "读不到皮肤就不画标记");
 		assert.equal(lines.length >= 3, true, "消息本身照常渲染（上下留白 + 正文）");
 		assert.equal(plainText(lines.join("\n")).includes("第一行正文"), true, "正文一字不少");
 	} finally {
@@ -488,7 +483,7 @@ test("旧 ctx 已作废时渲染不抛、也不画竖线（渲染 tick 落进替
  * 回归：`session_shutdown` 一到就复位取色源。断言方式是「让旧 ctx 之后开始抛」—— 复位生效的话
  * 渲染根本不会去读它；没复位则会像上一条那样抛。
  */
-test("session_shutdown 后不画竖线，且渲染不再碰旧 ctx（旧 ctx 此后开始抛也不炸）", { skip, timeout: 30_000 }, async () => {
+test("session_shutdown 后不画标记，且渲染不再碰旧 ctx（旧 ctx 此后开始抛也不炸）", { skip, timeout: 30_000 }, async () => {
 	const workspace = makeWorkspace();
 	try {
 		const extension = await loadExtension(workspace);
@@ -503,284 +498,85 @@ test("session_shutdown 后不画竖线，且渲染不再碰旧 ctx（旧 ctx 此
 			},
 		});
 		const before = renderUserMessage(MESSAGE, WIDTH);
-		assert.equal(before.some((line) => line.includes(`${BAR_FG}${BAR}`)), true, "换之前有皮肤，画竖线");
+		assert.equal(before.some((line) => line.includes(`${BAR_FG}\u001b[1m${BAR}\u001b[22m`)), true, "换之前有皮肤，画加粗标记");
 
 		await fireSessionShutdown(extension);
 		live = false; // 此刻起旧 ctx 已作废：只要有人读它就会抛
 		const after = renderUserMessage(MESSAGE, WIDTH);
 
-		assert.equal(after.some((line) => line.includes(BAR)), false, "shutdown 之后不画竖线");
-		for (const [i, line] of after.entries()) assert.equal(line, undoBar(before[i] ?? "", BAR_FG), `第 ${i} 行回到未打补丁的样子`);
-	} finally {
-		workspace.cleanup();
-	}
-});
-
-/**
- * 发送时间抬头（用户 2026-10-19 定，2026-10-23 改成两段带底色的字块）：`▏You 13:33 #1  0 compactions`
- * 顶格画在框上方：引导符 `▏` 只上前景（`syntaxKeyword` 原色），`You 13:33 #1 ` 铺压暗 40% 的
- * `syntaxKeyword` 底、` 0 compactions ` 铺压暗 30% 的 `thinkingText` 底，两段文字都走 `text`（时间本地
- * 24 小时制、两位补零）。
- * 这里走完整的 `addMessageToChat → 组件 → render` 链路 —— 直构造组件是拿不到 message 上的
- * timestamp 的，顺手也钉住「只差这一行」的 A/B。
- */
-test("带 timestamp 的用户消息：框上方多一行 `▏You HH:MM #N`，zone 起点仍在最前", { skip, timeout: 30_000 }, async () => {
-	const workspace = makeWorkspace();
-	try {
-		const extension = await loadExtension(workspace);
-		await fireSessionStart(extension, createTheme());
-		pi.initTheme("dark");
-		const markdownTheme = { ...pi.getMarkdownTheme(), codeBlockIndent: "  " };
-		const timestamp = new Date(2026, 9, 19, 13, 33, 7).getTime();
-
-		// 先画带时间的那条，让它是 session_start 之后的第一条用户消息（轮次 #1）
-		const withTime = renderThroughAddMessageToChat({ role: "user", content: MESSAGE, timestamp }, markdownTheme, WIDTH);
-		const withoutTime = renderThroughAddMessageToChat({ role: "user", content: MESSAGE }, markdownTheme, WIDTH);
-
-		assert.equal(withTime.length, withoutTime.length + 1, "只多出抬头这一行");
-		const header = withTime[0] ?? "";
-		assert.equal(plainText(header).trimEnd(), "▏You 13:33 #1", "顶格：引导符后不空，轮次号在时间后");
-		assert.equal(header.includes(HEAD_BG), true, "第一段铺压暗 40% 的 mdKeyword 底");
-		assert.equal(header.includes(THOUGHT_BG), false, "没有压缩次数就不铺第二段");
-		assert.equal(header.includes("\u001b[48;2;27;28;29m"), false, "不按消息底色铺整行");
-		assert.equal(visibleWidth(header), 14, "宽度就是可见文字那 14 列（含第一段尾随那格）");
-		assert.equal(header.startsWith("\u001b]133;A\u0007"), true, "OSC 133 zone 起点留在整个消息第一行最前");
-		assert.equal(
-			header.includes(`${TEXT_FG}${HEAD_BG}\u001b[1m▏You\u001b[22m 13:33 #1 \u001b[49m\u001b[39m`),
-			true,
-			"第一段：行首引导符不压暗、You 加粗，底色是压暗的 mdKeyword",
-		);
-		assert.equal(header.includes(KEYWORD_FG), false, "引导符没有另用一个前景色");
-		assert.equal(header.includes("13:33"), true, "时间是普通数字（24 小时制）");
-		for (const [i, line] of withTime.entries()) {
-			assert.equal(visibleWidth(line) <= WIDTH, true, `第 ${i} 行不超过 ${WIDTH} 列`);
-		}
-		assert.equal(withTime.slice(1).every((line) => line.includes(`${BAR_FG}${BAR}`)), true, "框内每行照常有竖线");
-		assert.equal(plainText(withTime.slice(1).join("\n")).includes("第一行正文"), true, "正文一字不少");
-		assert.equal(withoutTime.some((line) => plainText(line).includes("▏You")), false, "没有 timestamp 就不画抬头");
-	} finally {
-		workspace.cleanup();
-	}
-});
-
-/**
- * 压缩次数（用户 2026-10-19 定）：抬头末尾的第二段 ` N compactions `。口径是**这条消息发出时**
- * 已经压缩过几次，不是当前的累计值 —— 所以按会话分支里 `compaction` 条目的位置现算。
- * 这里用一份假 sessionManager 把三种位置摆出来：压缩前发出的（0）、压缩后发出的（1）、
- * 刚发出还没落盘的新消息（此前的压缩全算上 = 1）。
- */
-test("压缩次数：抬头按这条消息在分支里的位置显示 `▏N compactions`", { skip, timeout: 30_000 }, async () => {
-	const workspace = makeWorkspace();
-	try {
-		const extension = await loadExtension(workspace);
-		pi.initTheme("dark");
-		const markdownTheme = { ...pi.getMarkdownTheme(), codeBlockIndent: "  " };
-		const before = { role: "user", content: "压缩前", timestamp: new Date(2026, 9, 19, 10, 0, 7).getTime() };
-		const after = { role: "user", content: "压缩后", timestamp: new Date(2026, 9, 19, 10, 5, 7).getTime() };
-		const branch = [
-			{ type: "message", message: before },
-			{ type: "message", message: { role: "assistant", content: [] } },
-			{ type: "compaction", id: "compaction-1" },
-			{ type: "message", message: { role: "assistant", content: [] } },
-			{ type: "message", message: after },
-		];
-		await fireSessionStartWithCtx(extension, {
-			ui: { theme: createTheme() },
-			sessionManager: { getBranch: () => branch },
-		});
-
-		const header = (message: { role: string; content: string; timestamp?: number }): string =>
-			plainText(renderThroughAddMessageToChat(message, markdownTheme, WIDTH)[0] ?? "").trimEnd();
-		assert.equal(header(before), "▏You 10:00 #1 ▏0 compactions▕", "压缩之前发出的：0 次");
-		assert.equal(header(after), "▏You 10:05 #2 ▏1 compactions▕", "压缩之后发出的：1 次");
-
-		// 刚发出的消息要到 message_end 才落盘：查不到就等于「此前所有压缩都已发生」
-		const fresh = { role: "user", content: "刚发", timestamp: new Date(2026, 9, 19, 10, 6, 7).getTime() };
-		assert.equal(header(fresh), "▏You 10:06 #3 ▏1 compactions▕");
-	} finally {
-		workspace.cleanup();
-	}
-});
-
-/**
- * `session_shutdown` 一到就摘掉查询函数：旧 sessionManager 会随旧 ctx 一起作废。断言方式是
- * 「让旧 manager 此后开始抛」—— 摘掉生效的话渲染根本不会去读它；没摘则会像旧 ctx 那条一样
- * 把异常从渲染回调扔出去（没人接得住，会带走整个 pi）。已经查过的消息走消息级缓存（压缩次数
- * 是条目自身的属性、与分支无关），所以 shutdown 后旧消息的那一段仍在。
- */
-test("session_shutdown 后不再读旧 sessionManager（已查过的用缓存，新消息不画）", { skip, timeout: 30_000 }, async () => {
-	const workspace = makeWorkspace();
-	try {
-		const extension = await loadExtension(workspace);
-		pi.initTheme("dark");
-		const markdownTheme = { ...pi.getMarkdownTheme(), codeBlockIndent: "  " };
-		let live = true;
-		const message = { role: "user", content: MESSAGE, timestamp: new Date(2026, 9, 19, 11, 2, 7).getTime() };
-		const branch = [
-			{ type: "compaction", id: "compaction-1" },
-			{ type: "message", message },
-		];
-		await fireSessionStartWithCtx(extension, {
-			ui: { theme: createTheme() },
-			sessionManager: {
-				getBranch: () => {
-					if (!live) throw new Error("stale session manager");
-					return branch;
-				},
-			},
-		});
-		const before = plainText(renderThroughAddMessageToChat(message, markdownTheme, WIDTH)[0] ?? "").trimEnd();
-		assert.equal(before, "▏You 11:02 #1 ▏1 compactions▕", "换之前能读到压缩次数");
-
-		await fireSessionShutdown(extension);
-		live = false; // 此刻起旧 manager 已作废：只要有人读它就会抛
-		const after = plainText(renderThroughAddMessageToChat(message, markdownTheme, WIDTH)[0] ?? "").trimEnd();
-		assert.equal(after, "▏You 11:02 #1 ▏1 compactions▕", "已经查过的消息用缓存，不再碰旧 manager");
-
-		// 没查过的消息就没缓存可用了：查询函数已摘掉，只能不画那一段（而不是去读死 manager）
-		const fresh = { role: "user", content: "新消息", timestamp: new Date(2026, 9, 19, 11, 3, 7).getTime() };
-		assert.equal(
-			plainText(renderThroughAddMessageToChat(fresh, markdownTheme, WIDTH)[0] ?? "").trimEnd(),
-			"▏You 11:03 #2",
-		);
-	} finally {
-		workspace.cleanup();
-	}
-});
-
-/**
- * 会话时长（用户 2026-10-24 定）：抬头**行尾右对齐**的 ` +38m`，只上前景 `dim`、不铺底色。
- * 口径是「**这条消息发出时**当前上下文窗口已经跑了多久」—— 起点是分支里最近一次 `compaction`
- * **之后的第一条条目**，之前的条目不算（压缩把旧消息全部赶出了这个窗口）；终点是消息自己的
- * `timestamp`（不是「现在」—— 否则重绘跨过分钟边界就会改掉历史行，触发 pi 的清屏 + 清 scrollback）。
- * 这与同一行旁边的 `N compactions` 正好是一件事的两面。
- */
-test("会话时长：从最近一次压缩之后的第一条算到消息发出那一刻，右对齐在行尾", { skip, timeout: 30_000 }, async () => {
-	const workspace = makeWorkspace();
-	try {
-		const extension = await loadExtension(workspace);
-		pi.initTheme("dark");
-		const markdownTheme = { ...pi.getMarkdownTheme(), codeBlockIndent: "  " };
-		// 压缩发生在 5 分钟前，但窗口里的第一条条目是 4 分钟前 —— 起点必须是后者（不是压缩条目自身）。
-		// 消息在「现在」发出，所以时长 ≈ 4 分钟。
-		const compactedAt = Date.now() - 5 * 60_000;
-		const windowStart = Date.now() - 4 * 60_000;
-		const sentAt = Date.now();
-		const message = { role: "user", content: MESSAGE, timestamp: sentAt };
-		const branch = [
-			// 压缩之前的旧条目（应当被忽略：它们不在这个上下文窗口里）
-			{ type: "message", message: { role: "user", content: "很早以前" }, timestamp: new Date(2026, 9, 19, 8, 0, 0).toISOString() },
-			{ type: "compaction", id: "compaction-1", timestamp: new Date(compactedAt).toISOString() },
-			{ type: "message", message: { role: "assistant", content: [] }, timestamp: new Date(windowStart).toISOString() },
-			{ type: "message", message, timestamp: new Date(sentAt).toISOString() },
-		];
-		await fireSessionStartWithCtx(extension, {
-			ui: { theme: createTheme() },
-			sessionManager: { getBranch: () => branch },
-		});
-
-		const header = renderThroughAddMessageToChat(message, markdownTheme, WIDTH)[0] ?? "";
-		const text = plainText(header);
-		assert.equal(text.startsWith("▏You "), true, "左段照旧在行首");
-		assert.match(text.trimEnd(), / \+4m$/, "右端 `+4m`（起点是窗口第一条，不是压缩那一刻的 5 分）");
-		assert.equal(text.includes("+38m"), false, "没有拿分支最老那条当起点");
-		assert.equal(visibleWidth(header), WIDTH, "整行恰好 WIDTH 列：右对齐靠补白，不靠终端截断");
-		assert.equal(header.includes(DIM_FG), true, "时长走 dim 前景");
-	} finally {
-		workspace.cleanup();
-	}
-});
-
-/** 冻结：同一条消息反复渲染（模拟 pi 每秒一次的重绘 + 分钟走过），抬头上一个字节都不变。 */
-test("会话时长：同一条消息反复渲染一个字节都不变（冻结、不会触发整屏重画）", { skip, timeout: 30_000 }, async () => {
-	const workspace = makeWorkspace();
-	try {
-		const extension = await loadExtension(workspace);
-		pi.initTheme("dark");
-		const markdownTheme = { ...pi.getMarkdownTheme(), codeBlockIndent: "  " };
-		const windowStart = new Date(2026, 9, 19, 10, 0, 0).toISOString();
-		const message = { role: "user", content: MESSAGE, timestamp: new Date(2026, 9, 19, 10, 4, 7).getTime() };
-		const branch = [
-			{ type: "message", message: { role: "assistant", content: [] }, timestamp: windowStart },
-			{ type: "message", message, timestamp: new Date(2026, 9, 19, 10, 4, 7).toISOString() },
-		];
-		await fireSessionStartWithCtx(extension, {
-			ui: { theme: createTheme() },
-			sessionManager: { getBranch: () => branch },
-		});
-
-		const first = renderThroughAddMessageToChat(message, markdownTheme, WIDTH)[0] ?? "";
-		assert.match(plainText(first).trimEnd(), / \+4m$/, "发出时窗口已跑 4 分钟");
-
-		// 真实分钟走过 / 后来又重画很多次：抬头的字节必须一模一样
-		await new Promise((resolve) => setTimeout(resolve, 5));
-		for (let i = 0; i < 5; i += 1) {
-			const again = renderThroughAddMessageToChat(message, markdownTheme, WIDTH)[0] ?? "";
-			assert.equal(again, first, `第 ${i + 1} 次重画必须逐字节相同（否则视口之上会变，pi 会清 scrollback）`);
+		assert.equal(after.some((line) => line.includes(BAR)), false, "shutdown 之后不画标记");
+		for (const [i, line] of after.entries()) {
+			assert.equal(visibleWidth(line), visibleWidth(before[i] ?? ""), `第 ${i} 行宽度不变`);
+			if (!hasBody(line)) assert.equal(line, before[i], `第 ${i} 行留白完全还原`);
 		}
 	} finally {
 		workspace.cleanup();
 	}
 });
 
-/** 压缩之后还没任何新条目（屏幕上正是压缩结果）：起点退回压缩条目自身，不能整段消失。 */
-test("会话时长：压缩后还没有新条目时，起点退回压缩条目自身", { skip, timeout: 30_000 }, async () => {
-	const workspace = makeWorkspace();
-	try {
-		const extension = await loadExtension(workspace);
-		pi.initTheme("dark");
-		const markdownTheme = { ...pi.getMarkdownTheme(), codeBlockIndent: "  " };
-		const message = { role: "user", content: MESSAGE, timestamp: Date.now() };
-		const branch = [
-			{ type: "compaction", id: "compaction-1", timestamp: new Date(Date.now() - 2 * 60_000).toISOString() },
-		];
-		await fireSessionStartWithCtx(extension, {
-			ui: { theme: createTheme() },
-			sessionManager: { getBranch: () => branch },
-		});
-		assert.match(plainText(renderThroughAddMessageToChat(message, markdownTheme, WIDTH)[0] ?? ""), / \+2m$/);
-	} finally {
-		workspace.cleanup();
-	}
-});
-
 /**
- * `session_shutdown` 之后查询函数与取色源一起被摘掉（旧 manager / 旧 ctx 都会作废），
- * 但渲染绝不能抛、也不能因此抖动。
+ * 消息框上方那条空行（用户 2026-10-26 定；抬头 2026-10-27 删除后变成无条件）。
  *
- * 这里只钉「不抛 + 稳定 + 左段在」：那一帧没有皮肤（`dim` 槽没了），右段本就画不出来 ——
- * 与冻结无关（冻结的单元级保证在 `bar.test.ts` 的 `messageAge` 用例里，按消息对象验）。
+ * 触发条件只剩一条：头顶是 `startup-logo` 自己画的 header（它把 pi 内置 header 静音了，
+ * 连内置那条下方的 `Spacer(1)` 也一起没了）。这里把那个全局事实直接置上，让**两个组件住同一个
+ * 聊天容器**（判据是容器里已画过几条用户消息），走真链路看行数。
  */
-test("会话时长：session_shutdown 后渲染不抛、不读死 manager、结果稳定", { skip, timeout: 30_000 }, async () => {
+test(
+	"startup-logo 占头顶：第一条消息框上方多一条空行，第二条没有",
+	{ skip, timeout: 30_000 },
+	async () => {
+		const key = Symbol.for("litellm-any.pi-startup-logo.bootSuppressed");
+		const host = globalThis as Record<symbol, unknown>;
+		const workspace = makeWorkspace();
+		try {
+			host[key] = true;
+			const extension = await loadExtension(workspace);
+			pi.initTheme("dark");
+			const markdownTheme = { ...pi.getMarkdownTheme(), codeBlockIndent: "  " };
+			await fireSessionStartWithCtx(extension, { ui: { theme: createTheme() } });
+
+			const mounted = mountManyThroughAddMessageToChat(
+				[
+					{ role: "user", content: MESSAGE },
+					{ role: "user", content: MESSAGE },
+				],
+				markdownTheme,
+			);
+
+			const firstLines = mounted[0]!.render(WIDTH);
+			const secondLines = mounted[1]!.render(WIDTH);
+			assert.equal(firstLines[0], "\u001b]133;A\u0007", "第一条消息的最上方就是那条空行（zone 起点跟它在同一行）");
+			assert.equal(plainText(firstLines[0] ?? ""), "", "剥掉 zone 标记后那就是一条空行");
+			assert.equal(firstLines.length, secondLines.length + 1, "只多这一行");
+			assert.equal(visibleWidth(firstLines[1] ?? ""), WIDTH, "框内那行宽度与终端一致（没被空行影响）");
+			const firstBody = firstLines.find(hasBody);
+			assert.equal(plainText(firstBody ?? "").startsWith(`${BAR} `), true, "首行标记照常");
+			assert.equal(firstLines.filter((line) => line.includes(BAR)).length, 1, "只画一个标记");
+			assert.equal(secondLines.some((line) => line.trim() === ""), false, "第二条不加（上面本来就有消息）");
+		} finally {
+			delete host[key];
+			workspace.cleanup();
+		}
+	},
+);
+
+test("头顶不是 startup-logo（没装 / 关了）：第一条也不补空行", { skip, timeout: 30_000 }, async () => {
+	const key = Symbol.for("litellm-any.pi-startup-logo.bootSuppressed");
+	const host = globalThis as Record<symbol, unknown>;
 	const workspace = makeWorkspace();
 	try {
+		delete host[key];
 		const extension = await loadExtension(workspace);
 		pi.initTheme("dark");
 		const markdownTheme = { ...pi.getMarkdownTheme(), codeBlockIndent: "  " };
-		let live = true;
-		const message = { role: "user", content: MESSAGE, timestamp: Date.now() };
-		const branch = [{ type: "message", message, timestamp: new Date(Date.now() - 60_000).toISOString() }];
-		await fireSessionStartWithCtx(extension, {
-			ui: { theme: createTheme() },
-			sessionManager: {
-				getBranch: () => {
-					if (!live) throw new Error("stale session manager");
-					return branch;
-				},
-			},
-		});
-		assert.match(plainText(renderThroughAddMessageToChat(message, markdownTheme, WIDTH)[0] ?? ""), / \+1m$/);
+		await fireSessionStartWithCtx(extension, { ui: { theme: createTheme() } });
 
-		await fireSessionShutdown(extension);
-		live = false; // 此刻起旧 manager 已作废：只要有人读它就会抛
-		const after = renderThroughAddMessageToChat(message, markdownTheme, WIDTH)[0] ?? "";
-		assert.equal(plainText(after).startsWith("▏You "), true, "左段照常，且没把 stale manager 的异常扔出来");
-		assert.equal(
-			renderThroughAddMessageToChat(message, markdownTheme, WIDTH)[0] ?? "",
-			after,
-			"反复重画仍然逐字节相同（不会因为「有时查得到、有时查不到」而抖动）",
-		);
+		const [first] = mountManyThroughAddMessageToChat([{ role: "user", content: MESSAGE }], markdownTheme);
+		const lines = first!.render(WIDTH);
+		const firstBody = lines.find(hasBody);
+		assert.equal(plainText(firstBody ?? "").startsWith(`${BAR} `), true, "首行正文带标记");
 	} finally {
+		delete host[key];
 		workspace.cleanup();
 	}
 });

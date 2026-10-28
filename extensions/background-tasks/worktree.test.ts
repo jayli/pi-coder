@@ -170,7 +170,7 @@ test("非 git 目录 / 空仓库：降级为 ok:false + 可读原因，不抛异
 
 	const notRepo = createWorktree({ cwd: root, runDir: root, tmpRoot: path.join(root, "w") });
 	assert.equal(notRepo.ok, false);
-	if (!notRepo.ok) assert.match(notRepo.reason, /git 仓库/);
+	if (!notRepo.ok) assert.match(notRepo.reason, /git repository/);
 
 	const empty = path.join(root, "empty-repo");
 	fs.mkdirSync(empty, { recursive: true });
@@ -219,7 +219,7 @@ test("三态②a：改了文件 → 保留 + 报改动文件数，目录与内�
 	assert.equal(outcome.changes.dirtyFiles, 2);
 	assert.equal(outcome.changes.commits, 0);
 	assert.equal(outcome.branch, undefined, "没有新 commit 就不该挂分支");
-	assert.match(outcome.reason, /2 个文件有改动/);
+	assert.match(outcome.reason, /2 files changed/);
 	assert.equal(fs.readFileSync(path.join(wt.path, "sub", "file.txt"), "utf-8"), "changed by task\n");
 });
 
@@ -243,7 +243,7 @@ test("三态②b：有 commit → 保留 + 挂一个分支保住 detached commit
 	assert.match(outcome.branch!, /^pi\/bg_bg_7-/);
 	// 分支确实指向那个 detached commit（工作区里没有引用时 commit 会被 gc 回收）
 	assert.equal(git(["rev-parse", outcome.branch!], fx.repo).trim(), headSha);
-	assert.match(outcome.reason, /1 个新提交|1 个新提交/);
+	assert.match(outcome.reason, /1 new commit/);
 });
 
 test("三态②c：无 commit 时 branchPrefix 为空串也不挂分支（测试路径）", async () => {

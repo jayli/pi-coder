@@ -30,9 +30,9 @@ const EXTENSION_PATH = path.join(path.dirname(fileURLToPath(import.meta.url)), "
 const SKIP = "找不到本机 pi 的库入口（装过 pi 才有）";
 
 /** 审批对话框的三个选项（与 index.ts 里的常量同值）。 */
-const CHOICE_EXECUTE = "写计划文档并实施";
-const CHOICE_DOC_ONLY = "只写计划文档";
-const CHOICE_REJECT = "打回";
+const CHOICE_EXECUTE = "Write the plan and implement";
+const CHOICE_DOC_ONLY = "Write the plan only";
+const CHOICE_REJECT = "Reject";
 
 /**
  * pi 的库入口（非 CLI）：bundle 是 `pi` 实际跑的形态，dist 是 node 构建形态。
@@ -635,7 +635,7 @@ test("enter_plan_mode 工具让模型自己进 plan，并回一段说明", { ski
 		assert.ok(!harness.getActiveTools().includes("write"), "进 plan 后写工具必须停用");
 		// 模型路径要先过同意弹框（默认回车 = 接受）
 		assert.equal(rec.selectTitles.length, 1, "模型路径应弹一次同意框");
-		assert.match(rec.selectTitles[0]!, /模型请求进入 plan mode/, "弹框要说明是模型请求的");
+		assert.match(rec.selectTitles[0]!, /^Plan mode:\n/, "弹框标题是 Plan mode:");
 		assert.ok(rec.selectTitles[0]!.includes("要改多个文件"), "弹框里要能看到模型给的理由");
 	} finally {
 		workspace.cleanup();
@@ -647,7 +647,7 @@ test("同意框选「直接实施」：不进 plan、写工具仍在、告诉模
 	try {
 		const rec = recorder();
 		const extension = await loadExtension(workspace.agentDir, workspace.projectDir, rec);
-		const harness = await startSession(extension, rec, { selectResult: "直接实施" });
+		const harness = await startSession(extension, rec, { selectResult: "Implement directly" });
 
 		const result = await callTool(extension, "enter_plan_mode", { reason: "要改多个文件" }, harness.ctx);
 
@@ -925,8 +925,18 @@ test("提交计划：对话框是 select 三选一，标题里带计划全文", 
 		await submitPlan(extension, harness);
 
 		assert.equal(rec.selectTitles.length, 1, "应弹一次审批对话框");
-		assert.match(rec.selectTitles[0]!, /批准这个计划/, "标题要问批不批");
-		assert.ok(rec.selectTitles[0]!.includes(PLAN), "对话框里要能看到计划全文");
+		assert.match(rec.selectTitles[0]!, /Approve this plan/, "标题要问批不批");
+		// 计划正文现在装在框里：每一行前面多了 `│ `、后面多了补位空格与 `│`，所以按行断言
+		// （整段字面量已经被框打断了）。
+		const title = rec.selectTitles[0]!;
+		for (const line of PLAN.split("\n").filter((row) => row.trim() !== "")) {
+			assert.ok(
+				title.split("\n").some((row) => row.includes(line)),
+				`对话框里要能看到计划全文（缺：${line}）`,
+			);
+		}
+		assert.match(title, /┌─+┐/, "计划正文要有线框");
+		assert.match(title, /└─+┘/);
 	} finally {
 		workspace.cleanup();
 	}
@@ -950,7 +960,7 @@ test("选「写计划文档并实施」：进写文档子态，write 放回、ed
 		assert.ok(tools.includes("write"), "子态要放回 write");
 		assert.ok(!tools.includes("edit"), "edit 仍摘着");
 		assert.ok(!tools.includes("powershell"), "powershell 仍摘着");
-		assert.match(rec.statuses.at(-1) ?? "", /写文档中/, "状态行应显示写文档子态");
+		assert.match(rec.statuses.at(-1) ?? "", /writing doc/, "状态行应显示写文档子态");
 
 		// 落盘条目里钉死了路径与路线（/resume 后不能重算）
 		const last = rec.entries.at(-1)!.data as Record<string, unknown>;
@@ -1232,7 +1242,7 @@ test("从 dangerous 进的 plan，写完文档后实施阶段回 dangerous（从
 		assert.match(rec.statuses.at(-1) ?? "", /☢ dangerous/, "实施阶段回到进入前的模式");
 		assert.equal(getSandboxMode(), "dangerous", "沙箱层也要跟着关");
 		assert.ok(
-			rec.notifies.some((message) => message.includes("dangerous") && message.includes("已关闭")),
+			rec.notifies.some((message) => message.includes("dangerous") && message.includes("interception off")),
 			"回到 dangerous 必须明说沙箱已关，不能让用户以为还在保护下",
 		);
 
@@ -1284,7 +1294,7 @@ test("write 失败 / 路径不对 / 不是 write：都不收尾", { skip, timeou
 			assert.equal(result, undefined, `${label}不该触发收尾`);
 			assert.ok(!harness.getActiveTools().includes("edit"), `${label}后仍是只读`);
 		}
-		assert.match(rec.statuses.at(-1) ?? "", /写文档中/, "状态行仍是写文档子态");
+		assert.match(rec.statuses.at(-1) ?? "", /writing doc/, "状态行仍是写文档子态");
 	} finally {
 		workspace.cleanup();
 	}

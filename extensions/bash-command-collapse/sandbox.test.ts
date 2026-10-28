@@ -184,7 +184,7 @@ test("boundaryFromEnv：从 PI_SANDBOX_EXTRA_WRITE 读额外路径", () => {
 });
 
 test("ESCALATION_TITLE 是固定文案", () => {
-	assert.equal(ESCALATION_TITLE, "沙箱拦截了对边界外文件的删除");
+	assert.equal(ESCALATION_TITLE, "Sandbox blocked a delete outside the boundary");
 });
 
 /* ------------------------------------------------------------------ *

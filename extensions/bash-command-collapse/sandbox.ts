@@ -310,7 +310,7 @@ export const MIN_ALLOWLIST_DEPTH = 3;
 const SANDBOX_DENIAL_PATTERNS: readonly RegExp[] = [/Operation not permitted/i, /\bEPERM\b/];
 
 /** 升级确认框的固定标题（与 `destructive-guard` 一样，标题不随命令变化）。 */
-export const ESCALATION_TITLE = "沙箱拦截了对边界外文件的删除";
+export const ESCALATION_TITLE = "Sandbox blocked a delete outside the boundary";
 
 /**
  * 命令输出是否像"被沙箱拒绝删除"。
@@ -402,8 +402,8 @@ export function neverDeleteReasonFor(target: string, env: PathEnv): string | und
 	}
 	for (const form of forms) {
 		for (const root of roots) {
-			if (form === root) return `${form} 是永不删除的身份/凭据/手写配置`;
-			if (form.startsWith(`${root}/`)) return `${form} 在永不删除的 ${root} 下`;
+			if (form === root) return `${form} is identity/credential/hand-written config on the never-delete list`;
+			if (form.startsWith(`${root}/`)) return `${form} is under the never-delete path ${root}`;
 		}
 	}
 	return undefined;
@@ -482,15 +482,15 @@ export function dangerousReasonFor(target: string, env: PathEnv): string | undef
 
 	for (const form of forms) {
 		for (const root of tables.exact) {
-			if (form === root) return `${form} 本身就是受保护的危险路径`;
+			if (form === root) return `${form} is itself a protected dangerous path`;
 		}
 		for (const root of tables.subtree) {
-			if (form === root) return `${form} 本身就是受保护的危险路径`;
-			if (form.startsWith(root + "/")) return `${form} 在危险路径 ${root} 下`;
+			if (form === root) return `${form} is itself a protected dangerous path`;
+			if (form.startsWith(root + "/")) return `${form} is under the dangerous path ${root}`;
 		}
 		const segments = form.split("/").filter(Boolean);
 		const vcs = segments.find((s) => VCS_DIR_NAMES.includes(s));
-		if (vcs) return `${form} 含版本控制存储 ${vcs}（删掉是丢只此一份的历史）`;
+		if (vcs) return `${form} contains version-control storage ${vcs} (deleting it loses the only copy of the history)`;
 	}
 	return undefined;
 }

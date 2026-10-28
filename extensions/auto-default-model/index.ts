@@ -78,10 +78,10 @@ export default function (pi: ExtensionAPI) {
 		try {
 			const result = await persistAsStartupDefault(ctx.cwd, event.model.provider, event.model.id);
 			if (result.outcome === "failed") {
-				notify(ctx, `${modelLabel(event)} 没能写成启动默认模型：${result.detail ?? "settings.json 读取或写入失败"}`);
+				notify(ctx, `${modelLabel(event)} could not be written as the startup default model: ${result.detail ?? "reading or writing settings.json failed"}`);
 			}
 		} catch (error) {
-			notify(ctx, `写启动默认模型失败：${error instanceof Error ? error.message : String(error)}`);
+			notify(ctx, `Failed to write the startup default model: ${error instanceof Error ? error.message : String(error)}`);
 		}
 	});
 }

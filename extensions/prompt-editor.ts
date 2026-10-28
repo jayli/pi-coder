@@ -1,11 +1,13 @@
 /**
- * 输入框视觉层微调：① 类似 Claude Code 的 "❯" 提示符（`!` bash 模式换成 "!"）；
+ * 输入框视觉层微调：① 提示符 "›"（`!` bash 模式换成 "!"）；
  * ② 补全列表与 statusline 之间留一行空行。
  *
  * ① 提示符实现方式：继承 CustomEditor，把真正的编辑区收窄 gutter 列（super.render(width - gutter)），
  * 再把 gutter 补回每一行的左侧：
  *   - 上/下边框：由 renderTopBorder / renderBottomBorder 自己补满，保持边框满宽
- *   - 第一行文本（未滚动时）→ "❯ "，bash 模式（正文以 `!` 开头）→ "! "
+ *   - 第一行文本（未滚动时）→ "› "，bash 模式（正文以 `!` 开头）→ "! "
+ *   - 普通 `›` 走自己的配色：`accent` 槽 + **加粗**（用户 2026-10-28 定，原先用 `warning`
+ *     槽，同日改回 `accent`）；bash 模式的 `!` 仍用边框色（= pi 的 bashMode 色），两边不打架
  *   - 其余文本行 / 自动补全行 → 等宽空格
  * 光标位置由行内的 CURSOR_MARKER 决定，跟着文本一起右移，所以硬件光标 / IME 定位不受影响；
  * 鼠标点击坐标同样左移 gutter 列后再交给父类（bash 模式再多算一列隐藏的 `!`），点击定位保持准确。
@@ -35,7 +37,7 @@
  * 渲染器对每条变化行先写 \x1b[2K 整行清除，补全行变短不会留残影；SelectList.handleMouse
  * 只用 event.y 定位，左移不影响鼠标点选。
  *
- * ④ `!` bash 模式（对齐 Claude Code）：输入框第一个字符是 `!` 时，gutter 的 `❯` 换成 `!`，
+ * ④ `!` bash 模式（对齐 Claude Code）：输入框第一个字符是 `!` 时，gutter 的 `›` 换成 `!`，
  * 正文里那个 `!` 不再显示 —— 于是正文看起来就是命令本身，而光标/IME/点选都还在它原来那一列。
  * 模式判定、Enter 提交（`text.startsWith("!")`）、↑ 历史、Esc 清空全部沿用 pi 自己的链路
  * （`interactive-mode.js` 的 `onChange` 是 `text.trimStart().startsWith("!")`，边框颜色用的就是它），
@@ -47,10 +49,11 @@
  *     放进去的话反显光标会落在被摘掉的空列上，而在那儿打字会把 `x!ls` 写进正文，
  *     pi 当场判定「不是 bash 模式了」；
  *   - 退出模式不需要额外代码：正文为空时按回退键删掉 `!`（或 Enter 提交 / Esc 清空），
- *     pi 那边 `isBashMode` 变回 false、边框颜色照旧逻辑回落，这里下一帧就画回 `❯`。
+ *     pi 那边 `isBashMode` 变回 false、边框颜色照旧逻辑回落，这里下一帧就画回 `›`。
  *
  * 可用环境变量：
- *   PI_EDITOR_PROMPT             提示符字符，默认 "❯"（bash 模式的 "!" 不跟着变）
+ *   PI_EDITOR_SLASH_MENU         设为 off 关闭「补全菜单选中行铺底色」（见 ⑥）
+ *   PI_EDITOR_PROMPT             提示符字符，默认 "›"（bash 模式的 "!" 不跟着变）
  *   PI_EDITOR_AUTOCOMPLETE_GAP   设为 off 关闭补全列表下方的空白行
  *   PI_EDITOR_AUTOCOMPLETE_SHIFT 补全列表左移列数，0..gutter，默认 1；
  *                                设 0 恢复旧行为，设 2（= gutter）则命令词对齐光标起始列
@@ -70,6 +73,21 @@
  *   - 光标：形状照抄 pi-tui `Input` 组件的 placeholder 分支（`CURSOR_MARKER` +
  *     `renderFakeCursor(首字素)` + 其余上色），所以硬件光标 / IME 候选窗仍停在正文第 0 列，
  *     关掉硬件光标时首字素反显。编辑器的 caret 本来就在第 0 列，这里不需要任何坐标换算。
+ *
+ * ⑥ 补全菜单选中行的底色（用户 2026-10-28 定）：输入 `/` 弹出的命令列表里，选中的那一行改成
+ * **`accent` 前景 + prompt message 的底色（`userMessageBg`）**。pi 自己的 `getSelectListTheme()`
+ * 只给了前景（`selectedText: (t) => theme.fg("accent", t)`，整个 bundle 的 select-list 路径上
+ * 一次 `theme.bg(…)` 都没有），满屏命令里只有字色差一点、光标停在哪一行很难一眼看出。
+ *
+ * 改在这一层的理由是 `Editor` 的 `autocompleteList` / `autocompletePrefix` 都是 private 字段；
+ * 而 `render()` 本来就在整行改写编辑器输出（gutter / 列表左移 / 下方空行），多一次「认行 →
+ * 重绘」不引入任何私有依赖。判据只是选中行的可见前缀 `→ `（`SelectList.renderItem` 里写死的
+ * 字面量），**先剥掉行内 SGR 再整行上一次色** —— 否则描述自带的 `dim` 会把后半行洗回默认前景。
+ * **整行铺满**（用户 2026-10-28 定：从行首到行尾都要有底色）：行首 gutter 的空白列、
+ * 描述之后的补白全部上色，并且**先补到终端宽再上色** —— pi 自己只把补全行铺到
+ * `gutter - shift + contentWidth`（默认比终端窄一列），不补齐右边缘会缺一格白底；
+ * 补白必须在 SGR **里面**，否则行尾那几格就是白底。
+ * 纯逻辑（判行 / 剥色 / 整行重绘与补宽）在 `./prompt-editor/slash-menu.ts`，单测不需要真 TUI。
  */
 
 import {
@@ -97,9 +115,24 @@ import {
 	resolveSuggestionEnabled,
 	suggestionFillText,
 } from "./prompt-editor/suggestion.ts";
+import { paintAutocompleteRows, resolveSlashMenuHighlight } from "./prompt-editor/slash-menu.ts";
 
-const PROMPT_CHAR = process.env.PI_EDITOR_PROMPT ?? "❯";
+const PROMPT_CHAR = process.env.PI_EDITOR_PROMPT ?? "›";
+/** 提示符字形的色槽（用户 2026-10-28 定：`›` 用 `accent` 色 + 加粗）。 */
+const PROMPT_COLOR = "accent";
 const AUTOCOMPLETE_GAP = (process.env.PI_EDITOR_AUTOCOMPLETE_GAP ?? "").toLowerCase() !== "off";
+/** 补全菜单选中行的底色开关（用户 2026-10-28 定；`PI_EDITOR_SLASH_MENU=off` 关闭）。 */
+const AUTOCOMPLETE_SELECTED_BG = resolveSlashMenuHighlight(process.env.PI_EDITOR_SLASH_MENU);
+/** 选中行的前景槽：`accent`（用户 2026-10-28 定，回到 pi 自己的选择）。 */
+const AUTOCOMPLETE_SELECTED_FG = "accent";
+/**
+ * 选中行的底色槽（用户 2026-10-28 定：「prompt message 的背景色」）。
+ *
+ * 主题里没有叫 `prompt message` 的 token；对得上的是 **`userMessageBg`**（“User message
+ * background” —— prompt / 用户消息那条消息的底色；`customMessageBg` 是 hook 注入消息的，
+ * 本仓几个皮肤里两者本来就同值）。`background-tasks` 的表头也是拿它当「皮肤 surface」用。
+ */
+const AUTOCOMPLETE_SELECTED_BG_SLOT = "userMessageBg";
 
 /** 占位符开关与文案：`PI_EDITOR_PLACEHOLDER=off` 关掉，其余非空值当文案用。 */
 const PLACEHOLDER = resolvePlaceholder(process.env.PI_EDITOR_PLACEHOLDER);
@@ -240,17 +273,66 @@ class PromptEditor extends CustomEditor {
 		}
 	}
 
+	/**
+	 * 补全菜单选中行：`accent` 前景 + **prompt message 的底色**（`userMessageBg`）。
+	 *
+	 * 底色不用 `selectedBg`（用户 2026-10-28 定：跟用户消息块用同一个 surface），前景仍用 pi
+	 * 自己对选中项的选择 `accent`。`bg("userMessageBg", fg("accent", …))` 的次序与
+	 * `theme-command.ts` 的预览行一致（底色在外、前景在内）。
+	 *
+	 * 三道退化：没有皮肤（旧 ctx 作废 / 非 TUI）→ 原样；`userMessageBg` 这个槽位拿不到
+	 * （老皮肤缺该 token，`getBgAnsi` 会抛）→ 退回纯 accent 前景（= pi 自己那层的观感），
+	 * 不留一坨前景 + 默认底色的半成品；异常都吞掉 —— 渲染 tick 里抛出去会打死整个 pi。
+	 */
+	private paintSelectedRow(text: string): string {
+		const theme = this.themeSource;
+		if (theme === undefined) return text;
+		try {
+			const highlighted = theme.bg(AUTOCOMPLETE_SELECTED_BG_SLOT, text);
+			return theme.fg(AUTOCOMPLETE_SELECTED_FG, highlighted);
+		} catch {
+			try {
+				return theme.fg(AUTOCOMPLETE_SELECTED_FG, text);
+			} catch {
+				return text;
+			}
+		}
+	}
+
 	private get gutterFill(): string {
 		return this.borderColor("─".repeat(this.gutter));
 	}
 
 	/**
-	 * 提示符字形铺满 gutter 列（`❯` / `!` 都是 1 列，但 `PI_EDITOR_PROMPT` 可能是宽字符）。
-	 * 只把字形染色、补齐的空格不染 —— 和原来的 `${borderColor("❯")} ` 逐字一致。
+	 * 提示符字形铺满 gutter 列（`›` / `!` 都是 1 列，但 `PI_EDITOR_PROMPT` 可能是宽字符）。
+	 * 只把字形染色、补齐的空格不染 —— 和原来的 `${borderColor("›")} ` 逐字一致。
+	 *
+	 * `styled` 为真时走 `paintPromptGlyph`（`accent` 槽 + 加粗，用户 2026-10-28 定）；
+	 * bash 模式的 `!` 传假，仍沿用边框色 —— 那个颜色是 pi 的 bashMode 色，跟着它才不会
+	 * 和输入框颜色打架。
 	 */
-	private promptCell(char: string): string {
+	private promptCell(char: string, styled = false): string {
 		const pad = Math.max(0, this.gutter - visibleWidth(char));
-		return this.borderColor(char) + " ".repeat(pad);
+		const painted = styled ? this.paintPromptGlyph(char) : this.borderColor(char);
+		return painted + " ".repeat(pad);
+	}
+
+	/**
+	 * 提示符字形的专属配色：`accent` 槽 + 加粗。
+	 *
+	 * 皮肤缺失（旧 ctx 作废 / 非 TUI）或槽位不认识时退回边框色 —— 渲染 tick 里抛出去会
+	 * 打死整个 pi，所以一层 try/catch 包到底。
+	 */
+	private paintPromptGlyph(char: string): string {
+		const theme = this.themeSource;
+		if (theme !== undefined) {
+			try {
+				return theme.fg(PROMPT_COLOR, theme.bold(char));
+			} catch {
+				// 老皮肤缺该 token：落到下面的边框色
+			}
+		}
+		return this.borderColor(char);
 	}
 
 	/**
@@ -302,8 +384,9 @@ class PromptEditor extends CustomEditor {
 		const blank = " ".repeat(gutter);
 		// 滚动后第一可见行已经不是逻辑首行，不再显示提示符
 		const showPrompt = !this.scrolled;
-		// EditorTheme 只暴露 borderColor，所以提示符沿用边框色（bash 模式下就是 bashMode 色）
-		const prompt = this.promptCell(bash.active ? BASH_MARKER : PROMPT_CHAR);
+		// EditorTheme 只暴露 borderColor，所以提示符沿用边框色（bash 模式下就是 bashMode 色）；
+		// 普通 `›` 自己有一套配色（accent + 加粗），见 paintPromptGlyph
+		const prompt = this.promptCell(bash.active ? BASH_MARKER : PROMPT_CHAR, !bash.active);
 		// 要摘 `!` 的那一行正好就是显示提示符的那一行
 		const hideBang = bash.hidden && showPrompt;
 
@@ -349,14 +432,31 @@ class PromptEditor extends CustomEditor {
 			return blank + line;
 		});
 
+		// 补全菜单选中行铺底色（见文件头 ⑥）。这一趟要在补空白行之前跑：认行只靠可见的 `→ `
+		// 前缀，空白行本来就不会命中，早跑晚跑结果一样，但早跑能让「没有改动 → 返回原数组」
+		// 这条短路作用在整帧上（下面 push 空行会就地改数组，先算就不会白算一次）。
+		// 关闭开关时整帧原样返回（= pi 自带的「只有 accent 前景」）。
+		//
+		// `padTo: width` 是「从头到尾」的关键：补全行总宽是 `gutter - shift + contentWidth`
+		// （默认 shift=1 ⇒ 比终端窄一列），pi 自己补的空白也只到这宽度。先补到 `width` 再上色，
+		// 选中条才一路铺到终端右边界；补白在着色区**内**，否则行尾那几格是白底。
+		const painted =
+			AUTOCOMPLETE_SELECTED_BG && this.isShowingAutocomplete()
+				? paintAutocompleteRows(mapped, {
+						paint: (text) => this.paintSelectedRow(text),
+						padTo: width,
+						widthOf: visibleWidth,
+					})
+				: mapped;
+
 		// 补全列表渲染在编辑器底边框之后，紧接着就是 statusline，视觉上拥挤；
 		// 只在补全列表真的存在时补一行空白行，静态布局不变。
 		// 按 pi 自己的惯例补满宽度（其余行也都是 gutter + contentWidth = width）。
 		if (AUTOCOMPLETE_GAP && this.isShowingAutocomplete()) {
-			mapped.push(" ".repeat(Math.max(0, width)));
+			painted.push(" ".repeat(Math.max(0, width)));
 		}
 
-		return mapped;
+		return painted;
 	}
 
 	/**

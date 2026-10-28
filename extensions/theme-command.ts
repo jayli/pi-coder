@@ -134,7 +134,7 @@ async function pickTheme(ctx: ExtensionContext): Promise<PickerResult | undefine
 		container.addChild(
 			new LiveText((width) => [
 				truncateToWidth(
-					`  ${theme.bold(theme.fg("accent", "选择主题"))}  ${theme.fg("dim", "↑↓ 预览 · enter 应用 · esc 取消")}`,
+					`  ${theme.bold(theme.fg("accent", "Select theme"))}  ${theme.fg("dim", "↑↓ preview · enter apply · esc cancel")}`,
 					width,
 				),
 			]),
@@ -165,7 +165,7 @@ async function pickTheme(ctx: ExtensionContext): Promise<PickerResult | undefine
 		container.addChild(new LiveText((width) => swatchLines(previewTheme, width)));
 		container.addChild(
 			new LiveText((width) => [
-				truncateToWidth(`  ${theme.fg("dim", `共 ${themes.length} 个主题 · 当前 ${currentName ?? "未知"}`)}`, width),
+				truncateToWidth(`  ${theme.fg("dim", `${themes.length} themes · current ${currentName ?? "unknown"}`)}`, width),
 			]),
 		);
 		container.addChild(new DynamicBorder((s) => theme.fg("border", s)));
@@ -208,14 +208,14 @@ export default function (pi: ExtensionAPI) {
 		},
 		handler: async (args, ctx) => {
 			if (!ctx.hasUI) {
-				ctx.ui.notify("/theme 需要在交互模式下使用", "warning");
+				ctx.ui.notify("/theme needs interactive mode", "warning");
 				return;
 			}
 
 			const themes = ctx.ui.getAllThemes();
 			themeNames = themes.map((t) => t.name);
 			if (themes.length === 0) {
-				ctx.ui.notify("没有可用主题（是否用了 --no-themes？）", "warning");
+				ctx.ui.notify("No themes available (was --no-themes passed?)", "warning");
 				return;
 			}
 
@@ -224,7 +224,7 @@ export default function (pi: ExtensionAPI) {
 				// 直接切换：先精确匹配，再忽略大小写兜底
 				const match = themes.find((t) => t.name === arg) ?? themes.find((t) => t.name.toLowerCase() === arg.toLowerCase());
 				if (!match) {
-					ctx.ui.notify(`未知主题 "${arg}"，可用：${themes.map((t) => t.name).join(" / ")}`, "error");
+					ctx.ui.notify(`Unknown theme "${arg}"; available: ${themes.map((t) => t.name).join(" / ")}`, "error");
 					return;
 				}
 				applyTheme(ctx, match.name);
@@ -232,7 +232,10 @@ export default function (pi: ExtensionAPI) {
 			}
 
 			if (ctx.mode !== "tui") {
-				ctx.ui.notify(`非 TUI 模式不能弹选择器，用 /theme <名字>：${themes.map((t) => t.name).join(" / ")}`, "warning");
+				ctx.ui.notify(
+					`A picker needs TUI mode; use /theme <name>: ${themes.map((t) => t.name).join(" / ")}`,
+					"warning",
+				);
 				return;
 			}
 
@@ -245,7 +248,7 @@ export default function (pi: ExtensionAPI) {
 				// 对象路径恢复：settings.json 全程没写过，所以原样不动（代价见文件头注释）
 				const restore = originalName ? ctx.ui.getTheme(originalName) : undefined;
 				if (restore) ctx.ui.setTheme(restore);
-				else ctx.ui.notify(`已取消，但无法恢复原主题（${originalName ?? "未知"}），请用 /theme 重选`, "warning");
+				else ctx.ui.notify(`Cancelled, but the original theme could not be restored (${originalName ?? "unknown"}); pick again with /theme`, "warning");
 				return;
 			}
 
@@ -258,8 +261,8 @@ export default function (pi: ExtensionAPI) {
 function applyTheme(ctx: ExtensionContext, name: string): void {
 	const result = ctx.ui.setTheme(name);
 	if (!result.success) {
-		ctx.ui.notify(`切换到 ${name} 失败：${result.error}`, "error");
+		ctx.ui.notify(`Failed to switch to ${name}: ${result.error}`, "error");
 		return;
 	}
-	ctx.ui.notify(`已切换到 ${name}`, "info");
+	ctx.ui.notify(`Switched to ${name}`, "info");
 }

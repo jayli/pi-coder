@@ -145,17 +145,17 @@ function buildPrompt(target: InitTarget, cwd: string, extra: string): string {
 
 export default function (pi: ExtensionAPI) {
 	pi.registerCommand("init", {
-		description: "分析仓库并生成/更新记忆文件（有 CLAUDE.md 就更新它，否则 AGENTS.md）",
+		description: "Analyze the repository and create/update the memory file (updates CLAUDE.md when present, otherwise AGENTS.md)",
 		handler: async (args, ctx) => {
 			const { file, extra } = parseArgs(args);
 			// 判定必须发生在「发消息」那一刻：agent 正在跑时先等它结束（见文件头 ①）。
 			if (!ctx.isIdle()) {
-				if (ctx.hasUI) ctx.ui.notify("等当前回合结束再开始 /init …", "info");
+				if (ctx.hasUI) ctx.ui.notify("Waiting for the current turn to finish before starting /init …", "info");
 				await ctx.waitForIdle();
 			}
 			const target = resolveTarget(ctx.cwd, file);
 			if (ctx.hasUI) {
-				ctx.ui.notify(`${target.exists ? "更新" : "创建"} ${target.display}（${target.path}）…`, "info");
+				ctx.ui.notify(`${target.exists ? "Updating" : "Creating"} ${target.display} (${target.path}) …`, "info");
 			}
 			pi.sendUserMessage(buildPrompt(target, ctx.cwd, extra));
 		},

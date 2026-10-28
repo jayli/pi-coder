@@ -31,10 +31,28 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 const EXTENSION_PATH = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "read-path-collapse.ts");
 /** 状态圆点 `•`（U+2022）：只挂在标题行行首。 */
 const BAR = "\u2022";
-/** 默认皮肤（dark）里三个状态槽的**真彩色** —— 圆点的颜色断言直接盯这三个值。 */
-const DIM_ANSI = "\u001b[38;2;102;102;102m"; // dim            `#666666`
-const ADDED_ANSI = "\u001b[38;2;181;189;104m"; // toolDiffAdded  `#b5bd68`
-const REMOVED_ANSI = "\u001b[38;2;204;102;102m"; // toolDiffRemoved `#cc6666`
+/** 默认皮肤（dark）的颜色**运行时从 pi 的主题单例取**，不写死色值。
+ *
+ * 曾经是硬编码的 `#666666` / `#b5bd68` / `#cc6666`，pi 换调色板后这组断言全部变成
+ * 假阳性（2026-10 实测 dark.json 已改成 okhsl 表达式，`dim` 解析成 `#7e888e`、
+ * `toolDiffAdded` 成 `#68b78d`、`toolDiffRemoved` 成 `#ea7f81`）。测试要钉的是
+ * 「用的是哪个槽」，不是「那个槽今天是什么色」，所以这里按槽名现取 ——
+ * 与 `bash-command-collapse/render.test.ts` 的 `slotAnsi` 同一个口袋。
+ *
+ * 必须是**惰性**读取：这段代码在模块顶层先于 `initTheme("dark")` 求值，当场取只会
+ * 拿到 undefined。 */
+const THEME_SYMBOL = Symbol.for("@earendil-works/pi-coding-agent:theme");
+/** 取某个主题槽的 ANSI 前缀（`fg()` 把正文包起来，这里只留下打开色用的那一段）。 */
+function slotAnsi(slot: string): string {
+	const singleton = (globalThis as Record<symbol, unknown>)[THEME_SYMBOL] as
+		| { fg?: (slot: string, text: string) => string }
+		| undefined;
+	assert.ok(singleton?.fg, "pi 的 theme 单例该在（initTheme 已调过）");
+	const painted = singleton!.fg!(slot, "\u0000");
+	const index = painted.indexOf("\u0000");
+	assert.ok(index > 0, `主题槽 ${slot} 应当带一段 ANSI 前缀：${JSON.stringify(painted)}`);
+	return painted.slice(0, index);
+}
 const SKIP = "找不到本机 pi 的库入口（装过 pi 才有）";
 
 /**
@@ -249,25 +267,27 @@ test("圆点颜色：读的时候 dim、成功绿、失败红", { skip }, () => 
 	// 「读的时候」= 结果还没回来（`renderCall` 独舞）
 	assert.equal(
 		barAnsi(renderBlock({ path: "/tmp/x.js" }, { noResult: true })[1]!),
-		DIM_ANSI,
+		// 期望值按**槽名**从左次现取（dim / toolDiffAdded / toolDiffRemoved），
+		// 不写死色 —— 皮肤换调色板时这里不会变成假阳性。
+		slotAnsi("dim"),
 		"pending 时圆点该是 dim 灰",
 	);
 	// 流式的 partial 快照同样是「还在读」
 	assert.equal(
 		barAnsi(renderBlock({ path: "/tmp/x.js" }, { content: "a\n", partial: true })[1]!),
-		DIM_ANSI,
+		slotAnsi("dim"),
 		"partial 时圆点该是 dim 灰",
 	);
 	// 成功 → toolDiffAdded（diff 新增行的绿）
 	assert.equal(
 		barAnsi(renderBlock({ path: "/tmp/x.js" }, { content: "a\n" })[1]!),
-		ADDED_ANSI,
+		slotAnsi("toolDiffAdded"),
 		"成功时圆点该是绿色",
 	);
 	// 失败 → toolDiffRemoved（diff 删除行的红）
 	assert.equal(
 		barAnsi(renderBlock({ path: "/tmp/nope.js" }, { content: "File not found", isError: true })[1]!),
-		REMOVED_ANSI,
+		slotAnsi("toolDiffRemoved"),
 		"失败时圆点该是红色",
 	);
 });

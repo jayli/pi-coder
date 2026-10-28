@@ -121,7 +121,17 @@ export function matchesPattern(candidate: string, normalizedPattern: string): bo
 	return path.matchesGlob(unhide(candidate), unhidePattern(normalizedPattern));
 }
 
-/** 默认结果数上限（与 pi 内置 `find` 的 `DEFAULT_LIMIT` 同值）。 */
+/**
+ * 默认结果数上限。**1000，与内置 `find` 同值（2026-10-28 从 100 改上来的）**。
+ *
+ * 原来的 100 是抄 Claude Code 的 Glob（`globLimits.maxResults ?? 100`），但两边处境不同：CC 只有
+ * Glob 一个「按名字找」的工具，而 pi 同时摆着 `find`（默认 1000）。这就成了一个**模型看得见的能力差**
+ * —— 实测本仓库的 `**` + `/*.ts` 有 244 个匹配，默认 limit=100 只回 100 个再加一句「还有 144 个没列」，
+ * 于是模型学到了「清点目录树用 find、找单个文件才用 glob」，两天里 limit=200 的手动补救出现两次。
+ * 拉平到 1000 后这个理由消失，两个工具的差别只剩「候选集从哪来」。
+ *
+ * 不收紧了：字节上限（50KB）还在，真的大到写不下时它先拦；而 glob 本来就比 find 快（索引解析 0.12ms）。
+ */
 export const DEFAULT_LIMIT = 1000;
 
 /** 一个候选文件名里为什么会被跳过。 */
@@ -147,6 +157,8 @@ export interface SelectResult {
 	paths: string[];
 	/** 命中结果数上限时是那个上限值（用于生成提示）。 */
 	limitReached?: number;
+	/** 截断前的匹配总数（CC 的 `totalMatches`）；`limitReached` 用来算「还有多少没列」。 */
+	totalMatches: number;
 	skippedNewlines: number;
 }
 
@@ -217,6 +229,7 @@ export async function selectPaths(options: SelectOptions): Promise<SelectResult>
 	const paths = ordered.slice(0, limit);
 	return {
 		paths,
+		totalMatches: ordered.length,
 		skippedNewlines,
 		...(limitReached === undefined ? {} : { limitReached }),
 	};
@@ -227,6 +240,8 @@ export type TruncateFn = (text: string) => { content: string; truncated: boolean
 
 export interface FormatNotices {
 	limitReached?: number;
+	/** 截断前的匹配总数。缺省时退化成 CC 的「只知下界」那一种措辞。 */
+	totalMatches?: number;
 	skippedNewlines: number;
 }
 
@@ -246,11 +261,25 @@ export function formatBytes(bytes: number): string {
 }
 
 /**
+ * 结果数超限的提示行。**逐字对齐 Claude Code 的两种措辞**（`KCo`）：知道确切总数时用
+ * 第一种，只知下界时用第二种。这一行是紧贴最后一个路径的**正文续行**（CC 就是
+ * `[...filenames, notice].join("\n")`），中间不空行。
+ */
+export function formatShowingNotice(shown: number, total: number | undefined): string {
+	if (total === undefined || total <= shown) {
+		return `(Showing the first ${shown} files; there are more than ${shown} matches. Narrow the pattern or path to see the rest.)`;
+	}
+	return `(Showing ${shown} of ${total} matching files; ${total - shown} more are not listed. Narrow the pattern or path to see the rest.)`;
+}
+
+/**
  * 拼最终正文与 `details`。**不自己截断** —— 截断交给注入的 `truncate`，这样本模块不必
  * 知道 pi 的 `DEFAULT_MAX_BYTES`。
  *
- * 提示顺序固定：先结果数上限，后字节上限，最后跳过的换行路径 —— 与内置 `find` 的
- * `[Truncated: …]` 顺序一致，两个工具的输出不用模型换一套理解。
+ * 两段提示刻意用两种接法：
+ * - **结果数超限**走 CC 的形状 —— 紧贴路径列表续一行 `(Showing 100 of 142 …)`，没有空行；
+ * - **字节上限与跳过换行**是 pi 侧独有的信息，仍按内置 `find` 的 `[Truncated: …]` 形状
+ *   空一行跟在后面（CC 的 harness 有 100k 字符上限但不告诉模型，这里不学它）。
  */
 export function formatOutput(paths: readonly string[], notices: FormatNotices, truncate?: TruncateFn): FormatResult {
 	const joined = paths.join("\n");
@@ -258,21 +287,23 @@ export function formatOutput(paths: readonly string[], notices: FormatNotices, t
 	const body = truncatedResult ? truncatedResult.content : joined;
 
 	const details: FormatResult["details"] = {};
-	const lines: string[] = [];
+	const afterBody: string[] = [];
+	const noticesAfterBlank: string[] = [];
 	if (notices.limitReached !== undefined) {
 		details.resultLimitReached = notices.limitReached;
-		lines.push(`[${notices.limitReached} results limit reached. Use limit=${notices.limitReached * 2} for more, or refine pattern]`);
+		afterBody.push(formatShowingNotice(paths.length, notices.totalMatches));
 	}
 	if (truncatedResult?.truncated) {
 		details.truncated = true;
 		// `maxBytes` 由注入的 truncate 回传，本模块不硬编码 pi 的常量。
 		const label = truncatedResult.maxBytes === undefined ? "byte" : formatBytes(truncatedResult.maxBytes);
-		lines.push(label === "byte" ? "[byte limit reached]" : `[${label} limit reached]`);
+		noticesAfterBlank.push(label === "byte" ? "[byte limit reached]" : `[${label} limit reached]`);
 	}
 	if (notices.skippedNewlines > 0) {
-		lines.push(`[skipped ${notices.skippedNewlines} paths containing newlines]`);
+		noticesAfterBlank.push(`[skipped ${notices.skippedNewlines} paths containing newlines]`);
 	}
 
-	const text = lines.length === 0 ? body : `${body}\n\n${lines.join(". ")}`;
+	let text = [body, ...afterBody].join("\n");
+	if (noticesAfterBlank.length > 0) text += `\n\n${noticesAfterBlank.join(". ")}`;
 	return { text, details };
 }

@@ -243,7 +243,7 @@ function withTreeShell(target: ToolDefinition<any, any, any>): ToolDefinition<an
 					// —— `updateDisplay()` 先 call 后 result，但两个组件的 `render()` 都在这之后才
 					// 跑，所以同一帧里读得到（与下面 `state.innerResult` 判「树接上没有」同一套时点）。
 					const dot = theme.fg(stateDotSlot(context.isPartial === true, state.failed === true), "\u2022");
-					const pipe = theme.fg("muted", "\u2502 ");
+					const pipe = theme.fg("dim", "\u2502 ");
 					const connected = state.innerResult !== undefined;
 					return withCallGutter(componentLines(inner, contentWidth(width)), dot, pipe, connected);
 				},

@@ -26,7 +26,7 @@ import {
 	SPINNER_FRAMES,
 	SPINNER_INTERVAL_MS,
 } from "./spinner-frames.ts";
-import { TURN_MARKER_VERBS, TURN_MARKER_WIDGET_KEY } from "./turn-marker.ts";
+import { TURN_MARKER_ENTRY_TYPE, TURN_MARKER_VERBS } from "./turn-marker.ts";
 
 /**
  * 摘要失败重试的延时（与下面写进 `PI_WORKING_SUMMARY_RETRY_MS` 的值一致）。用例靠它
@@ -53,6 +53,21 @@ process.env.PI_WORKING_INDICATOR_WATCHDOG_DELAY_MS = String(WATCHDOG_DELAY_MS);
  */
 const PROBE_TIMEOUT_MS = 300;
 process.env.PI_TURN_MARKER_PROBE_TIMEOUT_MS = String(PROBE_TIMEOUT_MS);
+
+/**
+ * 标签扫光的参数（同样是模块级常量，必须在加载前设）。
+ *
+ * 为什么要把扫过段拉长：影子位置只由**回合时钟**决定，而 7 列的短词在默认 20 列/秒下只要
+ * 0.65s 就飞过去了（剩下 1.35s 词上没影子）。那样用例取样时间一漂，「有没有影子」就变。
+ *
+ * 改成 **2 列/秒 + 带宽 20 列 + 60s 周期**后：
+ *   - `Working`（7 列）要扫 (7+20)/2 = 13.5s，`Reading` 一样，整个用例（< 10s）都落在扫过段；
+ *   - 60s 周期远大于用例时长 ⇒ 不会回绕到下一趟，不存在相位问题；
+ *   - 每列 500ms ⇒ 2.2s 窗口里仍有 4+ 帧，“逐列重绘”仍然可测。
+ */
+process.env.PI_LABEL_SHADOW_SPEED = "2";
+process.env.PI_LABEL_SHADOW_BAND = "20";
+process.env.PI_LABEL_SHADOW_PERIOD_MS = "60000";
 
 const EXTENSION_PATH = path.join(path.dirname(fileURLToPath(import.meta.url)), "index.ts");
 const SKIP = "找不到本机 pi 的库入口（装过 pi 才有）";
@@ -157,6 +172,11 @@ interface Recorder {
 interface ContextOptions {
 	/** 主题 `fg` 实现；缺省恒等（保持既有布局用例的宽度口径）。 */
 	themeFg?: (color: string, text: string) => string;
+	/**
+	 * 完整替掉 `ctx.ui.theme`（影子动画要 `colors` + `getColorMode`，只有 `fg` 的假主题会被
+	 * `createShadowPaint` 判成「拿不到具体色值」而退回静态标签）。
+	 */
+	themeOverride?: unknown;
 	/** 每次 `setWorkingIndicator` 记一条（`undefined` = 无参调用，即恢复 pi 默认帧）。 */
 	onIndicator?: (options: { frames?: string[]; intervalMs?: number } | undefined) => void;
 	/** 每次 `setWidget` 记一条（`content === undefined` = 清掉这个 key）。 */
@@ -195,7 +215,7 @@ function createContext(recorder: Recorder, options: ContextOptions = {}): unknow
 				}),
 		},
 		ui: {
-			theme: { fg: options.themeFg ?? ((_color: string, text: string) => text) },
+			theme: options.themeOverride ?? { fg: options.themeFg ?? ((_color: string, text: string) => text) },
 			setWorkingIndicator: (indicator?: { frames?: string[]; intervalMs?: number }) =>
 				options.onIndicator?.(indicator),
 			setWorkingMessage: (message?: string) => {
@@ -205,19 +225,6 @@ function createContext(recorder: Recorder, options: ContextOptions = {}): unknow
 			setWidget: (key: string, content?: unknown) => options.onWidget?.(key, content),
 		},
 	};
-}
-
-/**
- * 把 widget 工厂渲染成行（假 TUI + 假主题）。结束符是工厂形式（要拿 theme 的 live proxy，
- * 见 index.ts 的 `showTurnMarker`），所以断言得先把它调出来。
- */
-function renderWidgetLines(content: unknown, themeFg?: (color: string, text: string) => string): string[] {
-	assert.equal(typeof content, "function", "应该是 widget 工厂（函数），不是字符串数组");
-	const factory = content as (tui: unknown, theme: { fg: (color: string, text: string) => string }) => {
-		render(width: number): string[];
-	};
-	const component = factory({}, { fg: themeFg ?? ((_color: string, text: string) => text) });
-	return component.render(120);
 }
 
 function makeWorkspace(): { agentDir: string; projectDir: string; cleanup: () => void } {
@@ -236,6 +243,22 @@ function makeWorkspace(): { agentDir: string; projectDir: string; cleanup: () =>
 interface LoadedExtension {
 	handlers: Map<string, Handler[]>;
 	errors: Array<{ path: string; error: string }>;
+	/** `pi.registerEntryRenderer` 注册的渲染器（按 customType）。 */
+	entryRenderers?: Map<string, EntryRenderer>;
+	/** 扩展共用的 runtime：`appendEntry` 等 action 会打在这里（加载期是抛错的桩）。 */
+	runtime: Record<string, unknown>;
+}
+
+/** `registerEntryRenderer` 的渲染器形状（只取本扩展用到的那几个字段）。 */
+type EntryRenderer = (
+	entry: { customType?: string; data?: unknown },
+	options: { expanded: boolean },
+	theme: ThemeLike,
+) => { render(width: number): string[]; invalidate(): void } | undefined;
+
+/** `theme.fg` 的假实现形状（渲染器只要这一个方法）。 */
+interface ThemeLike {
+	fg(color: string, text: string): string;
 }
 
 /**
@@ -248,6 +271,7 @@ interface LoadedExtension {
 async function loadExtension(
 	workspace: { agentDir: string; projectDir: string },
 	bus: TestBus = createTestBus(),
+	onAppendEntry?: (customType: string, data: unknown) => void,
 ): Promise<LoadedExtension> {
 	const pi = (await import(pathToFileURL(piEntry as string).href)) as {
 		discoverAndLoadExtensions: (
@@ -255,7 +279,11 @@ async function loadExtension(
 			cwd: string,
 			agentDir?: string,
 			eventBus?: unknown,
-		) => Promise<{ extensions: LoadedExtension[]; errors: Array<{ path: string; error: string }> }>;
+		) => Promise<{
+			extensions: LoadedExtension[];
+			errors: Array<{ path: string; error: string }>;
+			runtime: Record<string, unknown>;
+		}>;
 	};
 	const loaded = await pi.discoverAndLoadExtensions(
 		[EXTENSION_PATH],
@@ -267,7 +295,60 @@ async function loadExtension(
 	assert.equal(loaded.extensions.length, 1);
 	const extension = loaded.extensions[0];
 	assert.ok(extension);
+	// 加载期的 `appendEntry` 是「runtime not initialized」的抛错桩；接上录制器才能断言
+	// 结束符真的写进了会话日志（其余 action 本组用例用不到，保持原样）。
+	loaded.runtime.appendEntry = (customType: string, data: unknown) => onAppendEntry?.(customType, data);
+	extension.runtime = loaded.runtime;
 	return extension;
+}
+
+/**
+ * 结束符条目：用**真注册的**渲染器画一行（假 theme）。没注册渲染器 / 条目形状不对时返回 undefined。
+ *
+ * 走的是 pi 在会话回放 / 实时追加时走的同一条路（`registerEntryRenderer` 拿到的那个函数），
+ * 而不是直接拼字符串 —— 否则测的是测试自己而不是产品代码。
+ */
+function renderEntryLines(
+	extension: LoadedExtension,
+	customType: string,
+	data: unknown,
+	themeFg?: (color: string, text: string) => string,
+): string[] | undefined {
+	const renderer = extension.entryRenderers?.get(customType) as EntryRenderer | undefined;
+	assert.ok(renderer, `应该为 ${customType} 注册了条目渲染器`);
+	const colors: string[] = [];
+	const component = renderer(
+		{ customType, data },
+		{ expanded: false },
+		{
+			fg: (color, text) => {
+				colors.push(color);
+				return themeFg ? themeFg(color, text) : text;
+			},
+		},
+	);
+	if (component === undefined) return undefined;
+	// 上色槽记录下来，供调用方断言（渲染器的色槽是契约的一部分）。
+	return component.render(120);
+}
+
+/** 渲染器调用过的色槽（单独跑一次，不污染行内容）。 */
+function entryRenderColors(extension: LoadedExtension, customType: string, data: unknown): string[] {
+	const colors: string[] = [];
+	const renderer = extension.entryRenderers?.get(customType) as EntryRenderer | undefined;
+	assert.ok(renderer, `应该为 ${customType} 注册了条目渲染器`);
+	const component = renderer(
+		{ customType, data },
+		{ expanded: false },
+		{
+			fg: (color, text) => {
+				colors.push(color);
+				return text;
+			},
+		},
+	);
+	component?.render(120);
+	return colors;
 }
 
 /**
@@ -820,9 +901,229 @@ test("单色主题（NO_COLOR / 恒等 fg）不下发帧表，而是无参交回
 	}
 });
 
+// ---------------------------------------------------------------------------
+// 标签扫光（`label-shadow.ts` + index.ts 的上色/排帧）
+// ---------------------------------------------------------------------------
+
+/**
+ * 能做扫光的假主题：`colors` 给出具体色值、`getColorMode` 报 truecolor。
+ *
+ * `fg` 故意长得像真 `Theme.fg`（`<slot>text\x1b[39m`），这样「影子段自己带 ANSI + 自己的重置」
+ * 与「整段走 fg」两种路径在字符串上可区分 —— 用例靠这个判「到底扫没扫」。
+ */
+function createShadowTheme(): {
+	colors: Record<string, unknown>;
+	getColorMode: () => string;
+	fg: (color: string, text: string) => string;
+} {
+	return {
+		colors: { text: { kind: "rgb", r: 248, g: 248, b: 242 } },
+		getColorMode: () => "truecolor",
+		fg: (color, text) => `<${color}>${text}\u001b[39m`,
+	};
+}
+
+/** 从一条 working message 里数「有多少段带真彩前景转义」（影子段）。 */
+function shadowedRunCount(message: string): number {
+	return (message.match(/\u001b\[38;2;\d+;\d+;\d+m/g) ?? []).length;
+}
+
+test("标签扫光：扫过段逐列压暗（多段真彩）、可见文本不被改写", { skip, timeout: 30_000 }, async () => {
+	const workspace = makeWorkspace();
+	try {
+		const extension = await loadExtension(workspace);
+		const { agentStart, shutdown } = handlersOf(extension);
+		const recorder: Recorder = { completes: [], workingMessages: [], resets: 0 };
+		const ctx = createContext(recorder, { themeOverride: createShadowTheme() });
+
+		await agentStart({}, ctx);
+		// 列时长来自用例 env（2 列/秒 ⇒ 500ms/列，带宽 20 列 ⇒ 扫过段很长），见文件头。
+		await waitFor(() => recorder.workingMessages.length >= 3, "扫过段的逐列重绘", 8_000);
+
+		// 逐列重绘：影子位置每列都变 ⇒ 2.4s 里至少有 4 条新文案（而非只靠 1s 读秒 tick）。
+		const beforeWindow = recorder.workingMessages.length;
+		await delay(2_400);
+		const window = recorder.workingMessages.slice(beforeWindow);
+		assert.ok(
+			window.length >= 3,
+			`扫过段应该逐列重绘，2.4s 只新增 ${window.length} 条`,
+		);
+
+		// 整个窗口一起看：影子在移动 ⇒ 至少有一帧出现过多段压暗（软边两侧同时可见）。
+		const all = recorder.workingMessages.slice(beforeWindow - 3);
+		assert.ok(
+			all.some((message) => shadowedRunCount(message) >= 2),
+			`扫过时应该出现多段压暗，实际：${JSON.stringify(all.slice(-6))}`,
+		);
+		// 可见内容不变（只变色）：把 ANSI 与假主题的槽位标记剥掉后每帧都是 `Working (Ns)`。
+		for (const message of all) {
+			const plain = message.replace(/\u001b\[[0-9;]*m/g, "").replace(/<[^>]+>/g, "");
+			assert.match(plain, /^Working \(\d+s\)/, `可见文本不该被扫光改写：${plain}`);
+		}
+
+		await shutdown({}, ctx);
+	} finally {
+		workspace.cleanup();
+	}
+});
+
+test("标签扫光：假主题只有 fg（拿不到具体色值）时退回静态标签，不猜颜色", { skip, timeout: 30_000 }, async () => {
+	const workspace = makeWorkspace();
+	try {
+		const extension = await loadExtension(workspace);
+		const { agentStart, shutdown } = handlersOf(extension);
+		const recorder: Recorder = { completes: [], workingMessages: [], resets: 0 };
+		// 只有 `fg` 的假主题（`colors` / `getColorMode` 都没有）—— 就是既有用例的形状。
+		const ctx = createContext(recorder, { themeFg: (color, text) => `<${color}>${text}` });
+
+		await agentStart({}, ctx);
+		await waitFor(() => recorder.workingMessages.length >= 1, "第一条文案");
+		const title = recorder.workingMessages.length;
+		await delay(200);
+
+		assert.equal(
+			shadowedRunCount(recorder.workingMessages.at(-1) ?? ""),
+			0,
+			"拿不到具体色值时不该拼出任何真彩段",
+		);
+		assert.ok(recorder.workingMessages.length <= title + 1, "不排帧就不会有多余重绘");
+
+		await shutdown({}, ctx);
+	} finally {
+		workspace.cleanup();
+	}
+});
+
 // =============================================================================
 // 弹窗期间冻结重绘（ui_prompt_start / ui_prompt_end）
 // =============================================================================
+
+/**
+ * 从一条 working message 里找出「最深那一段的第一列」（用来跟另一个标签上的位置比对）。
+ * 没有影子（全部强度 0）时返回 null。
+ */
+function darkestColumnOf(message: string): number | null {
+	const runs = [...message.matchAll(/\u001b\[38;2;(\d+);(\d+);(\d+)m([^\u001b]*)/g)];
+	if (runs.length === 0) return null;
+	// 越暗 = RGB 分量越小；只取标签段（跳过 spinner 与统计段：它们也带真彩）。
+	let column = 0;
+	let best: { column: number; luminance: number } | null = null;
+	for (const run of runs) {
+		const text = run[4] ?? "";
+		if (!/^[A-Za-z ]+$/.test(text)) continue;
+		const luminance = Number(run[1]) + Number(run[2]) + Number(run[3]);
+		if (text.trim() === "") continue;
+		if (best === null || luminance < best.luminance) best = { column, luminance };
+		column += [...text].length;
+	}
+	return best?.column ?? null;
+}
+
+test("标签扫光：Thinking 与三个工具态不扫、Reading / Working 照旧扫（用户 2026-10-28 定）", { skip, timeout: 40_000 }, async () => {
+	const workspace = makeWorkspace();
+	try {
+		const extension = await loadExtension(workspace);
+		const { agentStart, shutdown } = handlersOf(extension);
+		const messageUpdate = extension.handlers.get("message_update")?.[0];
+		const toolStart = extension.handlers.get("tool_execution_start")?.[0];
+		const toolEnd = extension.handlers.get("tool_execution_end")?.[0];
+		assert.ok(messageUpdate, "应该注册了 message_update");
+		assert.ok(toolStart, "应该注册了 tool_execution_start");
+		assert.ok(toolEnd, "应该注册了 tool_execution_end");
+		const recorder: Recorder = { completes: [], workingMessages: [], resets: 0 };
+		const ctx = createContext(recorder, { themeOverride: createShadowTheme() });
+
+		const push = async (run: () => Promise<void>, ms: number): Promise<string[]> => {
+			const from = recorder.workingMessages.length;
+			await run();
+			await delay(ms);
+			return recorder.workingMessages.slice(from);
+		};
+
+		await agentStart({}, ctx);
+
+		// —— 排除：Thinking + 三个工具态 —— 1s 窗口（足够影子穿过任何标签）里一帧都不该有压暗段。
+		// 这些断言与相位无关：被排除时永远 0 段；没被排除时 1s 内必然出现 >0。
+		for (const toolName of ["bash", "edit", "write"]) {
+			const frames = await push(async () => {
+				await toolStart({ toolCallId: toolName, toolName }, ctx);
+			}, 1_000);
+			assert.ok(frames.length > 0, `${toolName} 应该有文案`);
+			for (const message of frames) {
+				assert.equal(shadowedRunCount(message), 0, `${toolName} 态不该扫光，实际：${message}`);
+			}
+			await toolEnd({ toolCallId: toolName, toolName }, ctx);
+		}
+
+		const thinkingFrames = await push(async () => {
+			await messageUpdate({ assistantMessageEvent: { type: "thinking_start" } }, ctx);
+		}, 1_000);
+		assert.ok(thinkingFrames.length > 0, "Thinking 应该有文案");
+		for (const message of thinkingFrames) {
+			assert.ok(
+				message.replace(/\u001b\[[0-9;]*m/g, "").replace(/<[^>]+>/g, "").startsWith("Thinking"),
+				`这一段应该是 Thinking 态：${message}`,
+			);
+			assert.equal(shadowedRunCount(message), 0, `Thinking 态不该扫光，实际：${message}`);
+		}
+
+		// —— 保留：Reading 与 Working，必须看得到压暗段 ——
+		// 判据是「至少一段压暗」：`plain` 路径产生 0 个真彩段，`shaded` 至少 1 个。
+		await messageUpdate({ assistantMessageEvent: { type: "thinking_end" } }, ctx);
+		await toolStart({ toolCallId: "read-1", toolName: "read" }, ctx);
+		const readingFrames = await push(async () => {}, 1_200);
+		assert.ok(
+			readingFrames.some((message) => shadowedRunCount(message) >= 1),
+			`Reading 态应该扫光，实际：${JSON.stringify(readingFrames)}`,
+		);
+		await toolEnd({ toolCallId: "read-1", toolName: "read" }, ctx);
+
+		const workingFrames = await push(async () => {}, 1_200);
+		assert.ok(
+			workingFrames.some((message) => shadowedRunCount(message) >= 1),
+			`Working 态应该扫光，实际：${JSON.stringify(workingFrames)}`,
+		);
+
+		await shutdown({}, ctx);
+	} finally {
+		workspace.cleanup();
+	}
+});
+
+test("标签扫光跨状态连续：切标签时影子位置不重置到句首", { skip, timeout: 40_000 }, async () => {
+	const workspace = makeWorkspace();
+	try {
+		const extension = await loadExtension(workspace);
+		const { agentStart, shutdown } = handlersOf(extension);
+		const toolStart = extension.handlers.get("tool_execution_start")?.[0];
+		const toolEnd = extension.handlers.get("tool_execution_end")?.[0];
+		assert.ok(toolStart, "应该注册了 tool_execution_start");
+		assert.ok(toolEnd, "应该注册了 tool_execution_end");
+		const recorder: Recorder = { completes: [], workingMessages: [], resets: 0 };
+		const ctx = createContext(recorder, { themeOverride: createShadowTheme() });
+
+		await agentStart({}, ctx);
+		// 无工具态 = `Working`（7 列）。等影子扫到中段（4 列/秒 ⇒ 第 2 列约在 0.6s）。
+		await waitFor(() => (darkestColumnOf(recorder.workingMessages.at(-1) ?? "") ?? 0) >= 2, "影子走到中段", 8_000);
+		const columnBefore = darkestColumnOf(recorder.workingMessages.at(-1) ?? "");
+		assert.ok(columnBefore !== null && columnBefore >= 2, `切换前应已有影子，实际 ${columnBefore}`);
+
+		// 切成 `Reading`（仍在扫光名单里）。真实现用的是**回合时钟**，所以同一时刻的
+		// 影子列位不变 —— 这就是用户要的「扫到一半换状态，接着从这个位置扫」。
+		await toolStart({ toolCallId: "r1", toolName: "read" }, ctx);
+		const afterSwitch = recorder.workingMessages.at(-1) ?? "";
+		const afterPlain = afterSwitch.replace(/\u001b\[[0-9;]*m/g, "").replace(/<[^>]+>/g, "");
+		assert.ok(afterPlain.startsWith("Reading"), `应该已换成 Reading 标签：${afterPlain}`);
+		const columnAfter = darkestColumnOf(afterSwitch);
+		assert.ok(columnAfter !== null, "换标签后影子应该还在词上");
+		assert.ok(columnAfter >= columnBefore, `影子位置不能倒回去（之前 ${columnBefore}，之后 ${columnAfter}）`);
+
+		await toolEnd({ toolCallId: "r1", toolName: "read" }, ctx);
+		await shutdown({}, ctx);
+	} finally {
+		workspace.cleanup();
+	}
+});
 
 test("弹窗开始：spinner 冻结成单帧、读秒定时器停（1.2s 内无新文案）", { skip, timeout: 30_000 }, async () => {
 	const workspace = makeWorkspace();
@@ -1073,97 +1374,105 @@ test("watchdog 提示显示中新回合开始：立刻复位，不残留到下�
 });
 
 /**
- * 回合结束符（`turn-marker.ts` + `agent_settled` 里的 `showTurnMarker`）。用户 2026-10-07 定：
- * spinner 消失后原地留一行 `✻ <词> for <时长> · done <时刻>`，dim 色，只有正常完成的回合才画。
+ * 回合结束符（`turn-marker.ts` + `agent_settled` 里的 `writeTurnMarker`）。用户 2026-10-07 定：
+ * spinner 消失后留一行 `✻ <词> for <时长> · done <时刻>`，dim 色，只有正常完成的回合才写。
+ *
+ * 用户 2026-10-26 改：这一行从「编辑器上方的 widget」改成**会话条目**（`pi.appendEntry`），
+ * 于是它留在对话流里 —— 下一回合开始不再清掉（旧用例里那条 `agent_start 清掉` 的断言
+ * 就是这次需求的反面，已改写为「agent_start 不碰它」）。
  */
-test("正常完成：settle 画出结束符（✻ 词 + 时长 + 时刻，dim 色），agent_start 清掉", { skip, timeout: 30_000 }, async () => {
+test("正常完成：settle 写入结束符条目（✻ 词 + 时长 + 时刻，dim 色），下一回合开始也不消失", { skip, timeout: 30_000 }, async () => {
 	const workspace = makeWorkspace();
 	try {
-		const extension = await loadExtension(workspace);
+		const entries: Array<{ customType: string; data: unknown }> = [];
+		const extension = await loadExtension(workspace, createTestBus(), (customType, data) =>
+			entries.push({ customType, data }),
+		);
 		const { agentStart, agentBeforeSettle, agentSettled, shutdown } = handlersOf(extension);
 		const recorder: Recorder = { completes: [], workingMessages: [], resets: 0 };
-		const widgets: Array<{ key: string; content: unknown }> = [];
-		const ctx = createContext(recorder, { onWidget: (key, content) => widgets.push({ key, content }) });
+		const ctx = createContext(recorder);
 
 		await agentStart({}, ctx);
 		await agentBeforeSettle({ outcome: "completed" }, ctx);
 		await agentSettled({}, ctx);
 
-		const drawn = widgets.filter((w) => w.key === TURN_MARKER_WIDGET_KEY && w.content !== undefined);
-		assert.equal(drawn.length, 1, "settle 时应画一次结束符");
-		const colors: string[] = [];
-		const rendered = renderWidgetLines(drawn[0]?.content, (color, text) => {
-			colors.push(color);
-			return text;
-		});
-		assert.equal(rendered.length, 2, "两行：结束符 + 行尾空行（spinner 下方原本就有一条）");
-		const line = rendered[0] as string;
-		assert.equal(rendered[1], "", "第二行必须是空行 —— 否则结束符会和编辑器贴在一起、整块上移一格");
+		assert.equal(entries.length, 1, "settle 时应写一条结束符条目");
+		assert.equal(entries[0]?.customType, TURN_MARKER_ENTRY_TYPE, "customType 必须是会话日志里的识别符");
+		const data = entries[0]?.data as { text?: unknown };
+		assert.equal(typeof data?.text, "string", "data.text 存拼好的整行文案");
+		const text = data.text as string;
 		assert.ok(
-			TURN_MARKER_VERBS.some((verb) => line.startsWith(` ✻ ${verb} for `)),
-			`词必须来自词表：${line}`,
+			TURN_MARKER_VERBS.some((verb) => text.startsWith(`✻ ${verb} for `)),
+			`词必须来自词表：${text}`,
 		);
-		assert.match(line, /^ ✻ \S+ for \d+s · done \d{1,2}:\d{2} (AM|PM)$/);
-		assert.deepEqual(colors, ["dim"], "整行（含 ✻）走 dim 色槽（与 recap 的 `Recap:` 标签同档）");
+		assert.match(text, /^✻ \S+ for \d+s · done \d{1,2}:\d{2} (AM|PM)$/);
 
-		// 下一回合开始（agent_start）：结束符退场，让位给新的 spinner
-		widgets.length = 0;
-		await agentStart({}, ctx);
+		// 渲染器：单行、行首缩进一格、整行走 dim。
+		const rendered = renderEntryLines(extension, TURN_MARKER_ENTRY_TYPE, data);
+		assert.deepEqual(rendered, [` ${text}`], "渲染器只画一行（前导空行由 CustomEntryComponent 自带）");
 		assert.deepEqual(
-			widgets.map((w) => [w.key, w.content]),
-			[[TURN_MARKER_WIDGET_KEY, undefined]],
-			"agent_start 应清掉结束符",
+			entryRenderColors(extension, TURN_MARKER_ENTRY_TYPE, data),
+			["dim"],
+			"整行（含 ✻）走 dim 色槽（与 recap 的 `Recap:` 标签同档）",
 		);
-		await shutdown({}, ctx);
+
+		// 下一回合开始：条目是历史，不该被清（这正是这次需求的目的）。
+		const widgets: Array<{ key: string; content: unknown }> = [];
+		const ctx2 = createContext(recorder, { onWidget: (key, content) => widgets.push({ key, content }) });
+		await agentStart({}, ctx2);
+		assert.equal(entries.length, 1, "agent_start 不该再写 / 清任何条目");
+		assert.deepEqual(widgets, [], "结束符不再是 widget，agent_start 不该碰 widget 区");
+		await shutdown({}, ctx2);
 	} finally {
 		workspace.cleanup();
 	}
 });
 
-test("打断 / 报错收尾不画结束符（只有正常完成才画）", { skip, timeout: 30_000 }, async () => {
+test("打断 / 报错收尾不写结束符（只有正常完成的回合才写）", { skip, timeout: 30_000 }, async () => {
 	const workspace = makeWorkspace();
 	try {
-		const extension = await loadExtension(workspace);
+		const entries: Array<{ customType: string; data: unknown }> = [];
+		const extension = await loadExtension(workspace, createTestBus(), (customType, data) =>
+			entries.push({ customType, data }),
+		);
 		const { agentStart, agentBeforeSettle, agentSettled, shutdown } = handlersOf(extension);
 		const recorder: Recorder = { completes: [], workingMessages: [], resets: 0 };
-		const widgets: Array<{ key: string; content: unknown }> = [];
-		const ctx = createContext(recorder, { onWidget: (key, content) => widgets.push({ key, content }) });
+		const ctx = createContext(recorder);
 
 		for (const outcome of ["aborted", "error"] as const) {
 			await agentStart({}, ctx);
 			await agentBeforeSettle({ outcome }, ctx);
 			await agentSettled({}, ctx);
 		}
-		// 连 agent_before_settle 都没到（拿不到结局）时同样不画
+		// 连 agent_before_settle 都没到（拿不到结局）时同样不写
 		await agentStart({}, ctx);
 		await agentSettled({}, ctx);
 
-		assert.equal(
-			widgets.filter((w) => w.content !== undefined).length,
-			0,
-			"非 completed 的回合不该出现结束符",
-		);
+		assert.equal(entries.length, 0, "非 completed 的回合不该出现结束符");
 		await shutdown({}, ctx);
 	} finally {
 		workspace.cleanup();
 	}
 });
 
-test("无 UI（print / json 模式）不画结束符", { skip, timeout: 30_000 }, async () => {
+test("无 UI（print / json 模式）不写结束符，也不注册进模型上下文", { skip, timeout: 30_000 }, async () => {
 	const workspace = makeWorkspace();
 	try {
-		const extension = await loadExtension(workspace);
+		const entries: Array<{ customType: string; data: unknown }> = [];
+		const extension = await loadExtension(workspace, createTestBus(), (customType, data) =>
+			entries.push({ customType, data }),
+		);
 		const { agentStart, agentBeforeSettle, agentSettled, shutdown } = handlersOf(extension);
 		const recorder: Recorder = { completes: [], workingMessages: [], resets: 0 };
-		const widgets: Array<{ key: string; content: unknown }> = [];
-		const ctx = createContext(recorder, { onWidget: (key, content) => widgets.push({ key, content }) });
+		const ctx = createContext(recorder);
 		const headless = { ...(ctx as Record<string, unknown>), hasUI: false };
 
 		await agentStart({}, headless);
 		await agentBeforeSettle({ outcome: "completed" }, headless);
 		await agentSettled({}, headless);
 
-		assert.equal(widgets.length, 0, "无 UI 时不该碰任何 widget");
+		// 结束符是屏幕装饰：print / json / rpc 模式写进会话只会变成垃圾。
+		assert.equal(entries.length, 0, "无 UI 时不该写结束符条目");
 		await shutdown({}, headless);
 	} finally {
 		workspace.cleanup();
@@ -1171,21 +1480,23 @@ test("无 UI（print / json 模式）不画结束符", { skip, timeout: 30_000 }
 });
 
 /**
- * 有子代理在跑时不画结束符（用户 2026-10-08 要求）。
+ * 有子代理在跑时不写结束符（用户 2026-10-08 要求）。
  *
  * 病根：异步子代理脱离回合，主回合结束那一刻它还在后台跑，而结束符那行 `· done 8:04 AM`
  * 恰好贴在 pi-subagents 的 `async subagent · background` 块下面 —— 它断言「这轮真做完了」，
  * 但并没有。判据是 `../recap/subagents.ts` 的进程内 RPC 探测（`fleet.totalActive`）。
  */
-test("还有子代理在跑：不画结束符（探测走 pi-subagents 的 RPC）", { skip, timeout: 30_000 }, async () => {
+test("还有子代理在跑：不写结束符（探测走 pi-subagents 的 RPC）", { skip, timeout: 30_000 }, async () => {
 	const workspace = makeWorkspace();
 	try {
 		const bus = subagentBus(1);
-		const extension = await loadExtension(workspace, bus);
+		const entries: Array<{ customType: string; data: unknown }> = [];
+		const extension = await loadExtension(workspace, bus, (customType, data) =>
+			entries.push({ customType, data }),
+		);
 		const { agentStart, agentBeforeSettle, agentSettled, shutdown } = handlersOf(extension);
 		const recorder: Recorder = { completes: [], workingMessages: [], resets: 0 };
-		const widgets: Array<{ key: string; content: unknown }> = [];
-		const ctx = createContext(recorder, { onWidget: (key, content) => widgets.push({ key, content }) });
+		const ctx = createContext(recorder);
 
 		await agentStart({}, ctx);
 		await agentBeforeSettle({ outcome: "completed" }, ctx);
@@ -1193,38 +1504,32 @@ test("还有子代理在跑：不画结束符（探测走 pi-subagents 的 RPC�
 
 		assert.equal(bus.requests.length, 1, "settle 时应真的问过一次「还有子代理吗」");
 		assert.equal(bus.requests[0]?.method, "status", "探测走 status 方法");
-		assert.equal(
-			widgets.filter((w) => w.content !== undefined).length,
-			0,
-			"子代理还在跑就不该出现结束符（那行 done 此刻是假的）",
-		);
+		assert.equal(entries.length, 0, "子代理还在跑就不该写结束符（那行 done 此刻是假的）");
 		await shutdown({}, ctx);
 	} finally {
 		workspace.cleanup();
 	}
 });
 
-test("子代理都跑完了：照常画结束符", { skip, timeout: 30_000 }, async () => {
+test("子代理都跑完了：照常写结束符", { skip, timeout: 30_000 }, async () => {
 	const workspace = makeWorkspace();
 	try {
 		// totalActive = 0：对端在线但没活。
 		const bus = subagentBus(0);
-		const extension = await loadExtension(workspace, bus);
+		const entries: Array<{ customType: string; data: unknown }> = [];
+		const extension = await loadExtension(workspace, bus, (customType, data) =>
+			entries.push({ customType, data }),
+		);
 		const { agentStart, agentBeforeSettle, agentSettled, shutdown } = handlersOf(extension);
 		const recorder: Recorder = { completes: [], workingMessages: [], resets: 0 };
-		const widgets: Array<{ key: string; content: unknown }> = [];
-		const ctx = createContext(recorder, { onWidget: (key, content) => widgets.push({ key, content }) });
+		const ctx = createContext(recorder);
 
 		await agentStart({}, ctx);
 		await agentBeforeSettle({ outcome: "completed" }, ctx);
 		await agentSettled({}, ctx);
 
 		assert.equal(bus.requests.length, 1, "问过");
-		assert.equal(
-			widgets.filter((w) => w.key === TURN_MARKER_WIDGET_KEY && w.content !== undefined).length,
-			1,
-			"没有活跃子代理时结束符照常画",
-		);
+		assert.equal(entries.length, 1, "没有活跃子代理时结束符照常写");
 		await shutdown({}, ctx);
 	} finally {
 		workspace.cleanup();
@@ -1236,15 +1541,17 @@ test("子代理都跑完了：照常画结束符", { skip, timeout: 30_000 }, as
  * 没装 pi-subagents（无人应答）时结束符照常出，且只等一次超时就返回 —— 不能因为探测把
  * 回合收尾卡住。pi 的事件总线没有 listenerCount，探不到对端时只能等满这一次超时。
  */
-test("没装 pi-subagents：探测超时后照常画结束符，且不卡住", { skip, timeout: 30_000 }, async () => {
+test("没装 pi-subagents：探测超时后照常写结束符，且不卡住", { skip, timeout: 30_000 }, async () => {
 	const workspace = makeWorkspace();
 	try {
 		const bus = subagentBus(0, { reply: false });
-		const extension = await loadExtension(workspace, bus);
+		const entries: Array<{ customType: string; data: unknown }> = [];
+		const extension = await loadExtension(workspace, bus, (customType, data) =>
+			entries.push({ customType, data }),
+		);
 		const { agentStart, agentBeforeSettle, agentSettled, shutdown } = handlersOf(extension);
 		const recorder: Recorder = { completes: [], workingMessages: [], resets: 0 };
-		const widgets: Array<{ key: string; content: unknown }> = [];
-		const ctx = createContext(recorder, { onWidget: (key, content) => widgets.push({ key, content }) });
+		const ctx = createContext(recorder);
 
 		await agentStart({}, ctx);
 		await agentBeforeSettle({ outcome: "completed" }, ctx);
@@ -1258,11 +1565,7 @@ test("没装 pi-subagents：探测超时后照常画结束符，且不卡住", {
 			`应等满一次探测超时（等不到对端），实际 ${elapsed}ms`,
 		);
 		assert.ok(elapsed < PROBE_TIMEOUT_MS * 5, `不该无限等，实际 ${elapsed}ms`);
-		assert.equal(
-			widgets.filter((w) => w.key === TURN_MARKER_WIDGET_KEY && w.content !== undefined).length,
-			1,
-			"探测不到对端 = 当作没有子代理，结束符照常画（fail-open）",
-		);
+		assert.equal(entries.length, 1, "探测不到对端 = 当作没有子代理，结束符照常写（fail-open）");
 		await shutdown({}, ctx);
 	} finally {
 		workspace.cleanup();
@@ -1272,7 +1575,7 @@ test("没装 pi-subagents：探测超时后照常画结束符，且不卡住", {
 /**
  * 探测位置：放在 completed / startedAt 两道判断**之后**。
  *
- * 被打断 / 报错的回合本来就不画结束符，没必要为它白跑一次 RPC（更没必要让 ESC 之后多等
+ * 被打断 / 报错的回合本来就不写结束符，没必要为它白跑一次 RPC（更没必要让 ESC 之后多等
  * 一个超时）。
  */
 test("被打断 / 报错的回合不去探测子代理（探测在 completed 判断之后）", { skip, timeout: 30_000 }, async () => {
@@ -1299,19 +1602,24 @@ test("被打断 / 报错的回合不去探测子代理（探测在 completed 判
 
 /**
  * 探测是异步的（最多等一个超时），这段窗口里可能已经有**新回合**起来了 —— 子代理完成会
- * `triggerTurn` 唤醒一轮、用户也可能直接发下一句。`agent_start` 已经清掉 widget 并重开了
- * 表，所以探测回来后必须再验一次，否则结束符会盖在活 spinner 上方。
+ * `triggerTurn` 唤醒一轮、用户也可能直接发下一句。
+ *
+ * 旧 widget 方案在这种情况下必须放弃绘制（否则结束符会盖在活 spinner 上方）；现在写的是
+ * 会话条目 —— 它属于刚结束的那一轮，就算探测回来时新回合已经开始，也应照常写进历史。
+ * 这条用例钉的就是这个反转后的语义。
  */
-test("探测窗口内起了新回合：结束符不画（不盖在活 spinner 上）", { skip, timeout: 30_000 }, async () => {
+test("探测窗口内起了新回合：结束符照常写入历史（条目不再让位给 spinner）", { skip, timeout: 30_000 }, async () => {
 	const workspace = makeWorkspace();
 	try {
-		// totalActive = 0（本该画），但回包推后 150ms —— 正好让新回合插进这段窗口。
+		// totalActive = 0（本该写），但回包推后 150ms —— 正好让新回合插进这段窗口。
 		const bus = subagentBus(0, { delayMs: 150 });
-		const extension = await loadExtension(workspace, bus);
+		const entries: Array<{ customType: string; data: unknown }> = [];
+		const extension = await loadExtension(workspace, bus, (customType, data) =>
+			entries.push({ customType, data }),
+		);
 		const { agentStart, agentBeforeSettle, agentSettled, shutdown } = handlersOf(extension);
 		const recorder: Recorder = { completes: [], workingMessages: [], resets: 0 };
-		const widgets: Array<{ key: string; content: unknown }> = [];
-		const ctx = createContext(recorder, { onWidget: (key, content) => widgets.push({ key, content }) });
+		const ctx = createContext(recorder);
 
 		await agentStart({}, ctx);
 		await agentBeforeSettle({ outcome: "completed" }, ctx);
@@ -1321,11 +1629,7 @@ test("探测窗口内起了新回合：结束符不画（不盖在活 spinner �
 		await agentStart({}, ctx); // 新回合：子代理唤醒 / 用户发了下一句
 		await pending;
 
-		assert.equal(
-			widgets.filter((w) => w.key === TURN_MARKER_WIDGET_KEY && w.content !== undefined).length,
-			0,
-			"新回合已开始就不该再画上一轮的结束符",
-		);
+		assert.equal(entries.length, 1, "上一轮的结束符仍应写进历史，不能因为新回合开始就丢掉");
 		await shutdown({}, ctx);
 	} finally {
 		workspace.cleanup();

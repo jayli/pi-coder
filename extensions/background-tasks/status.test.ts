@@ -270,10 +270,10 @@ describe("formatBackgroundStatus — 结轮提示", () => {
 		assert.equal(line.includes(TURN_ENDED_NOTE), false);
 	});
 
-	it("第二行按 warning 着色，`└` 单独取 muted（结构字符不吃后面文案的颜色）", () => {
+	it("第二行按 warning 着色，`└` 单独取 dim（结构字符不吃后面文案的颜色）", () => {
 		const line = formatBackgroundStatus(painted, [longRunning], NOW, TERMINAL_LINGER_MS, settled)!;
 		const sub = line.split("\n")[1]!;
-		assert.equal(sub, `  muted(${NOTE_GLYPH}) warning(${TURN_ENDED_NOTE})`);
+		assert.equal(sub, `  dim(${NOTE_GLYPH}) warning(${TURN_ENDED_NOTE})`);
 	});
 
 	it("缺省阈值常量是 5s（用户 2026-09-29 定的）", () => {

@@ -240,12 +240,12 @@ test("reconstructGoal: 无条目 / 空条件 → 空状态", () => {
 // =============================================================================
 
 test("renderStatus: 无 goal 时给用法提示", () => {
-	assert.match(renderStatus(emptyGoal(), 0, config, 0), /没有设定/);
+	assert.match(renderStatus(emptyGoal(), 0, config, 0), /No \/goal is set/);
 });
 
 test("renderStatus: 有 goal 时给条件与计数", () => {
 	const text = renderStatus(activeGoal("所有测试通过"), 1_700_000_120_000, config, 3);
 	assert.match(text, /所有测试通过/);
-	assert.match(text, /续跑 3\/8/);
-	assert.match(text, /评估 0 轮/);
+	assert.match(text, /3\/8 auto-continuations/);
+	assert.match(text, /0 evaluations/);
 });

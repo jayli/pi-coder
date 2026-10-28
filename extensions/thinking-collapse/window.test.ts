@@ -15,6 +15,7 @@ import {
 	ELLIPSIS,
 	HEADER_LABEL,
 	ITALIC_OFF,
+	RIGHT_INSET,
 	buildThinkingWindow,
 	clipToTail,
 	countMarkdownHooks,
@@ -27,7 +28,7 @@ import {
 	truncateTail,
 } from "./window.ts";
 
-/** 一条真的 truecolor CSI（彩虹色的形状）：转义必须整条跳过它，不能往里面插反斜杠。 */
+/** 一条真的 truecolor CSI：转义必须整条跳过它，不能往里面插反斜杠。 */
 const CSI = "\u001b[38;2;149;174;43m";
 
 /** 假宽度函数：CJK 常见全角区间按 2 列，其余按 1 列。 */
@@ -332,9 +333,10 @@ describe("buildThinkingWindow", () => {
 
 	it("does not pad a short last paragraph up to a full line", () => {
 		// 短 thinking 不回填：行尾就是最新内容本身，不会把被顶出去的开头拉回来拼满
-		// 全 CJK：预算 33 列 = `…`(1) + 14 个「中」(28) + 段落逗号 `，`(2) + `短`(2)
+		// 全 CJK：宽度 40 扣掉右侧留白 3 列 = 37，正文预算 30 列
+		//   = `…`(1) + 12 个「中」(24) + 段落逗号 `，`(2) + `短`(2) = 29（第 13 个「中」要 2 列，只剩 1 列放不下）
 		const line = render("中".repeat(60) + "\n\n短", 40);
-		assert.equal(line, `${FIRST_PREFIX}${ELLIPSIS}${"中".repeat(14)}，短`);
+		assert.equal(line, `${FIRST_PREFIX}${ELLIPSIS}${"中".repeat(12)}，短`);
 		assert.ok(line.endsWith("短"), `行尾必须是最新内容：${JSON.stringify(line)}`);
 	});
 
@@ -385,6 +387,20 @@ describe("buildThinkingWindow", () => {
 		}
 	});
 
+	it("keeps the rendered line inside the right inset once the terminal is wide enough", () => {
+		// 宽终端上右侧留白生效：出口行不许碰到右边界（顶格减去 RIGHT_INSET 列）
+		const cases = ["a".repeat(200), "中文".repeat(80), "first para\n\n" + "中文English mixed 混排 ".repeat(20)];
+		for (const text of cases) {
+			for (const width of [20, 40, 80]) {
+				const line = render(text, width);
+				assert.ok(
+					widthOf(line) <= width - RIGHT_INSET,
+					`宽度 ${widthOf(line)} 顶到了右边界（应 ≤ ${width - RIGHT_INSET}）：${JSON.stringify(line)}`,
+				);
+			}
+		}
+	});
+
 	it("keeps backticks balanced inside the line so marked cannot merge lines", () => {
 		// 头部截断会切在 code span 中间：落单的闭合反引号必须被删掉
 		const text = "aaaa `inline code` bbbb\n\ncccc `another one` dddd";
@@ -404,8 +420,9 @@ describe("buildThinkingWindow", () => {
 
 	it("keeps the content budget narrower by the label width", () => {
 		const text = "abcdefghij";
-		// 标签 `Think: ` = 7 列，宽度 12 → 正文预算 5 → `…` + 4 个字符
-		assert.equal(render(text, 12), `${FIRST_PREFIX}…ghij`);
+		// 标签 `Think: ` = 7 列；宽度 12 扣留白 3 列 → 9 列（刚好放得下标签 + `…` + 1 列）
+		// → 正文预算 2 → `…` + 1 个字符
+		assert.equal(render(text, 12), `${FIRST_PREFIX}…j`);
 	});
 
 	it("drops the label instead of overflowing when the terminal is too narrow for it", () => {
@@ -423,88 +440,44 @@ describe("buildThinkingWindow", () => {
 });
 
 /**
- * 着色钩子（`/rainbow` 的接缝）。
+ * 右侧留白（用户 2026-10-27 定）：滚动行**不顶格**到右边界，可见长度收窄到「顶格 − 3 列」。
  *
- * 这里用**假着色器**：只往每个字符前面插一个标记转义，不真算颜色 —— 本文件要钉的是窗口层
- * 与着色层的**合约**，不是颜色值：
- *
- *   1. 着色后可见文本与不着色时逐字相同（否则宽度、截断、折行全部会变）；
- *   2. 窗口截断**先**算完，着色只拿得到窗口范围（所以色相才能按绝对序号算）；
- *   3. 着色拿到的 `dropped` 要在结果里真不见（被删的反引号不能又冒出来）。
+ * 留白只在放得下的时候扣：扣完 3 列还必须留得下「`Think: ` 标签 + `…` + 至少 1 列正文」，
+ * 否则宁可顶格 —— 窄终端上为了 3 列留白把标签挤掉是本末倒置。
  */
-describe("buildThinkingWindow colorize hook", () => {
-	/** 假着色器：把窗口范围内的可见字符逐字包上 `«»`，并回报它收到的坐标。 */
-	function makeColorizer() {
-		const calls: Array<{ from: number; to: number; dropped: number[] }> = [];
-		const fn = (line: string, from: number, to: number, dropped: readonly number[]): string => {
-			calls.push({ from, to, dropped: [...dropped] });
-			let out = "";
-			for (let i = from; i < to; i++) {
-				if (dropped.includes(i)) continue;
-				out += `«${line[i]}»`;
-			}
-			return out;
-		};
-		return { fn, calls };
-	}
-
-	const strip = (text: string): string => text.replace(/\u00ab|\u00bb/g, "");
-
-	it("keeps the visible text identical to the uncolored output", () => {
-		const cases: Array<{ text: string; width: number }> = [
-			{ text: "alpha beta gamma", width: 40 },
-			{ text: "中文思考内容", width: 30 },
-			{ text: "x".repeat(200), width: 24 },
-			{ text: "head `span` tail\n\n尾", width: 28 },
-		];
-		for (const { text, width } of cases) {
-			const plain = render(text, width);
-			const { fn } = makeColorizer();
-			const colored = buildThinkingWindow(text, width, widthOf, false, fn);
-			assert.equal(strip(colored), plain, `可见文本变了：${JSON.stringify(colored)}`);
-			assert.equal(colored.split("\n").length, 1, "仍然只能是一行");
-			assert.ok(widthOf(strip(colored)) <= width, "宽度不受着色影响");
-		}
+describe("buildThinkingWindow right inset", () => {
+	it("saturates three columns short of the right edge while scrolling", () => {
+		const width = 60;
+		const line = render("x".repeat(200), width);
+		assert.equal(widthOf(line), width - RIGHT_INSET, `应正好停在留白前：${JSON.stringify(line)}`);
 	});
 
-	it("passes the window range, not the whole line, once the head is clipped", () => {
-		const text = "one two three four five six seven eight nine ten";
-		const width = 24;
-		const { fn, calls } = makeColorizer();
-		buildThinkingWindow(text, width, widthOf, false, fn);
-		assert.equal(calls.length, 1, "着色器只应被调一次");
-		// 截断发生在**着色之前**：着色拿到的是窗口区间，不是整行
-		assert.ok(calls[0].from > 0, `被截断时 from 应大于 0：${JSON.stringify(calls)}`);
-		assert.ok(calls[0].from < calls[0].to, "区间不该为空");
+	it("clips the head three columns earlier than it used to", () => {
+		// 32 列正文：不扣留白时预算 33 列 ⇒ 全显示无 `…`；扣了留白预算 30 列 ⇒ 必须头部截断。
+		// 这条用例正是「留白真的生效了」的判别器（宽度断言在两种实现下都成立）。
+		const line = render("a".repeat(32), 40);
+		assert.ok(line.startsWith(FIRST_PREFIX + ELLIPSIS), `应提前头部截断：${JSON.stringify(line)}`);
+		assert.equal(widthOf(line), 40 - RIGHT_INSET);
+		assert.ok(line.endsWith("a"), `行尾仍是最新 token：${JSON.stringify(line)}`);
 	});
 
-	it("gives the full range when nothing is clipped", () => {
-		const { fn, calls } = makeColorizer();
-		buildThinkingWindow("short text", 40, widthOf, false, fn);
-		assert.deepEqual(calls, [{ from: 0, to: "short text".length, dropped: [] }]);
+	it("leaves a line alone that already fits inside the inset", () => {
+		// 短 thinking 本来就没到右边界，留白不该改变它一个字符
+		assert.equal(render("hello world", 40), `${FIRST_PREFIX}hello world`);
+		assert.equal(render("第一段\n\n第二段", 60), `${FIRST_PREFIX}第一段，第二段`);
 	});
 
-	it("reports dropped backticks whose characters must not reappear", () => {
-		// 头部截断会切在 code span 中间，切出来的落单反引号会被删；
-		// 着色器必须收到这些下标，并在结果里略过它们。
-		const text = "aaaa `inline code` bbbb cccc `another` dddd";
-		const { fn, calls } = makeColorizer();
-		const colored = buildThinkingWindow(text, 24, widthOf, false, fn);
-		assert.equal(calls.length, 1);
-		assert.ok(strip(colored).split("\n").length === 1, "仍然只能是一行");
-		assert.equal(strip(colored).replace(/[^`]/g, "").length % 2, 0, `反引号必须配对（or 全无）：${JSON.stringify(strip(colored))}`);
+	it("gives the inset up rather than dropping the Think: label", () => {
+		// 宽度 11：扣 3 列只剩 8，装不下「标签 7 + `…` 1 + 正文 1」⇒ 不扣留白，标签保住。
+		// 宽度 8 连标签都放不下 ⇒ 整条正文占满（这两格宽度下留白前的行为逐字不变）。
+		assert.equal(render("abcdefghij", 11), `${FIRST_PREFIX}${ELLIPSIS}hij`);
+		assert.equal(render("abcdefghij", 8), `${ELLIPSIS}defghij`);
 	});
 
-	it("falls back to uncolored text when the colorizer breaks the width contract", () => {
-		// 着色器是外部注入的：万一它多插了可见字符，宁可这一帧不着色也不能被 pi 折行。
-		const bad = () => "X".repeat(500);
-		const out = buildThinkingWindow("short text", 40, widthOf, false, bad);
-		assert.equal(strip(out), render("short text", 40));
-	});
-
-	it("returns the original markdown when there is nothing to colorize", () => {
-		const { fn, calls } = makeColorizer();
-		assert.equal(buildThinkingWindow("   \n\n ", 40, widthOf, false, fn), "   \n\n ");
-		assert.equal(calls.length, 0, "空内容不该调着色器");
+	it("applies the inset from the first width that can still hold the label", () => {
+		// 宽度 12：扣 3 列剩 9 = 标签 7 + `…` 1 + 正文 1，刚好够 ⇒ 留白生效、标签仍在
+		const line = render("abcdefghij", 12);
+		assert.ok(line.startsWith(FIRST_PREFIX), `标签应保住：${JSON.stringify(line)}`);
+		assert.ok(widthOf(line) <= 12 - RIGHT_INSET, `留白应生效：${JSON.stringify(line)}`);
 	});
 });

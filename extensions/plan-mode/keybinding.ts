@@ -60,12 +60,12 @@ export function rebindThinkingKey(raw: string, path = keybindingsPath()): { valu
 		try {
 			parsed = JSON.parse(raw);
 		} catch {
-			return { value: raw, outcome: { changed: false, path, reason: "配置不是合法 JSON，未改动", needsAttention: true } };
+			return { value: raw, outcome: { changed: false, path, reason: "config is not valid JSON, left untouched", needsAttention: true } };
 		}
 		if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
 			return {
 				value: raw,
-				outcome: { changed: false, path, reason: "配置不是 JSON 对象，未改动", needsAttention: true },
+				outcome: { changed: false, path, reason: "config is not a JSON object, left untouched", needsAttention: true },
 			};
 		}
 		config = parsed as Record<string, unknown>;
@@ -76,7 +76,7 @@ export function rebindThinkingKey(raw: string, path = keybindingsPath()): { valu
 		// 不写文件、也不提示（每次启动都提醒会变成噪音）。
 		return {
 			value: raw,
-			outcome: { changed: false, path, reason: `${THINKING_KEYBINDING_ID} 已有绑定，保持不动` },
+			outcome: { changed: false, path, reason: `${THINKING_KEYBINDING_ID} is already bound, leaving it alone` },
 		};
 	}
 

@@ -1,5 +1,5 @@
 {
-  "theme": "pi-coder-nightfox",
+  "theme": "pi-coder-1337",
   "defaultThinkingLevel": "xhigh",
   "compaction": {
     "enabled": true,
@@ -11,8 +11,9 @@
     "--config.node-linker=hoisted"
   ],
   "extensions": ["-builtin:codemode", "-builtin:tool-search"],
-  "defaultTools": ["read", "bash", "edit", "write", "grep", "find", "glob", "ls", "codemode", "tool_search"],
+  "defaultTools": ["read", "bash", "edit", "write", "grep", "glob", "find", "ls", "codemode", "tool_search"],
   "tuiMode": "regular",
+  "showHardwareCursor": true,
   "packages": [
     {
       "source": "npm:pi-web-access",
@@ -58,10 +59,10 @@
       },
       "reviewer": {
         "inheritProjectContext": false,
-        "tools": ["read", "grep", "find", "glob", "ls", "watchdog_diff", "contact_supervisor"]
+        "tools": ["read", "grep", "glob", "find", "ls", "watchdog_diff", "contact_supervisor"]
       },
       "scout": {
-        "tools": ["read", "grep", "find", "glob", "ls", "bash", "write", "contact_supervisor"]
+        "tools": ["read", "grep", "glob", "find", "ls", "bash", "write", "contact_supervisor"]
       }
     }
   }

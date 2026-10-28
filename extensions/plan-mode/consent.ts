@@ -1,6 +1,6 @@
 /**
- * plan-mode 两个弹框的**配色包装**：正文走 `text` 槽（= 皮肤的主前景色），
- * 标题与选项行仍归 pi 的 accent 上色。
+ * plan-mode 两个弹框的**正文包装**：正文装进线框（`frame.ts`）并走 `text` 槽
+ * （= 皮肤的主前景色），标题与选项行仍归 pi 的 accent 上色。
  *
  * ## 问题
  *
@@ -22,8 +22,18 @@
  * 代价：多出来的 `\x1b[39m` + 外层收尾的 `\x1b[39m` 在行尾重复一次 —— 只是重复的重置码，
  * 显示上无影响。
  *
- * 本模块不 import pi：主题的 `fg(slot, text)` 由调用方注入，所以 `node --test` 直接断言。
+ * ## 2026-10-27：正文从「平铺」改成「装进线框」
+ *
+ * 用户要求正文部分用线框框起来（此前是平铺的几段）。画的活全在 `frame.ts`（纯几何，
+ * 折行/量宽/上色都注入），本模块只决定**哪几段正文进框、标题与框之间留几行**。
+ * 批准弹框的计划正文同样进框 —— 它的截断预算在 `plan-text.ts`（`dialogPlanBudget`）
+ * 里按框吃掉的行列数扣减，两处口径必须一致。
+ *
+ * 本模块不 import pi：主题的 `fg(slot, text)`、折行与量宽都由调用方注入，所以
+ * `node --test` 直接断言。
  */
+
+import { frameBody, type FrameDeps } from "./frame.ts";
 
 /** 上色能力：只要 `fg`（pi 的 Theme 满足）。 */
 export interface BodyTheme {
@@ -46,32 +56,35 @@ export function paintBody(theme: BodyTheme, text: string): string {
 }
 
 /**
- * 同意弹框的 title：首行标题不涂（归组件的 accent），理由与两条路线说明走正文色。
+ * 同意弹框的 title：首行标题不涂（归组件的 accent），理由与两条路线说明装进线框。
  *
- * 形状与用户 2026-09-30 看到的一致：
+ * 形状（2026-10-27 起）：
  *
  * ```
  * 模型请求进入 plan mode（只读探索）。      ← accent（保留）
  *
- * 它的理由：……                              ← 正文色
- *
- * 进 plan mode（只读探索）：先只读探索、出方案，你批准后才动手   ← 正文色
- * 直接实施：跳过规划，现在就按你的指令直接改                      ← 正文色
+ * ┌──────────────────────────────────────────┐
+ * │ 它的理由：……                              │
+ * │                                          │
+ * │ 进 plan mode（只读探索）：……              │
+ * │ 直接实施：……                              │
+ * └──────────────────────────────────────────┘
  * ```
+ *
+ * 理由与路线说明在**同一个框里**、中间空一行：它们是同一次拍板要读的两段，一个框比两个框
+ * 少两条横线。没有理由时框里只剩路线说明。
  */
 export function buildConsentTitle(
 	theme: BodyTheme,
 	parts: { title: string; reason?: string; planLine: string; implLine: string },
+	frame: FrameDeps,
 ): string {
-	const body = parts.reason !== undefined && parts.reason !== "" ? `它的理由：${parts.reason}` : "";
-	return (
-		parts.title +
-		(body ? `\n\n${paintBody(theme, body)}` : "") +
-		`\n\n${paintBody(theme, `${parts.planLine}\n${parts.implLine}`)}`
-	);
+	const reason = parts.reason !== undefined && parts.reason !== "" ? `Its reason: ${parts.reason}` : "";
+	const body = `${reason}${reason === "" ? "" : "\n\n"}${parts.planLine}\n${parts.implLine}`;
+	return `${parts.title}\n\n${frameBody(theme, body, frame)}`;
 }
 
-/** 审批弹框的 title：`批准这个计划？` 留 accent，计划正文走正文色。 */
-export function buildApprovalTitle(theme: BodyTheme, plan: string): string {
-	return `批准这个计划？\n\n${paintBody(theme, plan)}`;
+/** 审批弹框的 title：`Approve this plan?` 留 accent，计划正文装进线框。 */
+export function buildApprovalTitle(theme: BodyTheme, plan: string, frame: FrameDeps): string {
+	return `Approve this plan?\n\n${frameBody(theme, plan, frame)}`;
 }

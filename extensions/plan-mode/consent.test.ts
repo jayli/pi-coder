@@ -1,21 +1,66 @@
 /**
- * Tests for consent.ts — 两个弹框的配色包装。
+ * Tests for consent.ts — 两个弹框的正文包装（线框 + 配色）。
  *
  * Run with:  node --test clients/pi/extensions/plan-mode/consent.test.ts
  *
- * 这里断言的是**结构**（哪段走了哪个色槽），不是观感：`painted` 主题把每段包成
- * `slot(text)`，于是能看出正文是 `text(...)` 而标题没有包裹（归组件的 accent）。
- * 真弹出时的呈现由 pi 的 ExtensionSelectorComponent 决定（已用真主题 + 真组件验证：
- * 正文渲染为 `#f8f8f2`、标题与高亮选项仍为 accent）。
+ * 这里断言的是**结构**（哪段走了哪个色槽、框封没封边、宽度对不对），不是观感：
+ * `painted` 主题把每段包成 `slot(text)`，于是能看出正文是 `text(...)`、边框是 `dim(...)`。
+ * 真弹出时的呈现由 pi 的 ExtensionSelectorComponent 决定（已用真主题 + 真组件验证）。
  */
 
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
 import { BODY_SLOT, buildApprovalTitle, buildConsentTitle, paintBody } from "./consent.ts";
+import { bodyTextWidth, type FrameDeps } from "./frame.ts";
 
 const plain = { fg: (_color: string, text: string) => text };
 const painted = { fg: (color: string, text: string) => `${color}(${text})` };
+
+function stripAnsi(text: string): string {
+	return text.replace(/\u001b\[[0-9;:?]*[a-zA-Z]/g, "");
+}
+
+/** 与 pi-tui `visibleWidth` 同口径：ANSI 不计，CJK / 全角算 2 列。 */
+function measure(text: string): number {
+	let width = 0;
+	for (const char of stripAnsi(text)) {
+		const code = char.codePointAt(0)!;
+		const wide =
+			(code >= 0x1100 && code <= 0x115f) ||
+			(code >= 0x2e80 && code <= 0xa4cf) ||
+			(code >= 0xac00 && code <= 0xd7a3) ||
+			(code >= 0xf900 && code <= 0xfaff) ||
+			(code >= 0xfe30 && code <= 0xfe6f) ||
+			(code >= 0xff00 && code <= 0xff60) ||
+			(code >= 0xffe0 && code <= 0xffe6);
+		width += wide ? 2 : 1;
+	}
+	return width;
+}
+
+/** 按可见宽度硬断（生产注入 pi-tui 的 wrapTextWithAnsi）。 */
+function wrap(text: string, width: number): string[] {
+	if (text === "") return [""];
+	const rows: string[] = [];
+	let current = "";
+	let used = 0;
+	for (const char of text) {
+		const charWidth = measure(char);
+		if (used + charWidth > width && used > 0) {
+			rows.push(current);
+			current = char;
+			used = charWidth;
+			continue;
+		}
+		current += char;
+		used += charWidth;
+	}
+	if (current !== "") rows.push(current);
+	return rows.length > 0 ? rows : [""];
+}
+
+const frame = (columns = 40): FrameDeps => ({ columns, wrap, measure });
 
 describe("paintBody", () => {
 	it("每行单独上色（逐行才有色码，整块只加一次开头会被 pi-tui 的行级重置丢掉）", () => {
@@ -36,70 +81,88 @@ describe("paintBody", () => {
 });
 
 describe("同意弹框的 title", () => {
-	it("首行标题不上色（归组件的 accent），理由与两条路线说明走正文色", () => {
-		const title = buildConsentTitle(painted, {
-			title: "模型请求进入 plan mode（只读探索）。",
-			reason: "跨三端配置",
-			planLine: "进 plan mode（只读探索）：先只读探索、出方案，你批准后才动手",
-			implLine: "直接实施：跳过规划，现在就按你的指令直接改",
-		});
-		assert.ok(title.startsWith("模型请求进入 plan mode（只读探索）。\n\n"), "标题行必须原样在最前");
+	const parts = {
+		title: "Plan mode:",
+		reason: "跨三端配置",
+		planLine: "Enter plan mode (read-only): explore read-only and propose a plan; work starts only after you approve",
+		implLine: "Implement directly: skip planning and act on your instruction now",
+	};
+
+	it("首行标题不上色（归组件的 accent），正文装进线框", () => {
+		const title = buildConsentTitle(painted, parts, frame());
+		assert.ok(title.startsWith("Plan mode:\n\n"), "标题行必须原样在最前");
 		assert.ok(!title.startsWith("accent("), "标题本身不该被本模块上色");
-		assert.match(title, /text\(它的理由：跨三端配置\)/);
-		assert.match(title, /text\(进 plan mode（只读探索）：先只读探索、出方案，你批准后才动手\)/);
-		assert.match(title, /text\(直接实施：跳过规划，现在就按你的指令直接改\)/);
+		const lines = title.split("\n");
+		assert.match(lines[2]!, /^dim\(┌─+┐\)$/, "标题空一行之后就是框的上边");
+		assert.match(lines[lines.length - 1]!, /^dim\(└─+┘\)$/);
 	});
 
-	it("没有理由时不留空段，标题直接接两条路线说明", () => {
-		const title = buildConsentTitle(painted, {
-			title: "模型请求进入 plan mode（只读探索）。",
-			planLine: "进 plan mode（只读探索）：先只读探索、出方案，你批准后才动手",
-			implLine: "直接实施：跳过规划，现在就按你的指令直接改",
-		});
-		assert.ok(!title.includes("它的理由"), title);
-		assert.equal(
-			title,
-			"模型请求进入 plan mode（只读探索）。\n\n" +
-				"text(进 plan mode（只读探索）：先只读探索、出方案，你批准后才动手)\n" +
-				"text(直接实施：跳过规划，现在就按你的指令直接改)",
-		);
+	it("理由与两条路线说明在同一个框里，中间空一行", () => {
+		const lines = buildConsentTitle(plain, parts, frame()).split("\n");
+		assert.equal(lines[2], "┌" + "─".repeat(bodyTextWidth(40) + 2) + "┐");
+		const body = lines.slice(3, -1);
+		const blank = body.findIndex((line) => /^│ +│$/.test(line));
+		assert.ok(blank > 0, "理由与路线说明之间要有一行留白");
+		assert.match(body[blank - 1]!, /Its reason: 跨三端配置/);
+		assert.match(body[blank + 1]!, /Enter plan mode/);
+	});
+
+	it("没有理由时框里只剩路线说明（不留空段）", () => {
+		const title = buildConsentTitle(plain, { ...parts, reason: undefined }, frame());
+		assert.ok(!title.includes("Its reason"));
+		const body = title.split("\n").slice(3, -1);
+		assert.ok(!body.some((line) => /^│ +│$/.test(line)), "不保留理由那一行的空白");
+		assert.match(body.join("\n").replace(/\s+/g, ""), /Enterplanmode.*Implementdirectly/, "两条路线都在，且紧挨着");
 	});
 
 	it("空字符串理由等同没有理由", () => {
-		const base = {
-			title: "模型请求进入 plan mode（只读探索）。",
-			planLine: "P",
-			implLine: "I",
-		};
-		assert.equal(buildConsentTitle(plain, { ...base, reason: "" }), buildConsentTitle(plain, base));
+		const base = { title: parts.title, planLine: parts.planLine, implLine: parts.implLine };
+		assert.equal(
+			buildConsentTitle(plain, { ...base, reason: "" }, frame()),
+			buildConsentTitle(plain, base, frame()),
+		);
 	});
 
-	it("纯文本主题下与原实现逐字一致（不改任何可见文本）", () => {
-		const title = buildConsentTitle(plain, {
-			title: "模型请求进入 plan mode（只读探索）。",
-			reason: "要改多个文件",
-			planLine: "进 plan mode（只读探索）：先只读探索、出方案，你批准后才动手",
-			implLine: "直接实施：跳过规划，现在就按你的指令直接改",
-		});
-		assert.equal(
-			title,
-			"模型请求进入 plan mode（只读探索）。\n\n" +
-				"它的理由：要改多个文件\n\n" +
-				"进 plan mode（只读探索）：先只读探索、出方案，你批准后才动手\n" +
-				"直接实施：跳过规划，现在就按你的指令直接改",
-		);
+	it("纯文本主题下只有边框与正文，没有多余空行", () => {
+		const title = buildConsentTitle(plain, parts, frame(40));
+		const lines = title.split("\n");
+		assert.equal(lines[0], parts.title);
+		assert.equal(lines[1], "", "标题与框之间空一行");
+		assert.match(lines[2]!, /^┌─+┐$/);
+		assert.equal(lines[lines.length - 1]!.startsWith("└"), true);
+	});
+
+	it("框撑满终端宽度：每一行可见宽度都等于列数", () => {
+		const lines = buildConsentTitle(plain, { ...parts, reason: "长".repeat(120) }, frame(60)).split("\n");
+		for (const line of lines.slice(2)) assert.equal(measure(line), 60, `宽度不一致：${line}`);
 	});
 });
 
 describe("审批弹框的 title", () => {
-	it("问题行留 accent，计划正文逐行走正文色", () => {
-		const title = buildApprovalTitle(painted, "# 方案\n\n改 `adapter/index.js`");
-		assert.equal(title, "批准这个计划？\n\ntext(# 方案)\n\ntext(改 `adapter/index.js`)");
-		assert.ok(!title.includes("accent("), "标题行不该被本模块上色（组件会给它 accent）");
+	it("问题行留 accent，计划正文装进线框", () => {
+		const title = buildApprovalTitle(painted, "# 方案\n\n改 `adapter/index.js`", frame());
+		assert.ok(title.startsWith("Approve this plan?\n\n"));
+		assert.ok(!title.startsWith("accent("), "标题行不该被本模块上色（组件会给它 accent）");
+		const lines = title.split("\n");
+		assert.match(lines[2]!, /^dim\(┌─+┐\)$/);
+		assert.match(lines[lines.length - 1]!, /^dim\(└─+┘\)$/);
 	});
 
-	it("多行计划每一行都有自己的色码（含 markdown 标题与空行）", () => {
-		const title = buildApprovalTitle(painted, "A\nB\n\nC");
-		assert.equal(title, "批准这个计划？\n\ntext(A)\ntext(B)\n\ntext(C)");
+	it("计划里的空行封边而不是断开框", () => {
+		const lines = buildApprovalTitle(plain, "A\n\nC", frame(40)).split("\n");
+		assert.equal(lines.length, 2 + 1 + 3 + 1, "标题 + 空行 + 上边 + 3 行正文 + 下边");
+		assert.match(lines[4]!, /^│ +│$/);
+		for (const line of lines.slice(2)) assert.equal(measure(line), 40);
+	});
+
+	it("长计划折行后每一片都封边，行数与内宽口径一致", () => {
+		const plan = "x".repeat(300);
+		const lines = buildApprovalTitle(plain, plan, frame(40)).split("\n");
+		assert.equal(lines.length, 2 + 1 + Math.ceil(300 / bodyTextWidth(40)) + 1);
+		for (const line of lines.slice(2)) assert.equal(measure(line), 40);
+	});
+
+	it("空计划不画框（只留问题行）", () => {
+		assert.equal(buildApprovalTitle(plain, "", frame()), "Approve this plan?\n\n");
 	});
 });

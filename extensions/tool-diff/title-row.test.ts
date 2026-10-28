@@ -1,11 +1,11 @@
 /**
- * Tests for title-row.ts — `Edit` / `Write` 标题行的纯排版（预算分配、按宽度截断、闪烁占位、行数缩略）。
+ * Tests for title-row.ts — `Edit` / `Write` 标题行的纯排版（预算分配、按宽度截断、状态圆点、行数缩略）。
  *
  * Run with:  node --test clients/pi/extensions/tool-diff/title-row.test.ts
  *
  * 被测模块不 import pi / pi-tui（宽度与截断函数都是注入的），所以这里喂假实现：
- * ASCII = 1 列、CJK = 2 列；`●`（U+25CF）与 `…` 都是 1 列 —— 与 pi-tui 的 `visibleWidth`
- * 已核对一致（`visibleWidth("●") === 1`）。主题的 `fg` 换成恒等函数，断言里直接看纯文本。
+ * ASCII = 1 列、CJK = 2 列；`•`（U+2022）、`⋮`、`…` 都是 1 列 —— 与 pi-tui 的 `visibleWidth`
+ * 已核对一致。主题的 `fg` 换成恒等函数，断言里直接看纯文本。
  */
 
 import assert from "node:assert/strict";
@@ -13,12 +13,16 @@ import { describe, it } from "node:test";
 
 import {
 	BLINK_MARKER,
+	DOT_MARKER,
 	ELLIPSIS,
+	PLACEHOLDER_PATH,
 	TitleRow,
-	blinkSuffix,
 	formatCount,
+	loadingSuffix,
+	pathPlaceholder,
 	shortenPath,
 	statsSuffix,
+	statusDot,
 	truncateStartToWidth,
 	type TitleRowDeps,
 	type TitleTheme,
@@ -68,46 +72,122 @@ const LONG_PATH =
 	"/Users/me/work/project/packages/renderer/src/components/inner/deep/deeper/deepest/final/renderer-impl.ts";
 
 function titleLine(path: string, suffix: string, width: number, rowDeps: TitleRowDeps = deps()): string {
-	return new TitleRow(rowDeps, plainTheme, "Write", path, suffix).render(width)[0] ?? "";
+	return new TitleRow(rowDeps, plainTheme, DOT_MARKER, "Write", path, suffix).render(width)[0] ?? "";
 }
 
-describe("blinkSuffix: 灭态等宽占位", () => {
-	it("keeps the same visible width in both phases so the path budget cannot move", () => {
-		assert.equal(widthOf(blinkSuffix(plainTheme, true)), 1);
-		assert.equal(widthOf(blinkSuffix(plainTheme, false)), 1);
-		assert.equal(widthOf(blinkSuffix(plainTheme, true)), widthOf(blinkSuffix(plainTheme, false)));
+describe("statusDot: 行首结局灯的色槽", () => {
+	/** 记录 fg 调用的主题 */
+	function recorder(): { theme: TitleTheme; calls: Array<[string, string]> } {
+		const calls: Array<[string, string]> = [];
+		return {
+			calls,
+			theme: {
+				fg: (color, text) => {
+					calls.push([color, text]);
+					return text;
+				},
+			},
+		};
+	}
+
+	it("paints pending dim and success / error with the diff green / red", () => {
+		for (const [state, slot] of [
+			["pending", "dim"],
+			["success", "toolDiffAdded"],
+			["error", "toolDiffRemoved"],
+		] as const) {
+			const { theme, calls } = recorder();
+			assert.equal(statusDot(theme, state), DOT_MARKER);
+			assert.deepEqual(calls, [[slot, DOT_MARKER]]);
+		}
 	});
 
-	it("renders the marker only while the phase is on (the dark phase is blank)", () => {
-		assert.equal(blinkSuffix(plainTheme, true), BLINK_MARKER);
-		assert.equal(blinkSuffix(plainTheme, false).trim(), "");
+	it("is one column wide and carries no trailing blank (the gap belongs to TitleRow)", () => {
+		assert.equal(widthOf(statusDot(plainTheme, "pending")), 1);
+		assert.equal(statusDot(plainTheme, "pending"), DOT_MARKER);
 	});
 });
 
-describe("TitleRow: 闪烁期间超长路径不摆动（回归）", () => {
-	it("renders the same line in both blink phases, modulo the marker itself", () => {
-		const on = titleLine(LONG_PATH, blinkSuffix(plainTheme, true), 90);
-		const off = titleLine(LONG_PATH, blinkSuffix(plainTheme, false), 90);
-		// 两态的唯一差别是标记字符 —— 修复前灭态是空串，预算每帧跳 2 列，
-		// 截断窗口跟着左右挪（`…ccccc` vs `…ccccccc`），观感就是"文件名也在闪"
-		assert.equal(on.replace(BLINK_MARKER, " "), off);
-		assert.equal(widthOf(on), widthOf(off));
+describe("pathPlaceholder: 路径未到时的占位符（用户 2026-10-28 定）", () => {
+	it("substitutes `files` only when the path is still empty", () => {
+		assert.equal(pathPlaceholder(""), PLACEHOLDER_PATH);
+		assert.equal(PLACEHOLDER_PATH, "files");
 	});
 
-	it("keeps the file name and the line width stable across a sweep of widths", () => {
-		for (let width = 40; width <= 140; width += 1) {
-			const on = titleLine(LONG_PATH, blinkSuffix(plainTheme, true), width);
-			const off = titleLine(LONG_PATH, blinkSuffix(plainTheme, false), width);
-			assert.ok(widthOf(on) <= width, `line wider than ${width}: ${JSON.stringify(on)}`);
-			assert.equal(on.replace(BLINK_MARKER, " "), off, `path moved at width ${width}`);
-			// 路径永远保留尾部：无论宽度多窄，文件名都能完整看到
-			assert.ok(on.replace(BLINK_MARKER, " ").trimEnd().endsWith("renderer-impl.ts"), `no file name at width ${width}`);
+	it("passes a real path through untouched", () => {
+		assert.equal(pathPlaceholder("src/index.ts"), "src/index.ts");
+	});
+
+	it("keeps the title line shaped `• Write files ●` while loading", () => {
+		const line = new TitleRow(deps(), plainTheme, DOT_MARKER, "Write", pathPlaceholder(""), loadingSuffix(plainTheme, true)).render(60)[0] ?? "";
+		assert.equal(line, ` ${DOT_MARKER} Write ${PLACEHOLDER_PATH} ${BLINK_MARKER}`);
+	});
+});
+
+describe("loadingSuffix: 载入中的闪烁标记", () => {
+	/** 记录 fg 调用的主题 */
+	function recorder(): { theme: TitleTheme; calls: Array<[string, string]> } {
+		const calls: Array<[string, string]> = [];
+		return {
+			calls,
+			theme: {
+				fg: (color, text) => {
+					calls.push([color, text]);
+					return text;
+				},
+			},
+		};
+	}
+
+	it("is `●` in the dim slot when lit, a single blank when dark", () => {
+		const on = recorder();
+		assert.equal(loadingSuffix(on.theme, true), BLINK_MARKER);
+		assert.deepEqual(on.calls, [["dim", BLINK_MARKER]]);
+
+		const off = recorder();
+		assert.equal(loadingSuffix(off.theme, false), " ");
+		assert.deepEqual(off.calls, [["dim", " "]]);
+	});
+
+	it("**keeps both phases one column** (otherwise the path window jitters every 500ms)", () => {
+		assert.equal(widthOf(loadingSuffix(plainTheme, true)), 1);
+		assert.equal(widthOf(loadingSuffix(plainTheme, false)), 1);
+		assert.notEqual(loadingSuffix(plainTheme, false), "", "灭态不能是空串（那样尾部宽度会掉 2 列）");
+	});
+});
+
+describe("TitleRow: 行首圆点", () => {
+	it("puts the dot in column 1 and the tool name from column 3", () => {
+		const line = titleLine("/Users/me/x.ts", "", 60);
+		assert.equal(line, ` ${DOT_MARKER} Write ~/x.ts`);
+		assert.equal(line.indexOf(DOT_MARKER), 1);
+		assert.equal(line.indexOf("Write"), 3);
+	});
+
+	it("omits the dot (and its gap) when handed an empty dot string", () => {
+		const line = new TitleRow(deps(), plainTheme, "", "Write", "/Users/me/x.ts", "").render(60)[0] ?? "";
+		assert.equal(line, " Write ~/x.ts");
+	});
+});
+
+describe("TitleRow: 长路径截断时行首不被挤得抖动（回归）", () => {
+	it("keeps the dot and the suffix intact while truncating the head of the path", () => {
+		const line = titleLine(LONG_PATH, statsSuffix(plainTheme, { added: 3, removed: 5 }), 90);
+		assert.ok(line.startsWith(` ${DOT_MARKER} Write `), line);
+		assert.ok(line.endsWith("(+3 -5)"), line);
+		assert.ok(line.includes(ELLIPSIS), line);
+		assert.equal(widthOf(line) <= 90, true, line);
+	});
+
+	it("keeps the line within the given width across a sweep of terminal widths", () => {
+		for (let width = 24; width <= 100; width += 1) {
+			const line = titleLine(LONG_PATH, statsSuffix(plainTheme, { added: 123456, removed: 9999 }), width);
+			assert.ok(widthOf(line) <= width, `line wider than ${width}: ${JSON.stringify(line)}`);
 		}
 	});
 
 	it("keeps the tail (file name) visible while dropping the head of a long path", () => {
-		const line = titleLine(LONG_PATH, blinkSuffix(plainTheme, true), 90);
-		assert.ok(line.startsWith(" Write "), line);
+		const line = titleLine(LONG_PATH, "", 90);
 		assert.ok(line.includes(ELLIPSIS), line);
 		assert.ok(line.includes("/final/renderer-impl.ts"), line);
 		assert.ok(!line.includes("/Users/me/work"), line);
@@ -123,16 +203,14 @@ describe("TitleRow: 工具名与尾部永远完整", () => {
 	});
 
 	it("falls back to whole-line truncation when the path budget runs out", () => {
-		const line = titleLine(LONG_PATH, blinkSuffix(plainTheme, true), 8);
-		assert.equal(widthOf(line) <= 8, true, line);
+		const line = titleLine(LONG_PATH, statsSuffix(plainTheme, { added: 3, removed: 0 }), 10);
+		assert.equal(widthOf(line) <= 10, true, line);
+		assert.ok(line.startsWith(` ${DOT_MARKER} `), line);
 		assert.ok(line.includes("Write"), line);
-		// 退回整行截断时两态同样只差标记：尾部是等宽空格，预算不会跳
-		const off = titleLine(LONG_PATH, blinkSuffix(plainTheme, false), 8);
-		assert.equal(line.replace(BLINK_MARKER, " "), off);
 	});
 
 	it("renders the streaming-start form (no path yet) without a dangling separator", () => {
-		assert.equal(titleLine("", blinkSuffix(plainTheme, true), 60).trimEnd(), " Write ●");
+		assert.equal(titleLine("", "", 60), ` ${DOT_MARKER} Write`);
 	});
 });
 
@@ -142,7 +220,7 @@ describe("TitleRow: 路径与缩进", () => {
 			...deps(),
 			indent: "   ",
 		});
-		assert.equal(line, "   Write ~/work/project/src/index.ts");
+		assert.equal(line, `   ${DOT_MARKER} Write ~/work/project/src/index.ts`);
 	});
 
 	it("colors the path with the text token, after truncation (ANSI never reaches the measurer)", () => {
@@ -153,7 +231,7 @@ describe("TitleRow: 路径与缩进", () => {
 				return text;
 			},
 		};
-		new TitleRow(deps(), recordingTheme, "Write", LONG_PATH, "").render(90);
+		new TitleRow(deps(), recordingTheme, "", "Write", LONG_PATH, "").render(90);
 		assert.equal(calls.length, 1);
 		assert.equal(calls[0]?.[0], "text");
 		assert.ok(calls[0]?.[1].startsWith(ELLIPSIS), calls[0]?.[1]);

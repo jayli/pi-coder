@@ -1,5 +1,5 @@
 /**
- * title-row.ts — `Edit` / `Write` 标题行（`Edit <path> (+3 -5)`）的纯排版逻辑。
+ * title-row.ts — `Edit` / `Write` 标题行（`• Edit <path> (+3 -5)`）的纯排版逻辑。
  * 工具名由调用方传入（`titleRow(theme, "Edit", …)`），本模块不认工具、只看宽度。
  *
  * 从 `tool-diff.ts` 抽出来的理由有两个：
@@ -7,12 +7,12 @@
  *   1. **可单测**。这段是纯字符串排版（预算分配 + 按宽度截断），却埋在 1300 多行、到处
  *      import pi 的 `tool-diff.ts` 里，`node --test` 根本 import 不进来。抽出后本模块
  *      **不 import pi / pi-tui**：宽度函数 `widthOf`、截断函数 `truncateToWidth`、home
- *      目录、缩进全部从 `deps` 注入（与 `working-summary.ts` 同一套做法），测试里喂一个
- *      ASCII=1 / CJK=2 的假量宽函数就能跑满每个分支。
- *   2. **「超长路径跟着闪烁一起抖」的现场就在这里**。路径预算按「可用宽度 − 工具名 −
- *      尾部」算，而流式期间尾部是那个闪烁的 `●` —— 亮 / 灭两态各自占 2 列和 0 列，于是
- *      每 500ms 预算变一次、路径的截断窗口跟着左右挪 2 列，看起来就是「文件名自己在闪」。
- *      修法见 `blinkSuffix`（灭态等宽占位）。
+ *      目录、缩进、状态圆点全部从外部注入（与 `working-summary.ts` 同一套做法），测试里
+ *      喂一个 ASCII=1 / CJK=2 的假量宽函数就能跑满每个分支。
+ *   2. **「尾部标记变化把路径挤得左右挪」的现场就在这里**。路径预算按「可用宽度 − 行首 −
+ *      工具名 − 尾部」算；行首（状态圆点 + 缩进）与尾部（`+N -M` / 闪烁 `●`）任何一处宽度
+ *      变化都会让截断窗口平移。所以行首按**实际字符串**量宽、尾部为 0 时整个省略；而闪灭
+ *      两态必须等宽（`loadingSuffix` 灭态是 1 格空格而不是空串），否则路径每 500ms 左右挪一次。
  *
  * 模块放在 `extensions/tool-diff/` 这个**同名目录**下（`tool-diff.ts` 与 `tool-diff/` 可以
  * 并存）：目录里没有 `index.ts`，而 pi 的加载器只认 `extensions/<name>.ts` 与
@@ -22,8 +22,31 @@
 
 /** 从头部截断时用的省略号。1 列宽。 */
 export const ELLIPSIS = "…";
-/** 流式加载中的标记字符。1 列宽（`visibleWidth("●") === 1`，已核对）。 */
+/** 标题行行首的状态圆点。1 列宽（`visibleWidth("•") === 1`，已核对）。 */
+export const DOT_MARKER = "•";
+/** 载入中的闪烁标记。1 列宽（`visibleWidth("●") === 1`，已核对，与 working-indicator 同源）。 */
 export const BLINK_MARKER = "●";
+/**
+ * 路径还没到时的占位符（用户 2026-10-28 定）：`• Write files ●`。
+ * 用 `text` 那个前景槽（与真路径同一槽），所以读起来就是「文件名位置」本身，不是灰掉的附注。
+ */
+export const PLACEHOLDER_PATH = "files";
+
+/** 路径为空就换成占位符 —— 唯一一处判定，两个工具共用。 */
+export function pathPlaceholder(path: string): string {
+	return path === "" ? PLACEHOLDER_PATH : path;
+}
+
+/**
+ * 载入中的闪烁标记（亮 / 灭两态，**恒 1 列**）。
+ *
+ * 灭态返回的是 1 格空格而不是空串：标题行的路径预算 = 可用宽度 − 行首 − 工具名 − 尾部，
+ * 尾部宽度只要每 500ms 抖一下，超长路径的截断窗口就会跟着左右挪，看上去是「标记在闪、
+ * 文件名也在闪」。色槽用 `dim`（与 working-indicator 的 bash `●` 同一个槽）。
+ */
+export function loadingSuffix(theme: TitleTheme, on: boolean): string {
+	return theme.fg("dim", on ? BLINK_MARKER : " ");
+}
 
 /** 渲染需要的主题子集（`Theme.fg` 的方法声明是**双变**的，真实 `Theme` 可直接赋值）。 */
 export interface TitleTheme {
@@ -55,16 +78,30 @@ export interface TitleRowDeps {
 }
 
 /**
- * 闪烁标记的着色尾部。**灭态返回等宽空格占位，绝不返回空串。**
+ * 工具块的结局灯三态（用户 2026-10-28 定）：
  *
- * 为什么不能返回空串：`TitleRow` 的路径预算 = 可用宽度 − 工具名 − 尾部（分隔空格 + 标记），
- * 尾部在「亮 = 2 列 / 灭 = 0 列」之间来回就是**预算每 500ms 跳 2 列**。路径短（装得下）时
- * 看不出来，路径长到需要截断时，截断窗口跟着一起左右挪 —— 实测每个闪烁周期里路径的前半段
- * （`…` 之后那截）和文件名的落点都会平移 2 列，观感是「标记在闪、文件名也在闪」。
- * 用空格占位后两态同宽，路径恒定，只有标记本身在亮灭。
+ *   pending —— 结果还没到（参数还在流、工具在执行、历史里没有结果的行）→ `dim` 灰
+ *   success —— 结果到了且不是错误 → `toolDiffAdded` 绿
+ *   error   —— 结果到了且 `isError` → `toolDiffRemoved` 红
+ *
+ * 槽位刻意不用 `success` / `error` 那两个语义槽，而是 diff 的绿 / 红：bash / read / glob /
+ * mcp / Explored 那几块的 `stateBarAnsi` 用的是同一组色，整条工具家族的圆点才同色
+ * （`success` 槽在本仓皮肤里偏青，摆在同一列里会像另一种灯）。
  */
-export function blinkSuffix(theme: TitleTheme, on: boolean): string {
-	return theme.fg("dim", on ? BLINK_MARKER : " ");
+export type ToolDotState = "pending" | "success" | "error";
+
+const DOT_SLOTS: Record<ToolDotState, string> = {
+	pending: "dim",
+	success: "toolDiffAdded",
+	error: "toolDiffRemoved",
+};
+
+/**
+ * 已着色的状态圆点（不带尾随空格 —— 圆点与工具名之间那一格由 `TitleRow` 统一补，
+ * 这样预算只算一处）。空串表示这一行不画点，工具名顶到行首。
+ */
+export function statusDot(theme: TitleTheme, state: ToolDotState): string {
+	return theme.fg(DOT_SLOTS[state], DOT_MARKER);
 }
 
 /**
@@ -139,9 +176,9 @@ export function truncateStartToWidth(
  * 标题行组件。用 `Text` 的话长路径会被折成两三行（工具名 / 路径 / 计数各一行），
  * 所以自己按宽度排版成**恒一行**。
  *
- * 排版优先级：工具名和尾部（`(+N -M)` / 闪烁的 `●`）**永远完整**，路径吃剩下的宽度、
- * 超宽时从头部截断。尾部是这一行的信息量所在，被截掉就失去意义了；只有窄到连一个
- * 字符的路径都放不下时，才退回整行尾部截断（至少保住工具名）。
+ * 排版：`<缩进><圆点> <工具名> <路径><尾部>`。优先级是工具名和尾部（`(+N -M)`）
+ * **永远完整**，路径吃剩下的宽度、超宽时从头部截断。尾部是这一行的信息量所在，被截掉
+ * 就失去意义了；只有窄到连一个字符的路径都放不下时，才退回整行尾部截断（至少保住工具名）。
  */
 export class TitleRow {
 	// 字段显式声明 + 构造里赋值，**不用参数属性**（`constructor(private readonly x)`）：
@@ -149,6 +186,8 @@ export class TitleRow {
 	// `node --test` 直接 import。
 	private readonly deps: TitleRowDeps;
 	private readonly theme: TitleTheme;
+	/** 已着色的状态圆点（空串 = 不画点，工具名顶到行首） */
+	private readonly dot: string;
 	/** 已着色的工具名 */
 	private readonly tool: string;
 	/** 纯文本路径（未着色）—— 先按宽度截断再上色，否则 ANSI 串会被截断逻辑当成可见字符 */
@@ -156,9 +195,17 @@ export class TitleRow {
 	/** 已着色的尾部 */
 	private readonly suffix: string;
 
-	constructor(deps: TitleRowDeps, theme: TitleTheme, tool: string, path: string, suffix: string) {
+	constructor(
+		deps: TitleRowDeps,
+		theme: TitleTheme,
+		dot: string,
+		tool: string,
+		path: string,
+		suffix: string,
+	) {
 		this.deps = deps;
 		this.theme = theme;
+		this.dot = dot;
 		this.tool = tool;
 		this.path = path;
 		this.suffix = suffix;
@@ -167,8 +214,10 @@ export class TitleRow {
 	render(width: number): string[] {
 		const { widthOf } = this.deps;
 		const indent = this.deps.indent ?? " ";
-		// 缩进占 1 列，所以正文的可用宽度要相应减 1，否则整行会超宽
-		const available = Math.max(1, width - widthOf(indent));
+		// 行首 = 缩进 [+ 圆点 + 一格间隔]。圆点不是装饰而是这一行的状态灯，宽度按真实字符串量，
+		// 可用宽度相应扣掉，否则整行会超宽（pi 的主屏渲染器遇到超宽行直接抛错）。
+		const lead = this.dot === "" ? indent : `${indent}${this.dot} `;
+		const available = Math.max(1, width - widthOf(lead));
 		const path = this.path === "" ? "" : shortenPath(this.path, this.deps.home ?? "");
 		const toolWidth = widthOf(this.tool);
 		// 尾部与路径各占一个分隔空格
@@ -179,12 +228,12 @@ export class TitleRow {
 			const fallback = [this.tool, path === "" ? "" : this.theme.fg("text", path), this.suffix]
 				.filter((part) => part !== "")
 				.join(" ");
-			return [indent + this.deps.truncateToWidth(fallback, available, ELLIPSIS)];
+			return [lead + this.deps.truncateToWidth(fallback, available, ELLIPSIS)];
 		}
 
 		const shown = this.theme.fg("text", truncateStartToWidth(path, pathBudget, widthOf));
 		const tail = this.suffix === "" ? "" : ` ${this.suffix}`;
-		return [indent + `${this.tool} ${shown}${tail}`];
+		return [lead + `${this.tool} ${shown}${tail}`];
 	}
 
 	invalidate(): void {}

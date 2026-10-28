@@ -58,14 +58,14 @@ test("formatGlobBody：expanded 时不折叠也没有提示", () => {
 	assert.equal(r.expandHint, null);
 });
 
-test("formatGlobBody：截断警告只报 limit", () => {
-	const r = formatGlobBody("a.ts", { expanded: false, expandKey: "ctrl+o", limit: 1000 });
-	assert.equal(r.warning, "[Truncated: 1000 results limit]");
+test("formatGlobBody：截断警告只报 limit（CC 的 Showing 行已在正文里，只进 details）", () => {
+	const r = formatGlobBody("a.ts", { expanded: false, expandKey: "ctrl+o", limit: 100 });
+	assert.equal(r.warning, "[Truncated: 100 results limit]");
 });
 
 test("formatGlobBody：截断警告两项都报", () => {
-	const r = formatGlobBody("a.ts", { expanded: false, expandKey: "ctrl+o", limit: 1000, truncated: true });
-	assert.equal(r.warning, "[Truncated: 1000 results limit, 50.0KB limit]");
+	const r = formatGlobBody("a.ts", { expanded: false, expandKey: "ctrl+o", limit: 100, truncated: true });
+	assert.equal(r.warning, "[Truncated: 100 results limit, 50.0KB limit]");
 });
 
 test("formatGlobBody：空结果不产生空行数组", () => {
@@ -78,4 +78,13 @@ test("formatGlobBody：不去掉尾随空行（正文原样切分）", () => {
 	// 只剥首尾整段空白行会让"最后一个路径"和提示行之间少一行，与内置 find 不一致。
 	const r = formatGlobBody("a.ts\nb.ts\n", { expanded: false, expandKey: "ctrl+o" });
 	assert.deepEqual(r.lines, ["a.ts", "b.ts"]);
+});
+
+test("formatGlobBody：CC 形状的 Showing 行不会被误判成路径", () => {
+	// 折叠态最后一行可能就是这句提示；它只是正文的一行，照常列出（不剥）。
+	const text = `a.ts\n(Showing 1 of 142 matching files; 141 more are not listed. Narrow the pattern or path to see the rest.)`;
+	const r = formatGlobBody(text, { expanded: false, expandKey: "ctrl+o", limit: 100 });
+	assert.equal(r.lines.length, 2);
+	assert.match(r.lines[1]!, /^\(Showing 1 of 142 matching files/);
+	assert.equal(r.warning, "[Truncated: 100 results limit]");
 });

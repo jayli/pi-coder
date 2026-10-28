@@ -47,30 +47,31 @@
  *   `renderShell: "self"` 与 `renderCall` / `renderResult` 写在展开**之后**，所以覆盖掉
  *   定义体自带的内置渲染器。
  *
- * 标题行的流式形态（与底部 spinner 分工）：
- *   流式中是 `Edit <path> ●` / `Write <path> ●` —— 闪烁的 `●` 表示「正在接收字节流」。
+ * 标题行的形态（用户 2026-10-28 定）：`• Edit <path> (+N -M)` —— 行首一颗状态圆点，
+ *   与 bash / read / glob / mcp / Explored 那几块同一张列位表（圆点在列 0、工具名从列 2 起）。
+ *   点色三态，`tool-diff/title-row.ts` 的 `statusDot`：结果未到（流式中、工具在执行、历史里
+ *   没有结果的行）`dim` 灰、结果到了且成功 `toolDiffAdded` 绿、结果到了且 `isError`
+ *   `toolDiffRemoved` 红。
+ *   载入中的闪烁 `●` 由用户 2026-10-28 第二轮**要求加回**（`loadingSuffix`）：参数还在流/
+ *   工具还在跑时行尾一颗 `dim` `●`，亮灭各 500ms，参数收完就消失。两个工具还有一处
+ *   用户同轮定的外形约束 —— **`Write` / `Edit` 后面一定要有东西**：路径还没解析出来时
+ *   用 `files` 顶位（`pathPlaceholder`，`text` 前景槽，与真路径同槽），路径一到就换成真路径，
+ *   而**不是**留一行 `• Write ●` 让人猜。闪灭两态恒 1 列，否则路径预算每 500ms 跳一格。
  *   工具名首字母大写（`Edit` / `Write`）而不是 pi 内置的小写 `edit` / `write`：本扩展仿的是
  *   Claude Code 的观感，那边的工具标题就是大写的；注册名不受影响，只是显示形态。
- *   token 数不在标题行滚动显示：底部 spinner 已经在数当前段的产出量
- *   （working-indicator/ 的 `↓ N tokens`），标题行再数一遍是重复信息。
- *   参数完成后 `●` 消失，恢复完整形态 `<path> (+N -M)`（新增绿 / 删除红，为 0 的一侧省略）。
  *   行数统计**只在标题行出现一次**：结果卡片里原本那行 `Added N lines, removed M lines`
- *   已经删掉，同一份改动不再报两遍。闪烁的驱动与三处停表见 `startBlink`。
- *   结果已到但 `argsComplete` 恒为 false 的行（中断的行、恢复历史会话渲染出来的行）
- *   靠 `isPartial` 识别，既不闪也不画标记 —— 否则整个历史区每行都会挂一个静态的 `●`；
- *   那种行照样算 `+N -M`（参数在会话日志里是完整的），否则历史区就彻底没有行数信息了。
+ *   已经删掉，同一份改动不再报两遍。
+ *   结果已到但 `argsComplete` 恒为 false 的行（中断的行、恢复历史会话渲染出来的行）照样算
+ *   `+N -M` —— 参数在会话日志里是完整的，否则历史区就彻底没有行数信息了。
  *
  * 标题行的路径**从头部**截断（`title-row.ts` 的 `truncateStartToWidth`）：
- *   超宽时保留路径尾部、把前面缩成一个 `…`（`Edit …ions/rewind/checkpoints.ts (+3 -5)`），
+ *   超宽时保留路径尾部、把前面缩成一个 `…`（`• Edit …ions/rewind/checkpoints.ts (+3 -5)`），
  *   而不是把行尾连同 `(+N -M)` 一起截掉 —— 文件名和改动量才是这一行要传达的信息，
- *   前面的目录基本是 cwd 的重复。尾部（`+N -M` / `●`）因此永远完整可见：可用宽度先扣掉
- *   工具名和尾部，剩下的才留给路径。
- *
- *   尾部宽度必须**每帧一样**，否则路径会跟着抖：闪烁标记灭态用等宽空格占位（不能返回空串，
- *   否则预算每 500ms 跳 2 列、超长路径的截断窗口跟着左右挪，看上去是「标记在闪、文件名
- *   也在闪」，实测过）；`+N -M` 里的五位数缩成 `k`（`(+10043 -11133)` → `(+10k -11.1k)`），
- *   免得两个大数把路径挤没。排版本身在 `tool-diff/title-row.ts`（纯逻辑、不 import pi，
- *   `node --test` 可直跑），本文件只负责把 pi-tui 的量度函数与主题接上去。
+ *   前面的目录基本是 cwd 的重复。尾部（`+N -M`）因此永远完整可见：可用宽度先扣掉
+ *   行首（缩进 + 圆点 + 一格）、工具名和尾部，剩下的才留给路径。
+ *   `+N -M` 里的五位数缩成 `k`（`(+10043 -11133)` → `(+10k -11.1k)`），免得两个大数把
+ *   路径挤没。排版本身在 `tool-diff/title-row.ts`（纯逻辑、不 import pi，`node --test`
+ *   可直跑），本文件只负责把 pi-tui 的量度函数与主题接上去。
  *
  * `+N -M` 的来源（renderCall 阶段，工具还没执行，拿不到结果里的 patch）：
  *   edit 逐条 `edits` 算 `generateUnifiedPatch(oldText, newText)` 再求和 —— 各处改动互不重叠，
@@ -125,16 +126,32 @@ import * as piTui from "@earendil-works/pi-tui";
 import { readFileSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { isAbsolute, resolve } from "node:path";
-// 标题行的排版（预算分配 / 截断 / 闪烁占位 / 行数缩略）在伴生目录 `tool-diff/` 里，
+// 标题行的排版（预算分配 / 截断 / 行数缩略 / 状态圆点 / 闪烁标记 / `files` 占位）在伴生目录 `tool-diff/` 里，
 // 那是个**无 `index.ts` 的纯模块目录**（pi 只加载 `extensions/<name>.ts` 与
 // `extensions/<name>/index.ts`，所以它不会被当成扩展）。
-import { TitleRow, blinkSuffix, shortenPath, statsSuffix, type TitleRowDeps } from "./tool-diff/title-row.ts";
+import {
+	TitleRow,
+	loadingSuffix,
+	pathPlaceholder,
+	statsSuffix,
+	statusDot,
+	type TitleRowDeps,
+	type ToolDotState,
+} from "./tool-diff/title-row.ts";
 // diff 底色自 pi 1.2.0 起改从**皮肤文件的 `vars`** 取（schema strict 化后自定义 colors
 // key 会让整份皮肤作废），见 theme-extra/colors.ts 的文件头。
 import { colorOpsFrom, type ColorOps, themeVarAnsi } from "./theme-extra/colors.ts";
 
-/** 折叠态最多渲染的 diff 行数 */
-const PREVIEW_MAX_LINES = 60;
+/**
+ * 折叠态最多渲染的 diff 行数，**两个工具分开算**（用户 2026-10-26 定）。
+ *
+ * 两个工具铺出来的东西形状不同，所以阈值不同：edit 通常只改几处、25 行足够看清改了
+ * 什么；write 常常是整份文件，15 行就够判断「在写哪个文件的什么内容」，再多只是刷屏。
+ * 超出的行不再渲染，由卡片下方那条 `… N more diff lines (ctrl+e to expand)` 提示
+ * 兜住 —— 那句话是唯一通向完整 diff 的入口，措辞保持不变。
+ */
+const EDIT_PREVIEW_MAX_LINES = 25;
+const WRITE_PREVIEW_MAX_LINES = 15;
 /**
  * 每处改动前后保留的上下文行数。
  *
@@ -208,31 +225,40 @@ const OLD_CONTENT_MAX_BYTES = 200_000;
  */
 const STATS_MAX_CHARS = 200_000;
 
-/** 流式加载中标记的闪烁间隔（ms）：亮 / 灭各占一个间隔，所以周期是它的两倍 */
+/**
+ * 载入中闪烁标记的间隔（ms）：亮 / 灭各占一个间隔，所以周期是它的两倍。
+ * 与 working-indicator 的 bash `●` 同节拍（`BASH_SPINNER_BLINK_MS`）。
+ */
 const BLINK_INTERVAL_MS = 500;
 /** 闪烁 tick 上限（≈5 分钟）：没有别的信号能停表时的兜底，见 `startBlink` */
 const BLINK_MAX_TICKS = 600;
 
 /**
- * 标题行与单行提示（Editing… / Applied / Error / no changes）的前导缩进。
- * 工具行原本顶格，跟上方 assistant 文本齐平看不出层次；缩一格后标题 / 提示 / 卡片
- * 形成层级，也和 pi 内置 Box 内容的 paddingX=1 观感一致。
+ * 标题行的行首缩进 —— **空串**：圆点直接坐在列 0（与 bash / read / glob / mcp / Explored
+ * 那几块同一张列位表），工具名从列 2 起。早期版本这里补一格缩进给 `Edit` 用，但加圆点后
+ * 那样圆点就会落在列 1、与整条工具家族的圆点列对不齐（用户 2026-10-28 的样图也是顶格）。
  */
-const INDENT = " ";
+const INDENT = "";
 
 /**
- * diff 行与 hunk 分隔行（`┄`）的前导缩进 —— 对齐 codex 的 diff 观感。
- * codex 的行号列不顶格，整块 diff 相对工具标题往里缩；这里只缩 1 列，和标题 /
- * 提示行的 INDENT 一致 —— 试过 4 列（codex 原样），但窄终端里代码区会被吃掉太多列，
- * 折行明显变多，1 列是层次感与可用宽度的折中。
- * add / del 行的这一格换成竖线 `▏`（见 `DIFF_BAR`），ctx 行仍是缩进空格。
- * 上下边框（`╌`）**不**跟着缩进 —— 见 `dashedRule`。
+ * diff 行 / hunk 分隔行 / 折叠提示行的前导缩进 —— 对齐 codex 的 diff 观感。
+ *
+ * 用 **2 列**（用户 2026-10-28 定；当天先试过 3 列、再按「竖线后只留一个空格」收窄到 2）：
+ * **首格**留给竖线 `▏`（见 `DIFF_BAR`），add / del 行画它、ctx 行仍是空格，所以竖线与行号之间
+ * 只剩下一格。行号槽的右侧与 `⋮` 的列位都由 `gutterWidthOf` 推出。
+ * 试过 4 列（codex 原样），但窄终端里代码区会被吃掉太多列，折行明显变多。
  */
-const DIFF_INDENT = " ";
+const DIFF_INDENT = "  ";
+/**
+ * hunk / 空档分隔行的字形（用户 2026-10-28 定）：一整行 `┄` 换成**一颗竖着的三点**，
+ * 列位与 `+` / `-` 号相同（行号槽之后、符号列之前各借一格，见 `layoutRows`）。
+ * 早先是铺满整行的虚线框上下＋满行 `┄` 分隔，观感太重，现在卡片没有任何横线。
+ */
+const HUNK_SEPARATOR = "\u22EE";
 /**
  * 新增 / 删除行行首的竖线字形：`▏`（U+258F，左侧八分之一块）—— 与 `user-message-bar` 同一字形。
  *
- * 它占的正是 `DIFF_INDENT` 那一格（两者都是 1 列），所以整行宽度、行号槽位置、代码列与折行
+ * 它占的正是 `DIFF_INDENT` 的**首格**（两者都是 1 列），所以整行宽度、行号槽位置、代码列与折行
  * 宽度全都与没有竖线时逐列相同 —— 底色照旧从第 0 列铺满，竖线坐在底色上，颜色取该侧的
  * **行号前景色**（`toolDiffAdded` / `toolDiffRemoved`，与行号、+- 号同一个槽）。
  * 竖线自带 `FG_RESET`（只重置前景），不会把整行底色清掉 —— 与行号槽里其它前景色收尾同一条纪律。
@@ -293,11 +319,14 @@ function gutterWidthOf(numWidth: number): number {
 }
 
 /**
- * 行首那一格：add / del 行是竖线（`fg` 传该侧的行号前景色），ctx 行仍是一格缩进空格。
- * 两种形状都是 1 列，所以 `gutterWidthOf` 不用为它加宽。
+ * 行首那一段（与 `DIFF_INDENT` **逐列同宽**）：add / del 行把**首格**换成竖线（`fg` 传该侧的
+ * 行号前景色），剩下的缩进空格照旧；ctx 行整段是空格。
+ *
+ * 两者宽度必须相等，否则 `gutterWidthOf` 按 `DIFF_INDENT.length` 算出来的槽位与实际画出来的行
+ * 差几列，整行的底色 / 补白就会短一截（pi 的主屏渲染器会因为行宽不一致把卡片重排）。
  */
 function leadingCell(type: DiffLineType, fg: string): string {
-	return type === "add" || type === "del" ? `${fg}${DIFF_BAR}${FG_RESET}` : DIFF_INDENT;
+	return type === "add" || type === "del" ? `${fg}${DIFF_BAR}${FG_RESET}${DIFF_INDENT.slice(1)}` : DIFF_INDENT;
 }
 
 /** 空白行号槽：折行续行用（不显示行号和 +- 号，只保留底色与行首竖线） */
@@ -315,6 +344,9 @@ interface WordRanges {
  * pi 的 `context.state` 每个工具行一份（tool-execution.js 的 `rendererState`），
  * renderCall / renderResult 共用同一个对象 —— 所以定时器句柄挂在这里，
  * 另一个 slot 才清得掉它。
+ *
+ * `blinkTimer` 三态：`undefined` = 从来没起过、`null` = 停表了、否则 = 在跑的句柄。
+ * 两个工具都靠这三个值区分「未启动 / 已停止」，不要在别处另立开关。
  */
 interface BlinkFields {
 	blinkOn?: boolean;
@@ -330,6 +362,8 @@ interface DiffStats {
 
 /**
  * 行级共享状态：闪烁字段 + 标题行统计缓存（edit / write 共用）。
+ * pi 的 `context.state` 每个工具行一份（tool-execution.js 的 `rendererState`），
+ * renderCall / renderResult 共用同一个对象。
  *
  * `stats` 三态：`undefined` = 还没算过，`null` = 算过但算不出来（超大文本 / diff 报错），
  * 否则 = 结果。`null` 也要存下来，不然算不出来的那些行每帧都会重跑一遍 diff。
@@ -408,7 +442,7 @@ function parsePatch(patch: string): ParsedDiff {
  * `EditToolDetails.patch`（上下文行数由 pi 内部固定成 4），扩展改不了它的生成参数。
  * write 的 patch 虽然是本文件自己调 `generateUnifiedPatch` 算的、可以直接传
  * `CONTEXT_LINES`，但 jsdiff 会按新的上下文值**重新切 hunk**（空档 > 2×context 才断开），
- * 于是同样的空档在 edit 里是一条 `┄`、在 write 里变成两条 —— 所以两个工具都走这一条
+ * 于是同样的空档在 edit 里是一颗 `⋮`、在 write 里变成两颗 —— 所以两个工具都走这一条
  * 收窄路径，观感才一致。
  *
  * 规则（与 unified diff 的语义对齐）：
@@ -942,11 +976,18 @@ function layoutRows(s: Sgr, rows: readonly PreparedRow[], width: number, gutterW
 	// 槽位 = 缩进(DIFF_INDENT) + 行号(gutterWidth) + 空格(1) + 符号(1) + 空格(1)
 	const prefixWidth = gutterWidthOf(gutterWidth);
 	const contentWidth = Math.max(1, width - prefixWidth);
+	// 符号（`+` / `-` / `⋮`）所在的列，从第 0 列算起：缩进 + 行号槽 + 一空格。
+	// 分隔行的 `⋮` 就落在这里 —— 用户 2026-10-28 定：与 `+/-` 同列。
+	const signColumn = prefixWidth - 2;
 	const out: string[] = [];
 
 	for (const row of rows) {
 		if (row.kind === "sep") {
-			out.push(`${DIFF_INDENT}${s.FG_RULE}${"┄".repeat(Math.max(0, width - DIFF_INDENT.length))}${FG_RESET}`);
+			// 整行 `┄` → 一颗 `⋮`（用户 2026-10-28 定）：前缀只留空格，`⋮` 用 dim 槽，行尾补空格到满宽
+			// （pi 的主屏渲染器要求每行不多不少正好 width 列）。
+			const marker = `${s.FG_RULE}${HUNK_SEPARATOR}${FG_RESET}`;
+			const padWidth = Math.max(0, width - signColumn - 1);
+			out.push(" ".repeat(signColumn) + marker + " ".repeat(padWidth));
 			continue;
 		}
 
@@ -960,7 +1001,7 @@ function layoutRows(s: Sgr, rows: readonly PreparedRow[], width: number, gutterW
 		// 所以行号槽、代码列、折行位置都不动。
 		const lead = leadingCell(row.type, signFg);
 		const gutterText = `${lead}${numFg}${row.numText}${FG_RESET} ${signFg}${row.sign}${FG_RESET} `;
-		// 底色从**整行最左侧**开始下（含 DIFF_INDENT 那 1 列），槽位内部一律只用 FG_RESET
+		// 底色从**整行最左侧**开始下（含 `DIFF_INDENT` 那两列），槽位内部一律只用 FG_RESET
 		// （只重置前景）收尾，所以行号 / 符号的收尾不会把底色清掉 —— 缩进 + 行号槽 + 代码区
 		// 连成一条完整的底色带，而不是只有代码区有底色。
 		const gutter = bg === "" ? gutterText : bg + gutterText;
@@ -994,15 +1035,6 @@ function layoutRows(s: Sgr, rows: readonly PreparedRow[], width: number, gutterW
 }
 
 /**
- * 上下虚线框：**顶格**、铺满整行宽度 —— 它是卡片的边框而不是 diff 内容，所以不跟
- * diff 行的缩进走（缩进后框会比内容窄一列，看上去像框没合拢）。宽度直接取 width，
- * 不减缩进。
- */
-function dashedRule(s: Sgr, width: number): string {
-	return `${s.FG_RULE}${"╌".repeat(Math.max(0, width))}${FG_RESET}`;
-}
-
-/**
  * 结果卡片组件。`render(width)` 每帧都会调，所以按宽度缓存排版结果；
  * 语法高亮在构造时就算好了（宽度无关），不会每帧重跑。
  */
@@ -1029,21 +1061,21 @@ function buildDiffCard(
 	diff: ParsedDiff,
 	language: string | undefined,
 	expanded: boolean,
+	previewMaxLines: number,
 ): DiffCard {
 	const s = buildSgr(theme);
-	const maxLines = expanded ? EXPANDED_MAX_LINES : PREVIEW_MAX_LINES;
+	const maxLines = expanded ? EXPANDED_MAX_LINES : previewMaxLines;
 	const visible = diff.lines.slice(0, maxLines);
 	const hidden = diff.lines.length - visible.length;
 	const gutterWidth = Math.max(2, String(maxLineNumber(visible)).length);
 	const rows = prepareRows(s, visible, language, gutterWidth);
 
 	return new DiffCard((width: number) => {
-		// 行数统计已经搬到标题行的 `(+N -M)`，卡片直接从上下虚线框开始，
-		// 不再多一行 `Added N lines, removed M lines` 把同一份改动报两遍。
+		// 卡片**没有任何横线**（用户 2026-10-28 定）：既没有上下那两条 `╌` 虚线框，也没有满行
+		// `┄` 分隔（hunk / 空档一律是一颗 `⋮`，见 `layoutRows`）；行数统计已经搬到标题行的
+		// `(+N -M)`，不再多一行 `Added N lines, removed M lines` 把同一份改动报两遍。
 		if (rows.length === 0) return [];
-		const out: string[] = [dashedRule(s, width)];
-		out.push(...layoutRows(s, rows, width, gutterWidth));
-		out.push(dashedRule(s, width));
+		const out: string[] = layoutRows(s, rows, width, gutterWidth);
 		if (hidden > 0) {
 			// 提示行没有底色可以靠 padding 占位，文本长了就会直接超宽，所以按宽度截断
 			out.push(
@@ -1111,26 +1143,30 @@ function cachedStats(state: RowState | undefined, compute: () => DiffStats | und
 	return state.stats ?? undefined;
 }
 
+/**
+ * 标题行的结局灯（用户 2026-10-28 定）：结果没到 → `pending`（灰）、结果到了 → 按
+ * `isError` 分绿 / 红。
+ *
+ * 两个 renderer 用**同一个判定**，所以标题行的点与结果行的点不会打架。
+ * `isPartial` 的语义由 pi 给（`updateResult` 之后才变 false，tool-execution.js），
+ * 它在「参数还在流」与「工具执行中」两种形态下都是 true —— 这正是「结果还没到」。
+ * 历史会话里那些没有结果的行（中途被杀、`renderSessionItems` 不调 setArgsComplete）
+ * 也停在 true，于是点是灰的而不是假绿：不以「不知道」冒充「成功」。
+ */
+function dotState(context: { isPartial?: boolean; isError?: boolean }): ToolDotState {
+	if (context.isPartial !== false) return "pending";
+	return context.isError === true ? "error" : "success";
+}
 
 /**
- * 流式期间让标题尾部的 `●` 闪烁，返回当前相位（true = 亮）。
+ * 起（或继续）闪烁计时器，返回**当前这一帧**该不该亮。
  *
- * 为什么用定时器而不是「跟着 delta 闪」：pi 的 tool-execution.js 里
- * `context.invalidate()` = `ToolExecutionComponent.invalidate()`（→ `updateDisplay()`
- * 重新调用 renderCall）+ `ui.requestRender()`，所以翻相位 + invalidate 就能自己驱动
- * 重绘 —— 节拍固定，不受 delta 到达节奏影响（delta 停一会儿也不会僵在某一相位上）。
+ * 句柄挂在 `context.state` 上（renderCall / renderResult 共享同一份），所以结果一到、
+ * 另一个 slot 就能把它停掉。`state` 拿不到时调用方按「常亮」处理 —— 宁可静态一点也不丢提示。
  *
- * 停表有三处（前两处是正常路径，第三处是兜底）：
- *   1. renderCall 的 `argsComplete` 分支（参数流结束）；
- *   2. `renderResult`（结果已到）。它也覆盖中断 / 报错的行 —— interactive-mode.js 在
- *      `stopReason=aborted|error` 时对所有 pending 行调 `updateResult`，而不是
- *      `setArgsComplete`，所以那种行永远走不到 1；
- *   3. tick 上限。兜的是「行既没有结果、也永远等不到 argsComplete」：例如会话在工具
- *      调用中途被杀掉后恢复，那一行的 stopReason 不是 aborted/error、也没有 toolResult。
- *      （有结果的历史行不走这条：renderCall 的 `isPartial` 分支当场就把表停了。）
- *      正常单轮 write/edit 的参数流远不到这个上限。
- *
- * `unref()` 让定时器不阻止进程退出。
+ * `unref` 是必须的：这是一个纯 UI 节拍，不能因为它没停而把进程钉在事件循环里。
+ * 上限 `BLINK_MAX_TICKS`（≈5 分钟）兼做兜底：万一哪个结果路径没有调到 `stopBlink`，
+ * 节拍也会自己停下来，而不是一直空转重绘。
  */
 function startBlink(state: BlinkFields, invalidate: () => void): boolean {
 	if (state.blinkTimer === undefined || state.blinkTimer === null) {
@@ -1151,7 +1187,7 @@ function startBlink(state: BlinkFields, invalidate: () => void): boolean {
 	return state.blinkOn !== false;
 }
 
-/** 停掉闪烁定时器并回到灭态。幂等 —— 没起过定时器时调用也安全。 */
+/** 停表：结果已到（含报错 / 中断）就该熄灯。幂等 —— 两个 slot 都会调它。 */
 function stopBlink(state: BlinkFields | undefined): void {
 	if (state === undefined) return;
 	if (state.blinkTimer !== undefined && state.blinkTimer !== null) clearInterval(state.blinkTimer);
@@ -1159,11 +1195,10 @@ function stopBlink(state: BlinkFields | undefined): void {
 	state.blinkOn = false;
 }
 
-
 /**
- * 标题行。path 传空串就整段省略（流式开头路径还没解析出来时的形态是 `Edit ●`），
- * suffix 传空串就省略。suffix 必须是**已着色**的串 —— 闪烁标记要单独上色，而
- * `theme.fg("dim", 已着色串)` 的外层 reset 会把内层 ANSI 一起吃掉。
+ * 标题行。path 传空串就整段省略，suffix 传空串就省略。
+ * dot / suffix 必须是**已着色**的串 —— 两者各自上色，
+ * 而 `theme.fg("dim", 已着色串)` 的外层 reset 会把内层 ANSI 一起吃掉。
  * path 相反，传**纯文本**：`TitleRow.render` 要先按宽度从头部截断再上色。
  *
  * 排版依赖显式接上 pi-tui 的量度/截断函数（纯模块那头不知道 pi 的存在），
@@ -1176,20 +1211,28 @@ const TITLE_ROW_DEPS: TitleRowDeps = {
 	indent: INDENT,
 };
 
-function titleRow(theme: Theme, tool: string, path: string, suffix: string): TitleRow {
-	return new TitleRow(TITLE_ROW_DEPS, theme, theme.fg("toolTitle", theme.bold(tool)), path, suffix);
+function titleRow(theme: Theme, tool: string, path: string, suffix: string, dot: ToolDotState): TitleRow {
+	return new TitleRow(
+		TITLE_ROW_DEPS,
+		theme,
+		statusDot(theme, dot),
+		theme.fg("toolTitle", theme.bold(tool)),
+		path,
+		suffix,
+	);
 }
 
 /** 单行提示（Editing… / Error / Applied / Written / no changes）。
  *  和结果卡片占同一个视觉位置，所以也带同样的缩进 —— 否则同一个工具在不同结果下
- *  一会儿缩进一会儿顶格，观感不一致。
+ *  一会儿缩进一会儿顶格，观感不一致。缩进宽度取 `DIFF_INDENT`（卡片内容的左边界），
+ *  不是标题行的 `INDENT`：提示行是卡片缺席时的替代物，与行号槽同起点才对得上。
  *
  *  **缩进必须走 `Text` 的 `paddingX`，不能拼进字符串**（用户 2026-10-19 报）：提示虽是单行，
  *  但长错误（`Could not find the exact text in <长路径>...`）会被 `Text` 折行，拼在首字符前的
- *  那一格只属于第一行，续行会顶格 —— 屏幕上就是「第一行空一格、第二行顶格」。`paddingX` 是
+ *  那几格只属于第一行，续行会顶格 —— 屏幕上就是「第一行有缩进、第二行顶格」。`paddingX` 是
  *  按**每个折行**补的，所以行首始终对齐。 */
 function noteLine(theme: Theme, color: "dim" | "error" | "success" | "muted", text: string): Text {
-	return new Text(theme.fg(color, text), INDENT.length, 0);
+	return new Text(theme.fg(color, text), DIFF_INDENT.length, 0);
 }
 
 function firstText(result: { content: readonly { type: string; text?: string }[] }): string {
@@ -1216,27 +1259,35 @@ export default function (pi: ExtensionAPI): void {
 		renderCall(args, theme, context) {
 			const path = String(args?.path ?? "");
 			const state = context.state as RowState | undefined;
-			// 加载中显示工具名 + 路径 + 闪烁的 `●`（表示「正在接收字节流」）；token 数不在这里
-			// 滚动 —— 底部 spinner 已经在数当前段的产出量（working-indicator/），重复。
+			// 标题行的形状是 `• Edit <path> (+N -M)`（用户 2026-10-28 定）。圆点就是结局灯：
+			// 结果没到（参数还在流、工具还在跑）灰、成功绿、`isError` 红，判定见 `dotState`。
+			// 载入中还多一颗行尾的闪烁 `●`（`loadingSuffix`，亮灭各 500ms）：它是「这一轮还在
+			// 花钱买 token」的唯一信号，参数一收完就熄。
 			// `+N -M` 只在参数收完后显示 —— 流式途中 edits 数组可能还没解析出来，算出来的
 			// 行数会一路跳。
-			// path 有就显示、没就省略：实测 `parseStreamingJson` 对未闭合的字符串会返回
-			// **部分值**（`{"path": "/a/b/ser` → `"/a/b/ser"`），所以流式开头会短暂看到逐字符
-			// 增长的半截路径；但 path 是 schema 的第一个字段、字符串很短，几个 token 就闭合了，
-			// 之后路径稳定而 content 还要流很久 —— 所以尽早显示比完全不显示更有用。
+			// path 有就显示、没就显示 `files` 占位（用户 2026-10-28 定）：实测 `parseStreamingJson`
+			// 对未闭合的字符串会返回**部分值**（`{"path": "/a/b/ser` → `"/a/b/ser"`），所以流式
+			// 开头会短暂看到逐字符增长的半截路径；但 path 是 schema 的第一个字段、字符串很短，
+			// 几个 token 就闭合了，之后路径稳定而 content 还要流很久 —— 尽早显示比不显示有用。
+			// 还没解出路径的那几帧也不能留空：`• Edit files ●` 比 `• Edit ●` 读起来自然。
 			// `isPartial` 只在 `updateResult` 之后才变 false（tool-execution.js），正好区分
 			// 「真的在流式」和「结果已到但 argsComplete 永远不会变 true」的行 —— 后者是
 			// 中断的行和恢复历史会话渲染出来的行（renderSessionItems 从不调 setArgsComplete）。
-			// 那种行不闪也不画标记（否则历史区每行都会挂一个静态的 `●`），但照样算 `+N -M`：
-			// 会话日志里的参数是完整的，历史区不能没有行数信息。
+			// 那种行不闪（否则历史区每行都挂一个静态的 `●`），但也不带占位符（路径就在 args 里）。
 			if (!context.argsComplete && context.isPartial) {
-				// state 拿不到时不闪，但仍然画出标记（宁可静态一点也不丢提示）
 				const on = state === undefined ? true : startBlink(state, context.invalidate);
-				return titleRow(theme, "Edit", path, blinkSuffix(theme, on));
+				return titleRow(theme, "Edit", pathPlaceholder(path), loadingSuffix(theme, on), dotState(context));
 			}
-			// 参数流结束（或结果已到）：停表，恢复完整形态（路径 + `+N -M`）
+			// 参数流结束（或结果已到）：熄灯，恢复完整形态（路径 + `+N -M`）。
 			stopBlink(state);
-			return titleRow(theme, "Edit", path, statsSuffix(theme, cachedStats(state, () => editStats(args))));
+			return titleRow(
+				// 已算完的行一律显示真路径（哪怕是空）：`files` 只是「正在加载」的占位。
+				theme,
+				"Edit",
+				path,
+				statsSuffix(theme, cachedStats(state, () => editStats(args))),
+				dotState(context),
+			);
 		},
 		renderResult(result, { expanded, isPartial }, theme, context) {
 			// 结果已到就停表（中断 / 报错的行也走这里）；partial 结果不算 —— 那时参数可能还在流。
@@ -1255,7 +1306,7 @@ export default function (pi: ExtensionAPI): void {
 			if (diff.lines.length === 0) return noteLine(theme, "success", "Applied");
 
 			const path = String((context.args as { path?: unknown } | undefined)?.path ?? "");
-			return buildDiffCard(theme, diff, getLanguageFromPath(path), expanded);
+			return buildDiffCard(theme, diff, getLanguageFromPath(path), expanded, EDIT_PREVIEW_MAX_LINES);
 		},
 	});
 
@@ -1287,23 +1338,22 @@ export default function (pi: ExtensionAPI): void {
 
 			// 旧内容抓取必须在下面的显示分支之前：它依赖的是「执行还没开始」，
 			// 而不是「参数已完整」—— 拖到 argsComplete 才读就可能赶不上写入前的窗口。
-			// 加载中显示工具名 + 路径 + 闪烁的 `●`（与 edit 一致的形态）；token 数交给底部
-			// spinner 滚动，标题行不再重复。`isPartial` 的语义与 edit 那边相同。
+			// 标题行的形状与 edit 一致（`• Write <path> (+N -M)`，闪烁与占位行为也相同）。
 			if (!context.argsComplete && context.isPartial) {
 				const on = state === undefined ? true : startBlink(state, context.invalidate);
-				return titleRow(theme, "Write", path, blinkSuffix(theme, on));
+				return titleRow(theme, "Write", pathPlaceholder(path), loadingSuffix(theme, on), dotState(context));
 			}
-			// 参数流结束（或结果已到）：停表，恢复完整形态（路径 + `+N -M`）。
+			// 参数流结束（或结果已到）：熄灯，完整形态（路径 + `+N -M`）。
 			// 统计用的是执行前抓到的旧内容 vs 参数里的新内容 —— 与 renderResult 画卡片时
 			// 同一对输入，所以标题的数字和卡片里的行数不会打架。
 			stopBlink(state);
 			const content = String(args?.content ?? "");
 			const stats = cachedStats(state, () => diffStatsOf(state?.oldContent ?? "", content));
-			return titleRow(theme, "Write", path, statsSuffix(theme, stats));
+			return titleRow(theme, "Write", path, statsSuffix(theme, stats), dotState(context));
 		},
 		renderResult(result, { expanded, isPartial }, theme, context) {
-			// 结果已到就停表（中断 / 报错的行也走这里）；partial 结果不算 —— 那时参数可能还在流。
-			if (!isPartial) stopBlink(context.state as WriteState | undefined);
+			// 结果一到就停表：否则一个已完成的块会继续闪到 5 分钟上限。
+			if (!isPartial) stopBlink(context.state as RowState | undefined);
 			if (isPartial) return noteLine(theme, "dim", "Writing…");
 
 			const text = firstText(result);
@@ -1328,7 +1378,7 @@ export default function (pi: ExtensionAPI): void {
 
 			const diff = parsePatch(patch);
 			if (diff.lines.length === 0) return noteLine(theme, "success", "Written");
-			return buildDiffCard(theme, diff, getLanguageFromPath(path), expanded);
+			return buildDiffCard(theme, diff, getLanguageFromPath(path), expanded, WRITE_PREVIEW_MAX_LINES);
 		},
 	});
 }

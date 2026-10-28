@@ -735,8 +735,11 @@ test("颜色：Search 行里的 `in` 用 dim（原生与 bash 折叠的 Search �
 	replay([{ type: "toolCall", id: "d1", name: "grep", arguments: args }]);
 	const line = renderBlockRaw("grep", "d1", args)[1]!;
 	assert.equal(plain(line), '  └ Search "auth" in proxy/');
-	assert.ok(line.includes(`${DIM}in${OFF}`), `原生 Search 的 in 应为 dim：${JSON.stringify(line)}`);
-	assert.equal(line.split(DIM).length - 1, 1, `dim 只该落在 \`in\` 一处：${JSON.stringify(line)}`);
+	// 结构符 `└ ` 自己也走 dim（用户 2026-10-25 从 muted 改的），所以 dim 段有两处：
+	// 前缀一次、`in` 一次 —— 把前缀剥掉再断言 `in` 恰好一处，否则数不出「多余压暗」。
+	const bare = line.replace(`  ${DIM}└ ${OFF}`, "  └ ");
+	assert.ok(bare.includes(`${DIM}in${OFF}`), `原生 Search 的 in 应为 dim：${JSON.stringify(line)}`);
+	assert.equal(bare.split(DIM).length - 1, 1, `除结构符外 dim 只该落在 \`in\` 一处：${JSON.stringify(line)}`);
 	assert.ok(verbIsBold(line, "Search"), `动词仍应加粗：${JSON.stringify(line)}`);
 
 	// bash 折叠出来的同一句话：`in` 一样是 dim，但动词不加粗
@@ -745,7 +748,8 @@ test("颜色：Search 行里的 `in` 用 dim（原生与 bash 折叠的 Search �
 	replay([{ type: "toolCall", id: "d2", name: "bash", arguments: cmd }]);
 	const bashLine = renderBlockRaw("bash", "d2", cmd)[1]!;
 	assert.equal(plain(bashLine), '  └ Search "auth" in proxy/');
-	assert.ok(bashLine.includes(`${DIM}in${OFF}`), `bash 的 Search 同样该压暗 in：${JSON.stringify(bashLine)}`);
+	const bashBare = bashLine.replace(`  ${DIM}└ ${OFF}`, "  └ ");
+	assert.ok(bashBare.includes(`${DIM}in${OFF}`), `bash 的 Search 同样该压暗 in：${JSON.stringify(bashLine)}`);
 	assert.equal(verbIsBold(bashLine, "Search"), false, `bash 的动词仍不加粗：${JSON.stringify(bashLine)}`);
 
 	// 模式里自带 ` in ` 时不认错分隔符（贪婪匹配最后一个 `" in `）
@@ -754,56 +758,68 @@ test("颜色：Search 行里的 `in` 用 dim（原生与 bash 折叠的 Search �
 	replay([{ type: "toolCall", id: "d3", name: "grep", arguments: tricky }]);
 	const trickyLine = renderBlockRaw("grep", "d3", tricky)[1]!;
 	assert.equal(plain(trickyLine), '  └ Search "foo in bar" in src');
-	assert.equal(trickyLine.split(DIM).length - 1, 1, `模式里的 in 不得被压暗：${JSON.stringify(trickyLine)}`);
+	const trickyBare = trickyLine.replace(`  ${DIM}└ ${OFF}`, "  └ ");
+	assert.equal(trickyBare.split(DIM).length - 1, 1, `模式里的 in 不得被压暗：${JSON.stringify(trickyLine)}`);
 });
 
-test("标记：原生 Search 折行时只有第一行带动词，续行不加粗也不重画动词", { skip }, () => {
+test("缩略：原生 Search 超宽时砍头保尾缩成一行，不再折行（用户 2026-10-27 定）", { skip }, () => {
+	// 用户报的形态：`Search "glass_block\|purple_stained_glass" in tools/cloudland-kit-fingerpri` /
+	// `nt.mjs` —— 折行后看着像两条调用。现在改成把**路径**缩到一行装下（砍头保尾，保住文件名）。
 	reset();
 	const args = {
 		pattern: "bashOutput",
 		path: "/Users/bachi/jaylli/litellm-any/clients/pi/extensions/explored-group/a-very-long-file-name-for-wrapping.ts",
 	};
 	replay([{ type: "toolCall", id: "w1", name: "grep", arguments: args }]);
-	const body = renderBlockRaw("grep", "w1", args, 60).slice(1);
-	assert.ok(body.length >= 2, `窄宽度下应折成多行：${JSON.stringify(body.map(plain))}`);
+	const lines = renderBlockRaw("grep", "w1", args, 60);
+	const body = lines.slice(1);
+	assert.equal(body.length, 1, `60 列下应缩成一行、不折行：${JSON.stringify(lines.map(plain))}`);
+	assert.equal(plain(body[0]!), '  └ Search "bashOutput" in …y-long-file-name-for-wrapping.ts');
+	assert.ok(verbIsBold(body[0]!, "Search"), `动词仍要加粗：${JSON.stringify(body[0])}`);
+	// 模式段绝不动：缩它是改语义，不是排版
+	assert.ok(plain(body[0]!).includes('"bashOutput"'), "模式不得被缩");
+});
+
+test("缩略：缩到地板仍装不下才折行，续行不重画动词", { skip }, () => {
+	// 地板 = 路径 `…` + 8 列 / 模式串 12 列。极窄终端 / 超长模式还可能撞到它，那时只能折行
+	// —— 但折行链路必须还在。
+	reset();
+	const args = { pattern: "x".repeat(48), path: "/Users/bachi/jaylli/litellm-any/clients/pi/extensions/explored-group/a-very-long-file-name.ts" };
+	replay([{ type: "toolCall", id: "w2", name: "grep", arguments: args }]);
+	const body = renderBlockRaw("grep", "w2", args, 30).slice(1);
+	assert.ok(body.length >= 2, `超长模式 + 30 列应折成多行：${JSON.stringify(body.map(plain))}`);
 	// search / list 条目**不重画动词**（与 read 的续行相反），所以整块只该有一行带加粗动词
-	assert.equal(body.filter((l) => verbIsBold(l, "Search")).length, 1, `只有第一行该带加粗动词：${JSON.stringify(body)}`);
+	assert.equal(body.filter((l) => verbIsBold(l, "Search")).length, 1, `只有第一行该带加粗动词：${JSON.stringify(body.map(plain))}`);
 	for (const row of body.slice(1)) {
 		assert.ok(!plain(row).includes("Search"), `续行不得重画动词：${JSON.stringify(plain(row))}`);
 	}
 });
 
-test("回归：长文件名折行时，续行不重画 Read（用户 2026-10-07 报，width=79 实测）", { skip }, () => {
-	// 用户报的形态：bash 转义出的 `cat <长名>`，名字恰好一行装不下，于是屏幕上成了
-	//
-	//     └ Read pi-session-…-c7ec684628
-	//       Read 7d.html                 ← 续行多了一个动词，看着像读了两个文件
-	//
-	// 根因在 `layoutRows`：`flatMap` 把每个条目的折行块卷平后**丢掉了「它属于哪个条目」**，
-	// 于是续行与「下一个文件」在循环里长得一模一样，都拿到一行 `Read ` 前缀。
-	// 修法：折行后保留「本块属于哪个条目、是不是该条目的开头」两个位。
+test("缩略：长文件名不再折行，砍头保尾成一行（用户 2026-10-27 定）", { skip }, () => {
+	// 用户 2026-10-07 报过这里的折行版（续行多冒一个 `Read`）—— 那一版靠「折行时保留块归属」修。
+	// 2026-10-27 用户改口径：这种情况**不折行**，改成把路径缩到一行装下。
 	const NAME = "pi-session-2026-10-06T13-48-58-965Z_01a11179-84d5-77fd-bf01-c7ec6846287d.html";
 	reset();
 	const args = BASH(`cat ${NAME}`);
 	replay([{ type: "toolCall", id: "n1", name: "bash", arguments: args }]);
 	const lines = renderBlock("bash", "n1", args, false, 79);
 
-	// 该行折了两行：组头 1 行 + 成员 2 行
-	assert.equal(lines.length, 3, `应折成「组头 + 2 行成员」：${JSON.stringify(lines)}`);
-	assert.ok(lines[1]!.startsWith("  └ Read "), `首行仍带 └ 与 Read：${JSON.stringify(lines[1])}`);
-	// 续行必须**只有缩进**，不得再出现 `Read`；把它拼回去要恰好等于原文件名
-	const body = lines.slice(1);
-	assert.ok(!body[1]!.includes("Read"), `续行不得重画 Read：${JSON.stringify(body[1])}`);
-	assert.equal(body[1]!.trim(), "7d.html", `续行只应是尾部：${JSON.stringify(body[1])}`);
-	const rebuilt = body[0]!.replace("  └ Read ", "") + body[1]!.trim();
-	assert.equal(rebuilt, NAME, `两行拼回必须等于原文件名：${JSON.stringify(rebuilt)}`);
+	assert.equal(lines.length, 2, `应缩成「组头 + 1 行成员」：${JSON.stringify(lines)}`);
+	assert.ok(lines[1]!.startsWith("  └ Read "), `首行带 └ 与 Read：${JSON.stringify(lines[1])}`);
+	const bodyLine = lines[1]!;
+	assert.equal(bodyLine.split("Read").length - 1, 1, `整块只能有一个 Read：${JSON.stringify(bodyLine)}`);
+	// 砍头保尾 ⇒ 前缀 `…`、尾巴是原文件名的后缀（且该行不超过终端宽）
+	const shown = bodyLine.replace("  └ Read ", "");
+	assert.ok(shown.startsWith("…"), `缩略前缀应为 …：${JSON.stringify(shown)}`);
+	assert.ok(NAME.endsWith(shown.slice(1)), `保住的必须是原路径的真尾巴：${JSON.stringify(shown)}`);
+	assert.ok(shown.length >= 4, `尾巴不能缩得只剩 …：${JSON.stringify(shown)}`);
 });
 
-test("回归：单文件折行后不得与后一个文件用 `, ` 缝在一起", { skip }, () => {
-	// 同一根因的第二个症状（更难发现、也更错）：条目 A 的**尾部碎块**在下一轮循环里
-	// 被当成了「另一个条目」，于是与真实的 b.ts 用 `, ` 拼成 `Read z, b.ts` ——
+test("缩略：单文件与后一个文件同行时，各自独立缩略、不得把碎片缝成 `z, b.ts`", { skip }, () => {
+	// 旧形态的第二个症状（更难发现、也更错）：条目 A 的**尾部碎块**在下一轮循环里
+	// 被当成「另一个条目」，于是与真实的 b.ts 用 `, ` 拼成 `Read z, b.ts` ——
 	// 屏幕上看起来像「读了两个文件」，实际上 A 的名字被切断、多出一个不存在的 `z`。
-	// 实测：A 长 71（70 个 a + z）、宽度 79 时稳定复现。
+	// 现在 A 会被缩成 `…` 开头的一整段，与 b.ts 用 `, ` 分隔 —— 语义清楚，不是缝合。
 	reset();
 	const A = `${"a".repeat(70)}z`;
 	const content = [
@@ -813,17 +829,20 @@ test("回归：单文件折行后不得与后一个文件用 `, ` 缝在一起",
 	replay(content);
 	const lines = renderBlock("read", "t1", READ(A), false, 79);
 	const body = lines.slice(1);
-	assert.ok(!body.some((l) => /z, b\.ts/.test(l)), `A 的尾块不得与 b.ts 缝合：${JSON.stringify(body)}`);
-	// A 的两块拼起来仍是 A（中间不插任何分隔符）
-	const aLines = body.filter((l) => !l.includes("b.ts"));
-	assert.equal(
-		aLines.map((l) => l.replace(/^\s*(└ )?Read /, "").replace(/^\s+/, "")).join(""),
-		A,
-		`A 的折行碎块拼回应等于 A：${JSON.stringify(aLines)}`,
-	);
+	assert.equal(body.length, 1, `两个短名合起来装得下 → 应该只有一行：${JSON.stringify(body)}`);
+	// 两个文件都在，且 A 是 `…` 开头的缩略形态（不是被切断后剩下的裸碎片）
+	const [first, second] = body[0]!.replace("  └ Read ", "").split(", ");
+	assert.ok(first!.startsWith("…"), `A 应为缩略形态：${JSON.stringify(first)}`);
+	assert.equal(second, "b.ts", `第二个文件必须完整：${JSON.stringify(second)}`);
+	assert.ok(A.endsWith(first!.slice(1)), `A 的尾巴必须来自原名：${JSON.stringify(first)}`);
+
+	// 窄到必须分行时，各自带 `Read`、不得把 A 的碎片与 b.ts 拼在一起
+	const narrow = renderBlock("read", "t1", READ(A), false, 18).slice(1);
+	assert.ok(!narrow.some((l) => /z, b\.ts/.test(l)), `不得出现 z, b.ts 缝合：${JSON.stringify(narrow)}`);
 });
 
-test("标记：read 合并行折行时，续行的 Read 也跟着加粗", { skip }, () => {
+test("缩略：read 合并行里的多条路径相对平均地缩，续行的 Read 仍加粗", { skip }, () => {
+	// 用户 2026-10-27 定：一行里多个文件时**相对平均**地缩这多条路径，直到不折行。
 	reset();
 	const long = (n: string): string => `/Users/bachi/jaylli/litellm-any/clients/pi/extensions/explored-group/a-very-long-file-name-${n}.ts`;
 	replay([
@@ -832,10 +851,21 @@ test("标记：read 合并行折行时，续行的 Read 也跟着加粗", { skip
 		{ type: "toolCall", id: "l3", name: "read", arguments: READ(long("c")) },
 	]);
 	const lines = renderBlockRaw("read", "l1", READ(long("a")), 80);
-	// 用 `plain` 过滤：原始行里 `Read` 后面紧跟粗体关闭序列，`includes("Read ")` 匹配不到
 	const readRows = lines.filter((l) => plain(l).includes("Read "));
-	assert.ok(readRows.length >= 2, `窄宽度下应折成多行：${JSON.stringify(lines.map(plain))}`);
-	for (const row of readRows) {
+	assert.equal(readRows.length, 1, `80 列下三个长名应缩成一行：${JSON.stringify(lines.map(plain))}`);
+	assert.ok(readVerbIsBold(readRows[0]!), `Read 要加粗：${JSON.stringify(plain(readRows[0]!))}`);
+	const paths = plain(readRows[0]!).replace("  └ Read ", "").split(", ");
+	assert.equal(paths.length, 3, `三个文件都要在：${JSON.stringify(paths)}`);
+	for (const p of paths) assert.ok(p.startsWith("…"), `每条都该缩略：${JSON.stringify(p)}`);
+	// 相对平均：三条长度之差不超过 2 列（砍的是「当前最宽的那条」）
+	const widths = paths.map((p) => p.length);
+	assert.ok(Math.max(...widths) - Math.min(...widths) <= 2, `三条应被压到相近长度：${JSON.stringify(widths)}`);
+
+	// 窄到必须分行时：每个文件一行，每行的 Read 都要加粗
+	const narrow = renderBlockRaw("read", "l1", READ(long("a")), 20);
+	const narrowRows = narrow.filter((l) => plain(l).includes("Read "));
+	assert.equal(narrowRows.length, 3, `20 列下应一行一个文件：${JSON.stringify(narrow.map(plain))}`);
+	for (const row of narrowRows) {
 		assert.ok(readVerbIsBold(row), `每一行的 Read 都要加粗：${JSON.stringify(plain(row))}`);
 	}
 });
@@ -979,6 +1009,51 @@ test("行上限：超过 GROUP_MAX_ROWS 折成 `… +N`，展开态全出", { sk
 	const expanded = renderBlock("bash", "c0", content[0]!.arguments, true);
 	assert.ok(!expanded.some((l) => /… \+\d+$/.test(l)), "展开态不该折");
 	assert.ok(expanded.length > collapsed.length);
+});
+
+test("缩略：用户 2026-10-27 报的形态 —— 超宽时缩到一行、不折行", { skip }, () => {
+	// 用户贴的两个例子，分别覆盖缩略的两个阶段：
+	//
+	//   ① └ Search "glass_block\|purple_stained_glass" in tools/cloudland-kit-fingerpri
+	//        nt.mjs                       ← 只缩路径就够（阶段 A）
+	//   ② └ Search "export function blockInd…columnKey|COLUMN_HEIGHT" in src/voxel/cons
+	//        tants.js                     ← 模式串太长，得先缩模式串、文件名保持全称（阶段 B）
+	//
+	// 两个例子的目标相同：一行装下，模式串与文件名**都不被缩没**。
+	reset();
+	const args = { pattern: "glass_block\\|purple_stained_glass", path: "tools/cloudland-kit-fingerprint.mjs" };
+	replay([{ type: "toolCall", id: "u1", name: "grep", arguments: args }]);
+	const lines = renderBlock("grep", "u1", args, false, 90);
+	assert.equal(lines.length, 2, `应只有「组头 + 1 行」：${JSON.stringify(lines)}`);
+	assert.equal(lines[1]!, '  └ Search "glass_block\\|purple_stained_glass" in tools/cloudland-kit-fingerprint.mjs');
+
+	// ① 只丢目录：模式串与文件名全称都还在
+	const stageA = renderBlock("grep", "u1", args, false, 80);
+	assert.equal(stageA.length, 2, `80 列下也不得折行：${JSON.stringify(stageA)}`);
+	assert.ok(stageA[1]!.includes('"glass_block\\|purple_stained_glass"'), `模式必须原样：${JSON.stringify(stageA[1])}`);
+	assert.ok(stageA[1]!.endsWith("cloudland-kit-fingerprint.mjs"), `文件名必须全称：${JSON.stringify(stageA[1])}`);
+	assert.ok(!stageA[1]!.includes("tools/"), `目录应被丢掉：${JSON.stringify(stageA[1])}`);
+
+	// ② 模式串太长 → 先缩模式串（省略中间、两头都保），文件名仍全称
+	reset();
+	const args2 = { pattern: "export function blockIndex|columnKey|COLUMN_HEIGHT", path: "src/voxel/constants.js" };
+	replay([{ type: "toolCall", id: "u2", name: "grep", arguments: args2 }]);
+	const stageB = renderBlock("grep", "u2", args2, false, 76);
+	assert.equal(stageB.length, 2, `应缩成一行：${JSON.stringify(stageB)}`);
+	const bodyB = stageB[1]!;
+	assert.ok([...bodyB].length <= 76, `不得超宽：${[...bodyB].length} > 76`);
+	assert.ok(bodyB.includes("…"), `模式串应被缩：${JSON.stringify(bodyB)}`);
+	assert.ok(bodyB.includes('"export function '), `模式串开头要保住：${JSON.stringify(bodyB)}`);
+	assert.ok(bodyB.includes("COLUMN_HEIGHT\""), `模式串结尾要保住：${JSON.stringify(bodyB)}`);
+	assert.ok(bodyB.endsWith(" in constants.js"), `文件名必须全称：${JSON.stringify(bodyB)}`);
+
+	// 同一断言在 read 侧：`Read <超长名> 100-169` 缩成一行，行号区间整体保留
+	reset();
+	const readArgs = { path: "/Users/bachi/jaylli/litellm-any/clients/pi/extensions/explored-group/a-very-long-file-name-for-wrapping.ts", offset: 100, limit: 70 };
+	replay([{ type: "toolCall", id: "u3", name: "read", arguments: readArgs }]);
+	const readLines = renderBlock("read", "u3", readArgs, false, 60);
+	assert.equal(readLines.length, 2, `read 也应缩成一行：${JSON.stringify(readLines)}`);
+	assert.ok(readLines[1]!.endsWith("for-wrapping.ts 100-169"), `行号区间必须完整保留：${JSON.stringify(readLines[1])}`);
 });
 
 test("宽度：每行可见宽度不超过终端宽", { skip }, () => {

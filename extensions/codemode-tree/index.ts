@@ -153,7 +153,7 @@ export default function (pi: ExtensionAPI) {
 					// 圆点三态（用户 2026-10-01 定）：执行中白（`text`）/ 成功绿（`toolDiffAdded`，**与 bash
 					// 成功圆点同色**）/ 失败红（`toolDiffRemoved`）。槽位选择在纯逻辑里（`stateDotSlot`）。
 					const dot = theme.fg(stateDotSlot(context.isPartial === true, context.isError === true), "•");
-					const pipe = theme.fg("muted", "│ ");
+					const pipe = theme.fg("dim", "│ ");
 					// 「树接上了没有」看 `state.innerResult`：`updateDisplay()` 先跑 renderCall、再跑
 					// renderResult，但两个组件真正 `render()` 是在之后的容器渲染里 —— 那时本帧的
 					// innerResult 已经就位，所以命令侧与结果侧在**同一帧**切到 `│ `（没有半帧的错位，

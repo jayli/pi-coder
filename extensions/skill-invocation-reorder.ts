@@ -6,14 +6,12 @@
  *
  *     [skill] commit (ctrl+o to expand)   ← SkillInvocationMessageComponent（先）
  *     （Spacer 1）
- *     ▏ 提示词                             ← UserMessageComponent（后）
+ *     › 提示词                             ← UserMessageComponent（后）
  *
- * 用户想要的顺序反过来：**先**正常显示用户消息（`user-message-bar` 的 `▏` 竖线照常生效，
+ * 用户想要的顺序反过来：**先**正常显示用户消息（`user-message-bar` 的 `›` 首行标记照常生效，
  * 内容就是用户敲的那条命令原文），**再**在下方显示 `[skill] name (ctrl+o to expand)` 折叠行：
  *
- *     ▏
- *     ▏ /skill:commit 提交一下
- *     ▏
+ *     › /skill:commit 提交一下
  *
  *     [skill] commit (ctrl+o to expand)
  *
@@ -186,7 +184,7 @@ function installReorderPatch(): boolean {
 			chatContainer.addChild(new Spacer(1));
 		}
 
-		// 1) 用户消息在前（user-message-bar 的竖线补丁照常作用于它）。
+		// 1) 用户消息在前（user-message-bar 的首行标记补丁照常作用于它）。
 		//    内容是**重建出的完整命令**（`/skill:name 提示词`），而不是展开后剩下的那截提示词。
 		const userComponent = new UserMessageComponent(
 			reconstructSkillCommand(skillBlock.name, skillBlock.userMessage),

@@ -79,7 +79,7 @@ export const TURN_NOTE_THRESHOLD_MS = 5_000;
 
 /**
  * └ U+2514 BOX DRAWINGS LIGHT UP AND RIGHT。与 bash 块同一套树形约定
- * （`└` 落在正文列、取 muted 槽），源码里写转义、测试按码位钉死。
+ * （`└` 落在正文列、取 dim 槽；用户 2026-10-25 从 muted 改的），源码里写转义、测试按码位钉死。
  */
 export const NOTE_GLYPH = "\u2514";
 
@@ -172,8 +172,8 @@ export function formatBackgroundStatus(
 	parts.push(theme.fg("dim", truncateCommand(pick.command, STATUS_COMMAND_MAX)));
 	const line = parts.join(" ");
 	if (!needsTurnEndedNote(pick, now, turn)) return line;
-	// `└` 单独取 muted：结构字符不吃后面文案的颜色（bash 块的同一条约定）。
-	const sub = `${NOTE_INDENT}${theme.fg("muted", NOTE_GLYPH)} ${theme.fg("warning", TURN_ENDED_NOTE)}`;
+	// `└` 单独取 dim：结构字符不吃后面文案的颜色（bash 块的同一条约定）。
+	const sub = `${NOTE_INDENT}${theme.fg("dim", NOTE_GLYPH)} ${theme.fg("warning", TURN_ENDED_NOTE)}`;
 	return `${line}\n${sub}`;
 }
 

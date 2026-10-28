@@ -1,7 +1,7 @@
 /**
  * subagent-log-guard —— 别让 pi-subagents 的启动诊断糊在输入框上。
  *
- * 现象：跑一个**前台**子代理时，输入框那一行（`❯ ` 之后）突然被
+ * 现象：跑一个**前台**子代理时，输入框那一行（`› ` 之后）突然被
  *   [pi-subagents] Agent 'researcher': host runtime tool availability omitted [web_search, …]
  * 覆盖，widget 的后续行被这行字的续行冲掉、底色错位，看着像输入框坏了；回车 / 切窗口都刷不掉脏字。
  *
@@ -9,7 +9,7 @@
  * （`runs/foreground/execution.ts` 的 launch warnings、`runs/background/subagent-runner.ts` 的同名诊断等）。
  * 父进程里 console.warn 写的是**真 stderr** —— pi 只在 rpc / json / print 模式下 takeOverStdout
  * （`dist/main.js`：`shouldTakeOverStdout = appMode !== "interactive"`），交互模式不接管扩展的 console
- * 输出。于是这行字被写进 TUI 的备用屏，落点是硬件光标（编辑器里 `❯ ` 之后那一列）；而 pi-tui 的
+ * 输出。于是这行字被写进 TUI 的备用屏，落点是硬件光标（编辑器里 `› ` 之后那一列）；而 pi-tui 的
  * 差分渲染器认为这些行没变、不会重画，脏字就留在屏幕上了。
  * 复现：`pi -ne -e` 一个「2.5 秒后 console.warn 一行 [pi-subagents] …」的探针扩展，
  * 6 秒后 `tmux capture-pane` 能看到同样的脏行。

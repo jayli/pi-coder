@@ -43,6 +43,7 @@
  */
 
 import { classifyToolCall, segmentVerb, splitShellSegments, stripRedirects } from "./classify.ts";
+import { joinPieces, type PhrasePiece } from "./shrink.ts";
 
 /** 缩略后保留的目录层数（用户 2026-10-06 定：两层）。改这一个常量即可。 */
 export const PATH_TAIL_DIRS = 2;
@@ -119,20 +120,59 @@ function firstPositional(args: string[]): string | undefined {
 		.find((token) => token.length > 0);
 }
 
-/** 截断过长的单个 token（正则模式常常很长），中段省略。 */
-function clip(text: string, max = 48): string {
-	if (text.length <= max) return text;
-	const head = Math.ceil((max - 1) / 2);
-	return `${text.slice(0, head)}…${text.slice(-(max - 1 - head))}`;
-}
-
+/**
+ * 行号后缀见文件末尾的 `readSpanSuffix`。
+ */
 /** 递归与否：`-r` / `-R` / `--recursive` 或组合短旗标里带 r（`-rn`）。 */
 function isRecursive(args: string[]): boolean {
 	return args.some((token) => /^--recursive$/.test(token) || /^-[a-zA-Z]*[rR][a-zA-Z]*$/.test(token));
 }
 
-/** 生成一段命令的短语；返回 `null` 表示这一段不值得单独成行（如纯 `cd`）。 */
-function phraseForSegment(segment: string, cwd: string | undefined): string | null {
+/** 固定段：动词、连接词 `in`、行号区间 —— 缩略时一个字符都不许动。 */
+function fixed(text: string): PhrasePiece {
+	return { text };
+}
+
+/** 路径段：行超宽时先丢目录、再砍头保尾（见 `shrink.ts` 的阶段 A/C）。 */
+function pathPiece(text: string): PhrasePiece {
+	return { text, shrink: "path" };
+}
+
+/**
+ * 模式串段：行超宽时省略中间（保头保尾）。
+ *
+ * 只包模式本身，**不含包裹它的引号** —— 引号是固定段，缩略时不能动（否则就看不出这是模式）。
+ */
+function patternPiece(text: string): PhrasePiece {
+	return { text, shrink: "pattern" };
+}
+
+/**
+ * `Search "<pattern>" in <scope>` 的片段：**模式串单独成段**（可缩、省略中间），
+ * 引号与 `in` 是固定段。
+ *
+ * 这是用户 2026-10-27 第二轮的点：模式串自己太长时，只缩路径会缩出「文件名都没了」的一行，
+ * 得让模式串也参与缩略（顺序见 `shrink.ts`：先丢目录 → 缩模式 → 才缩文件名）。
+ */
+function searchPieces(pattern: string, scope: string | undefined): PhrasePiece[] {
+	const head = [fixed('Search "'), patternPiece(pattern), fixed('"')];
+	return scope ? [...head, fixed(" in "), pathPiece(scope)] : head;
+}
+
+/** `Find` / `Glob <pattern> [in <scope>]` 的片段 —— 与 `searchPieces` 同一口径，只是不带引号。 */
+function matchesPieces(verb: string, pattern: string, scope: string | undefined): PhrasePiece[] {
+	const head = [fixed(`${verb} `), patternPiece(pattern)];
+	return scope ? [...head, fixed(" in "), pathPiece(scope)] : head;
+}
+
+/**
+ * 生成一段命令的短语片段；返回 `null` 表示这一段不值得单独成行（如纯 `cd`）。
+ *
+ * 返回**片段**而不是字符串，是为了让渲染层知道「哪几段可以缩、各用什么缩法」
+ *（模式串省略中间、路径砍头保尾）—— 超宽时只动那几段，动词 / 引号 / 区间一律不动。
+ * 按目录段丢层级（`shortenPath`）在这里已经做过一次，这一层是「差几列」时的收尾。
+ */
+export function piecesForSegment(segment: string, cwd: string | undefined): PhrasePiece[] | null {
 	const { verb, args } = segmentVerb(stripRedirects(segment));
 	if (!verb) return null;
 
@@ -146,28 +186,28 @@ function phraseForSegment(segment: string, cwd: string | undefined): string | nu
 		const scope = rawPath
 			? shortenPath(rawPath, cwd)
 			: isRecursive(args) ? "." : undefined;
-		return scope ? `Search "${clip(pattern)}" in ${scope}` : `Search "${clip(pattern)}"`;
+		return searchPieces(pattern, scope);
 	}
 
 	if (verb === "ls" || verb === "tree" || verb === "eza" || verb === "fd" || verb === "du") {
 		const positionals = args.filter((t) => !t.startsWith("-")).map(unquote).filter((t) => !/^\d+$/.test(t));
 		const target = positionals[positionals.length - 1];
 		const verbWord = verb === "du" ? "Size" : "List";
-		return `${verbWord} ${target ? shortenPath(target, cwd) : "."}`;
+		return [fixed(`${verbWord} `), pathPiece(target ? shortenPath(target, cwd) : ".")];
 	}
 
 	if (verb === "find") {
 		const positionals = args.filter((t) => !t.startsWith("-")).map(unquote);
 		const glob = positionals.find((t) => t.includes("*") || t.includes("?"));
 		const dir = positionals.find((t) => !t.includes("*") && !t.includes("?"));
-		return glob
-			? `Find ${clip(glob)}${dir ? ` in ${shortenPath(dir, cwd)}` : ""}`
-			: `Find${dir ? ` in ${shortenPath(dir, cwd)}` : " files"}`;
+		const where = dir ? shortenPath(dir, cwd) : undefined;
+		if (glob) return matchesPieces("Find", glob, where);
+		return where ? [fixed("Find in "), pathPiece(where)] : [fixed("Find files")];
 	}
 
 	if (verb === "git") {
 		const sub = args.find((t) => !t.startsWith("-"));
-		return sub ? `Git ${sub}` : "Git";
+		return [fixed(sub ? `Git ${sub}` : "Git")];
 	}
 
 	if (verb === "sed") {
@@ -176,23 +216,23 @@ function phraseForSegment(segment: string, cwd: string | undefined): string | nu
 		const file = pickPathToken(positionals.filter((t) => t !== range));
 		const where = file ? shortenPath(file, cwd) : undefined;
 		const span = range ? ` ${range.slice(0, -1).replace(",", "-")}` : "";
-		return where ? `Read ${where}${span}` : null;
+		return where ? [fixed("Read "), pathPiece(where), fixed(span)] : null;
 	}
 
 	if (verb === "head" || verb === "tail") {
 		const file = pickPathToken(args.filter((t) => !/^-\d+$/.test(t)));
 		if (!file) return null;
-		return `${verb === "tail" ? "Tail" : "Read"} ${shortenPath(file, cwd)}`;
+		return [fixed(`${verb === "tail" ? "Tail" : "Read"} `), pathPiece(shortenPath(file, cwd))];
 	}
 
 	if (verb === "stat") {
 		const file = pickPathToken(args);
-		return file ? `Stat ${shortenPath(file, cwd)}` : null;
+		return file ? [fixed("Stat "), pathPiece(shortenPath(file, cwd))] : null;
 	}
 
 	if (verb === "which" || verb === "type") {
 		const names = args.filter((t) => !t.startsWith("-")).map(unquote).slice(0, 3);
-		return names.length ? `Which ${names.join(" ")}` : null;
+		return names.length ? [fixed(`Which ${names.join(" ")}`)] : null;
 	}
 
 	if (verb === "cat" || verb === "bat" || verb === "less" || verb === "more" || verb === "nl" || verb === "tac" ||
@@ -201,42 +241,52 @@ function phraseForSegment(segment: string, cwd: string | undefined): string | nu
 		verb === "xxd" || verb === "od" || verb === "strings" || verb === "md5" || verb === "shasum") {
 		const file = pickPathToken(args);
 		if (!file) return null;
-		const path = shortenPath(file, cwd);
-		// `diff a b` 两个文件都给（比较的双方都在）
+		// `diff a b` 两个文件都给（比较的双方都在）—— 两条路径，缩略时平均缩
 		if (verb === "diff") {
 			const both = args.filter((t) => !t.startsWith("-")).map(unquote).filter((t) => looksLikePath(t)).slice(0, 2);
-			if (both.length === 2) return `Diff ${shortenPath(both[0]!, cwd)} ${shortenPath(both[1]!, cwd)}`;
+			if (both.length === 2) {
+				return [fixed("Diff "), pathPiece(shortenPath(both[0]!, cwd)), fixed(" "), pathPiece(shortenPath(both[1]!, cwd))];
+			}
 		}
-		return `Read ${path}`;
+		return [fixed("Read "), pathPiece(shortenPath(file, cwd))];
 	}
 
 	return null;
 }
 
+/** 生成一段命令的短语（片段拼好的字符串）。 */
+function phraseForSegment(segment: string, cwd: string | undefined): string | null {
+	const pieces = piecesForSegment(segment, cwd);
+	return pieces ? joinPieces(pieces) : null;
+}
+
 /**
- * 一次工具调用 → 一行短语。返回 `null` 表示这一刻还产生不了短语
+ * 一次工具调用 → 一行短语的**片段**。返回 `null` 表示这一刻还产生不了短语
  * （比如 bash 命令只有 `cd`），调用方应跳过该行。
+ *
+ * 片段而非字符串：标了 `shrink` 的那些段在行超宽时会被缩（用户 2026-10-27 定），
+ * 固定段（动词 / 模式 / `in` / 行号区间）一个字符都不动 —— 缩模式会改检索语义、缩区间会撒谎。
  *
  * `read` 的多个文件由**上层**（`render.ts`）合并到一行，所以这里只回单个路径。
  */
-export function phraseForToolCall(
+export function phrasePiecesForToolCall(
 	toolName: string,
 	args: unknown,
 	cwd: string | undefined,
-): string | null {
+): PhrasePiece[] | null {
 	if (toolName === "grep") {
 		const pattern = (args as { pattern?: string })?.pattern;
 		const path = (args as { path?: string })?.path;
 		if (!pattern) return null;
-		return path ? `Search "${clip(pattern)}" in ${shortenPath(path, cwd)}` : `Search "${clip(pattern)}"`;
+		return searchPieces(pattern, path ? shortenPath(path, cwd) : undefined);
 	}
 	if (toolName === "find") {
 		const pattern = (args as { pattern?: string })?.pattern;
 		const path = (args as { path?: string })?.path;
 		if (!pattern) {
-			return path ? `Find in ${shortenPath(path, cwd)}` : "Find files";
+			return path ? [fixed("Find in "), pathPiece(shortenPath(path, cwd))] : [fixed("Find files")];
 		}
-		return `Find ${clip(pattern)}${path ? ` in ${shortenPath(path, cwd)}` : ""}`;
+		return matchesPieces("Find", pattern, path ? shortenPath(path, cwd) : undefined);
 	}
 	// `glob` 与 `find` 同一形态（模式 + 可选作用域），只是动词不同 —— 不合并成一行是因为
 	// 两个工具的**候选集不同**（glob 走仓库清单、find 走文件遍历），合并会丢这个事实。
@@ -244,29 +294,48 @@ export function phraseForToolCall(
 		const pattern = (args as { pattern?: string })?.pattern;
 		const path = (args as { path?: string })?.path;
 		if (!pattern) return null;
-		return `Glob ${clip(pattern)}${path ? ` in ${shortenPath(path, cwd)}` : ""}`;
+		return matchesPieces("Glob", pattern, path ? shortenPath(path, cwd) : undefined);
 	}
 	if (toolName === "ls") {
 		const path = (args as { path?: string })?.path;
-		return `List ${path ? shortenPath(path, cwd) : "."}`;
+		return [fixed("List "), pathPiece(path ? shortenPath(path, cwd) : ".")];
 	}
 	if (toolName === "read") {
 		const path = (args as { path?: string })?.path;
 		if (!path) return null;
-		return `Read ${shortenPath(path, cwd)}${readSpanSuffix(args)}`;
+		return [fixed("Read "), pathPiece(shortenPath(path, cwd)), fixed(readSpanSuffix(args))];
 	}
 	if (toolName === "bash") {
 		const command = (args as { command?: string })?.command ?? "";
 		const verdict = classifyToolCall("bash", args);
 		if (!verdict.kind) return null;
 		const lines: string[] = [];
+		let first: PhrasePiece[] | null = null;
 		for (const segment of splitShellSegments(command)) {
-			const phrase = phraseForSegment(segment, cwd);
-			if (phrase && !lines.includes(phrase)) lines.push(phrase);
+			const pieces = piecesForSegment(segment, cwd);
+			if (!pieces) continue;
+			const phrase = joinPieces(pieces);
+			if (lines.includes(phrase)) continue;
+			lines.push(phrase);
+			first ??= pieces;
 		}
-		return lines.length ? lines[0]! : null;
+		return first;
 	}
 	return null;
+}
+
+/**
+ * 一次工具调用 → 一行短语（字符串）。
+ *
+ * 只是 `phrasePiecesForToolCall` 的拼接版本，留给不需要缩略的调用方 / 测试。
+ */
+export function phraseForToolCall(
+	toolName: string,
+	args: unknown,
+	cwd: string | undefined,
+): string | null {
+	const pieces = phrasePiecesForToolCall(toolName, args, cwd);
+	return pieces ? joinPieces(pieces) : null;
 }
 
 /** 供测试与调试：一次性拿到一条 bash 命令的**全部**短语（多段命令会多于一条）。 */

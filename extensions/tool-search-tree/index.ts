@@ -159,7 +159,7 @@ function withTreeShell(target: ToolDefinition<any, any, any>): ToolDefinition<an
 					const lines = visible.map(
 						(row, index) =>
 							BODY_INDENT +
-							theme.fg("muted", prefixes[index] ?? "\u2502 ") +
+							theme.fg("dim", prefixes[index] ?? "\u2502 ") +
 							// 工具名（含 `- ` 与冒号）走 syntaxKeyword、描述留 text —— 与 memory_read
 							// 元信息头的 `name:` 同一支笔，两段各自成一段 SGR。
 							((rowKeyLengths[index] ?? 0) > 0
@@ -170,7 +170,7 @@ function withTreeShell(target: ToolDefinition<any, any, any>): ToolDefinition<an
 					if (hidden > 0) {
 						lines.push(
 							BODY_INDENT +
-								theme.fg("muted", prefixes[visible.length] ?? "\u2502 ") +
+								theme.fg("dim", prefixes[visible.length] ?? "\u2502 ") +
 								theme.fg("muted", previewMoreLinesHint(hidden)),
 						);
 					}

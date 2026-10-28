@@ -168,14 +168,14 @@ function createFallbackRenderers(toolName: string): ToolRenderers {
 						(row, index) =>
 							// 结构符落在列 2（GUTTER_LEAD 两格），它后面那一格空格把正文顶到列 4
 							GUTTER_LEAD +
-							// 结构符走 muted 且自成一段 SGR，不让正文颜色透上来
-							theme.fg("muted", prefixes[index] ?? TREE_PIPE) +
+							// 结构符走 dim 且自成一段 SGR，不让正文颜色透上来
+							theme.fg("dim", prefixes[index] ?? TREE_PIPE) +
 							theme.fg(bodySlot, row),
 					);
 					if (hidden > 0) {
 						lines.push(
 							GUTTER_LEAD +
-								theme.fg("muted", prefixes[visible.length] ?? TREE_PIPE) +
+								theme.fg("dim", prefixes[visible.length] ?? TREE_PIPE) +
 								theme.fg("muted", previewMoreLinesHint(hidden)),
 						);
 					}

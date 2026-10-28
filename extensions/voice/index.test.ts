@@ -1327,7 +1327,7 @@ test("接线：/voice 无参数时给出状态，on/off 会落盘", { skip }, as
 	harness.selectReply = undefined;
 	await harness.command("");
 	assert.ok(harness.selects.length > 0, "应该弹出交互选择");
-	assert.match(harness.selects[0].options.join(" "), /语音播报：on/);
+	assert.match(harness.selects[0].options.join(" "), /Voice announcements: on/);
 
 	await harness.command("off");
 	assert.equal(loadConfig(configFile).enabled, false, "off 应写进配置文件");
@@ -1341,13 +1341,13 @@ test("接线：/voice summary 能开关摘要，并在状态里体现", { skip }
 
 	harness.selectReply = undefined;
 	await harness.command("");
-	assert.match(harness.selects.at(-1)!.options.join(" "), /摘要：结论 \d+ 字起/, "状态里应写明阈值");
+	assert.match(harness.selects.at(-1)!.options.join(" "), /Summary: spoken script from \d+ chars/, "状态里应写明阈值");
 	assert.ok(harness.selects.at(-1)!.options.join(" ").includes("deepseek-flash-qd"), "状态里应写明固定摘要模型");
 
 	await harness.command("summary");
 	assert.equal(loadConfig(configFile).summarize, false, "summary 子命令应切换并落盘");
 	await harness.command("");
-	assert.match(harness.selects.at(-1)!.options.join(" "), /摘要：关闭/);
+	assert.match(harness.selects.at(-1)!.options.join(" "), /Summary: off/);
 
 	await harness.command("summary");
 	assert.equal(loadConfig(configFile).summarize, true);
@@ -1359,14 +1359,14 @@ test("接线：/voice voices 列出中文音色（真的调 say）", { skip }, a
 	await harness.command("voices");
 	const notify = harness.notifies.at(-1);
 	assert.ok(notify, "应该有提示");
-	assert.match(notify.text, /中文音色 \d+ 个/);
+	assert.match(notify.text, /Chinese voices: \d+/);
 });
 
 test("接线：/voice stop 不报错", { skip }, async () => {
 	const configFile = path.join(tempDir("pi-voice-cfg-"), "voice.json");
 	const harness = await loadHarness({ configFile });
 	await harness.command("stop");
-	assert.match(harness.notifies.at(-1)?.text ?? "", /已停止播报/);
+	assert.match(harness.notifies.at(-1)?.text ?? "", /Stopped speaking/);
 });
 
 // =============================================================================
@@ -1816,17 +1816,17 @@ test("接线：/voice key 写进 apikey.json 的 aliyunKey（保留其它字段�
 	const harness = await loadHarness({ configFile, keystoreFile: keystore });
 
 	await harness.command("key sk-0123456789abcdef0123456789abcdef");
-	assert.match(harness.notifies.at(-1)?.text ?? "", /已写入阿里云 Key（sk-012…cdef）/);
+	assert.match(harness.notifies.at(-1)?.text ?? "", /Wrote the Aliyun key \(sk-012…cdef\)/);
 	assert.equal(readAliyunKey(keystore), "sk-0123456789abcdef0123456789abcdef");
 	const written = JSON.parse(fs.readFileSync(keystore, "utf8"));
 	assert.deepEqual(written.apiKeys, { DEEPSEEK_API_KEY: "sk-d" }, "gateway 的 key 不该被动到");
 	assert.equal(written.authToken, "admin");
 
 	await harness.command("key");
-	assert.match(harness.notifies.at(-1)?.text ?? "", /已配置（sk-012…cdef）/);
+	assert.match(harness.notifies.at(-1)?.text ?? "", /configured \(sk-012…cdef\)/);
 
 	await harness.command("key clear");
-	assert.match(harness.notifies.at(-1)?.text ?? "", /已清除 aliyunKey/);
+	assert.match(harness.notifies.at(-1)?.text ?? "", /Cleared aliyunKey/);
 	assert.equal(readAliyunKey(keystore), undefined);
 	assert.deepEqual(JSON.parse(fs.readFileSync(keystore, "utf8")).apiKeys, { DEEPSEEK_API_KEY: "sk-d" });
 });
@@ -1839,7 +1839,7 @@ test("接线：/voice key 遇到损坏的 keystore 只提示不覆盖", { skip }
 	const harness = await loadHarness({ configFile, keystoreFile: keystore });
 
 	await harness.command("key sk-x");
-	assert.match(harness.notifies.at(-1)?.text ?? "", /阿里云 Key 写入失败/);
+	assert.match(harness.notifies.at(-1)?.text ?? "", /Failed to write the Aliyun key/);
 	assert.match(harness.notifies.at(-1)?.type ?? "", /error/);
 	assert.equal(fs.readFileSync(keystore, "utf8"), "{ broken");
 });
@@ -1852,12 +1852,12 @@ test("接线：/voice 状态行显示当前引擎（未配 → say；配了 → 
 	const harness = await loadHarness({ configFile, keystoreFile: keystore });
 
 	await harness.command("");
-	assert.match(harness.selects.at(-1)!.options.join(" | "), /引擎：系统 say/);
+	assert.match(harness.selects.at(-1)!.options.join(" | "), /Engine: system say/);
 
 	await harness.command("key sk-abcdef123456");
 	await harness.command("");
 	const lines = harness.selects.at(-1)!.options.join(" | ");
-	assert.match(lines, /引擎：阿里云 qwen-audio-3\.1-tts-flash（音色 Serena）/);
+	assert.match(lines, /Engine: Aliyun qwen-audio-3\.1-tts-flash \(voice Serena\)/);
 	assert.match(lines, /key sk-abc…3456/);
 });
 

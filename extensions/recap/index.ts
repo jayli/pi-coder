@@ -4,7 +4,8 @@
  * 功能只有两条，刻意做到最小：
  *   1. `/recap` —— 手动总结当前对话；
  *   2. 对话结束后**静止 10 秒**（没有任何新输入）自动生成一条摘要，显示在输入框上方。
- *   发出新消息后摘要立即消失（它已经是上一轮的过期提醒了）。
+ *   发出新消息**立即清掉**已经显示的摘要（用户 2026-10-27 定；2026-10-26 曾改成保留，
+ *   用户实测后改回）：新对话开始后旧摘要不再保留，下一轮结束、静止 10 秒后生成新的一条。
  *
  * `/recap` 是**幂等**的：同一轮对话已经生成过摘要（手动或自动都算）且此后没有新对话时，
  * 再执行直接返回 —— 不重跑模型、不清 widget、也不发通知。理由是重复执行本来就会生成一份
@@ -53,7 +54,7 @@
  *   计时器到点（空闲）   → 没有子代理在跑？→ 生成摘要 → 显示 widget
  *                        还有子代理在跑 → 不生成，改 10s 一次重查
  *   计时器到点（重查）   → 还在跑 → 继续重查；都没了 → 重新起 10s 定时
- *   `input`（交互输入）  → 取消计时器 + abort 生成 + 清 widget
+ *   `input`（交互输入）  → 取消计时器 + abort 生成 + 清掉屏幕上的摘要与内存状态
  *   `session_start`      → 清内存状态与 widget（新会话/恢复会话都不该带着上一会话的摘要）
  *   `session_shutdown`   → 停表 + abort
  *
@@ -364,7 +365,11 @@ export default function (pi: ExtensionAPI) {
 		cancel();
 	});
 
-	// 发出新消息：取消待执行的生成，并清掉屏幕上那条（此时它已经是上一轮的过期提醒）。
+	// 发出新消息：取消待执行的生成（那条待生成的是上一轮的，新回合结束会重新排），
+	// 并**立即清掉屏幕上那条与内存状态** —— 用户 2026-10-27 定：新对话开始后旧摘要不再
+	// 保留（2026-10-26 曾改成保留，用户实测后改回）。下一轮结束、静止 10s 后生成新的一条。
+	// 代价：`buildPrompt` 的「渐进式摘要」上一条随 `currentRecap` 一起被清，每轮摘要
+	// 从零开始 —— 与「不再保留」一致，是接受过的取舍。
 	// 只认交互输入（rpc / extension 来源不算"用户继续对话"）。
 	pi.on("input", (event, ctx) => {
 		if (event.source !== "interactive") return;
@@ -390,7 +395,7 @@ export default function (pi: ExtensionAPI) {
 	// ─── 命令 ──────────────────────────────────────────────────
 
 	pi.registerCommand("recap", {
-		description: "总结当前对话",
+		description: "Summarize the current conversation",
 		handler: async (_args, ctx) => {
 			// 重复执行闸门：已经为**当前这一轮对话**生成过摘要、且它还挂在屏幕上时，直接返回。
 			// 这时再跑一遍模型只会得到同一份摘要（最后一轮对话根本没变），而万一它这次返回空
@@ -405,7 +410,7 @@ export default function (pi: ExtensionAPI) {
 			completedKey = undefined;
 			// 手动触发不走「有没有子代理在跑」的闸门：用户现在就要，不管后台在跑什么。
 			await generate(ctx, true);
-			ctx.ui.notify(currentRecap ? `✦ Recap: ${currentRecap}` : "没能生成 recap（无可用对话或模型返回为空）", "info");
+			ctx.ui.notify(currentRecap ? `✦ Recap: ${currentRecap}` : "Could not generate a recap (no usable conversation, or the model returned nothing)", "info");
 		},
 	});
 

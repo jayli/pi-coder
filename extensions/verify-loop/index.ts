@@ -267,7 +267,7 @@ export default function verifyLoop(pi: ExtensionAPI): void {
 	//
 	// 圆点与标签**同槽**：拦截（gate）/ 停与上限 → `warning`（用户要的「还是原有的警告颜色」），
 	// 达成 → `success`，不可能 → `error`，未达成 → `accent`；标签加粗。正文不染色，
-	// 结构符 `│` / `└` 走 `muted`。折行在挂树符**之前**做（正文宽度 = 总宽 - 缩进 - 树符），
+	// 结构符 `│` / `└` 走 `dim`。折行在挂树符**之前**做（正文宽度 = 总宽 - 缩进 - 树符），
 	// 所以树是连续的：除末行外全 `│ `，末行 `└ `。
 
 	/** 注入消息的标题：圆点与标签共用同一个语义色槽。 */
@@ -275,11 +275,11 @@ export default function verifyLoop(pi: ExtensionAPI): void {
 		const label = (
 			{
 				gate: ["warning", "⚠ verify-loop:"],
-				"goal-met": ["success", "◎ goal 达成:"],
-				"goal-impossible": ["error", "◎ goal 不可能:"],
-				"goal-halted": ["warning", "◎ goal 已停:"],
-				"goal-cap": ["warning", "◎ goal 已停:"],
-				"goal-not-met": ["accent", "◎ goal 未达成:"],
+				"goal-met": ["success", "◎ goal met:"],
+				"goal-impossible": ["error", "◎ goal impossible:"],
+				"goal-halted": ["warning", "◎ goal halted:"],
+				"goal-cap": ["warning", "◎ goal halted:"],
+				"goal-not-met": ["accent", "◎ goal not met:"],
 			} as const
 		)[kind] ?? (["warning", "⚠ verify-loop:"] as const);
 		const [slot, text] = label;
@@ -303,7 +303,7 @@ export default function verifyLoop(pi: ExtensionAPI): void {
 				const rows: string[] = [];
 				for (const line of body.split("\n")) rows.push(...wrapTextWithAnsi(line, bodyWidth));
 				for (let index = 0; index < rows.length; index += 1) {
-					lines.push(BODY_INDENT + theme.fg("muted", index === rows.length - 1 ? TREE_LAST : TREE_PIPE) + rows[index]!);
+					lines.push(BODY_INDENT + theme.fg("dim", index === rows.length - 1 ? TREE_LAST : TREE_PIPE) + rows[index]!);
 				}
 				cache.set(width, lines);
 				return lines;
@@ -317,7 +317,7 @@ export default function verifyLoop(pi: ExtensionAPI): void {
 	// ── /goal 命令 ─────────────────────────────────────────────────────────
 
 	pi.registerCommand("goal", {
-		description: "设定完成条件，每轮结束由独立模型评估（/goal 查状态，/goal clear 清除）",
+		description: "Set a completion condition; an independent model evaluates it at the end of every turn (/goal shows status, /goal clear clears it)",
 		handler: async (args, ctx) => {
 			const text = args.trim();
 
@@ -329,7 +329,7 @@ export default function verifyLoop(pi: ExtensionAPI): void {
 
 			if (CLEAR_ALIASES.has(text.toLowerCase())) {
 				if (goal.condition === "") {
-					ctx.ui.notify("没有设定 /goal", "info");
+					ctx.ui.notify("No /goal is set", "info");
 					return;
 				}
 				const cleared = goal.condition;
@@ -394,7 +394,7 @@ export default function verifyLoop(pi: ExtensionAPI): void {
 		const verdict = await evaluate(ctx, messages, goal.condition);
 		if (verdict === undefined) {
 			// fail-open：评估器坏了不拦回合（CC 的 hook 失败同样不拦）。
-			if (ctx.hasUI) ctx.ui.notify("[verify-loop] /goal 评估失败，本轮放行", "warning");
+			if (ctx.hasUI) ctx.ui.notify("[verify-loop] /goal evaluation failed; letting this turn through", "warning");
 			return undefined;
 		}
 

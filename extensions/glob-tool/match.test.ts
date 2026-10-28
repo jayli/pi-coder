@@ -91,20 +91,31 @@ test("selectPaths：含换行的路径跳过并计数", async () => {
 	assert.equal(r.skippedNewlines, 1);
 });
 
-test("selectPaths：limit 命中时报告 limitReached", async () => {
+test("selectPaths：limit 命中时报告 limitReached 与截断前总数", async () => {
 	const candidates = Array.from({ length: 5 }, (_, i) => `f${i}.ts`);
 	const r = await selectPaths({ candidates, pattern: "*.ts", limit: 3 });
 	assert.equal(r.paths.length, 3);
 	assert.equal(r.limitReached, 3);
+	// `totalMatches` 是 CC 的 `totalMatches`：用来算「还有多少没列」。
+	assert.equal(r.totalMatches, 5);
 });
 
-test("selectPaths：limit 恰好等于结果数时不算超限", async () => {
+test("selectPaths：未超限时 totalMatches 也如实是匹配总数", async () => {
 	const r = await selectPaths({ candidates: ["a.ts", "b.ts"], pattern: "*.ts", limit: 2 });
-	assert.equal(r.paths.length, 2);
 	assert.equal(r.limitReached, undefined);
+	assert.equal(r.totalMatches, 2);
 });
 
-test("selectPaths：limit 为 0 / 负数 / NaN 回落 1000", async () => {
+test("selectPaths：不传 limit 时用默认上限（1000，与内置 find 同值）", async () => {
+	// 造 1200 个候选：旧默认 100 会截在 100，新默认 1000 截在 1000。
+	const candidates = Array.from({ length: 1200 }, (_, i) => `d/f${String(i).padStart(4, "0")}.ts`);
+	const r = await selectPaths({ candidates, pattern: "**/*.ts" });
+	assert.equal(r.paths.length, 1000, "默认上限应为 1000");
+	assert.equal(r.limitReached, 1000);
+	assert.equal(r.totalMatches, 1200);
+});
+
+test("selectPaths：limit 为 0 / 负数 / NaN 回落默认上限", async () => {
 	const candidates = Array.from({ length: 3 }, (_, i) => `f${i}.ts`);
 	for (const bad of [0, -5, Number.NaN, 1.5]) {
 		const r = await selectPaths({ candidates, pattern: "*.ts", limit: bad });
@@ -139,11 +150,29 @@ test("formatOutput：纯路径列表没有 notices 时不加空行", () => {
 	assert.deepEqual(out.details, {});
 });
 
-test("formatOutput：limit 提示与跳过提示的文案", () => {
-	const out = formatOutput(["a.ts"], { limitReached: 1000, skippedNewlines: 2 });
-	assert.match(out.text, /^a\.ts\n\n\[1000 results limit reached\. Use limit=2000 for more, or refine pattern\]/);
-	assert.match(out.text, /\[skipped 2 paths containing newlines\]/);
-	assert.equal(out.details.resultLimitReached, 1000);
+test("formatOutput：超限提示逐字对齐 CC（知道总数时的措辞 + 紧贴路径续行）", () => {
+	const out = formatOutput(["a.ts"], { limitReached: 100, totalMatches: 142, skippedNewlines: 0 });
+	assert.equal(
+		out.text,
+		"a.ts\n(Showing 1 of 142 matching files; 141 more are not listed. Narrow the pattern or path to see the rest.)",
+	);
+	assert.equal(out.details.resultLimitReached, 100);
+});
+
+test("formatOutput：只知下界时用 CC 的第二种措辞", () => {
+	// `totalMatches` 缺省 = 数不出来（CC 的 `countIsComplete === false` 那一支）。
+	const out = formatOutput(["a.ts"], { limitReached: 100, skippedNewlines: 0 });
+	assert.equal(
+		out.text,
+		"a.ts\n(Showing the first 1 files; there are more than 1 matches. Narrow the pattern or path to see the rest.)",
+	);
+});
+
+test("formatOutput：limit 提示与跳过提示的接法", () => {
+	const out = formatOutput(["a.ts"], { limitReached: 100, totalMatches: 3, skippedNewlines: 2 });
+	assert.match(out.text, /^a\.ts\n\(Showing 1 of 3 matching files/);
+	assert.match(out.text, /\n\n\[skipped 2 paths containing newlines\]$/);
+	assert.equal(out.details.resultLimitReached, 100);
 });
 
 test("formatOutput：字节截断用注入的 truncate，提示带上限", () => {
@@ -160,11 +189,12 @@ test("formatOutput：字节截断用注入的 truncate，提示带上限", () =>
 test("formatOutput：两种限制同时命中时的顺序与分隔", () => {
 	const out = formatOutput(
 		["a.ts"],
-		{ limitReached: 1000, skippedNewlines: 0 },
+		{ limitReached: 100, totalMatches: 142, skippedNewlines: 0 },
 		() => ({ content: "a.ts", truncated: true, maxBytes: 51200 }),
 	);
-	assert.match(out.text, /\[1000 results limit reached[^\]]*\]\. \[50\.0KB limit reached\]/);
-	assert.equal(out.details.resultLimitReached, 1000);
+	// CC 形状的超限行紧贴正文；pi 独有的字节上限另起一段。
+	assert.match(out.text, /^a\.ts\n\(Showing 1 of 142 matching files[^\n]*\)\n\n\[50\.0KB limit reached\]$/);
+	assert.equal(out.details.resultLimitReached, 100);
 	assert.equal(out.details.truncated, true);
 });
 

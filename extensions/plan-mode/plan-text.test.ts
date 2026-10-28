@@ -21,6 +21,7 @@ import {
 	truncatePlanForDialog,
 	type WrapFn,
 } from "./plan-text.ts";
+import { FRAME_HEIGHT, bodyTextWidth } from "./frame.ts";
 
 describe("注入上下文", () => {
 	it("plan 阶段说明只读阶段、点名 exit_plan_mode 与 cwd", () => {
@@ -159,10 +160,17 @@ function dialogHeight(text: string, contentWidth: number): number {
 }
 
 describe("dialogPlanBudget", () => {
-	it("宽终端：chrome 11 行（三选一）+ 下方预留 5 行", () => {
+	it("宽终端：chrome 13 行（三选一 11 + 线框上下边 2）+ 下方预留 5 行", () => {
 		const { budget, contentWidth } = dialogPlanBudget({ rows: 40, columns: 100 });
-		assert.equal(contentWidth, 98, "Text 的 paddingX=1，左右各吃一列");
-		assert.equal(budget, 40 - 11 - 5);
+		assert.equal(contentWidth, 94, "paddingX 左右各 1，再减框的边框与留白 4 列");
+		assert.equal(budget, 40 - 13 - 5);
+	});
+
+	it("内宽与 frame.ts 同源（列数 − paddingX 2 − FRAME_INSET），高度多减线框上下两条", () => {
+		for (const columns of [200, 100, 80, 60]) {
+			assert.equal(dialogPlanBudget({ rows: 40, columns }).contentWidth, bodyTextWidth(columns - 2));
+		}
+		assert.equal(FRAME_HEIGHT, 2);
 	});
 
 	it("窄终端（<50 列）：快捷键提示折行，chrome 多 1 行", () => {
@@ -172,7 +180,9 @@ describe("dialogPlanBudget", () => {
 	});
 
 	it("列宽有下限，极窄终端不会算出 0 或负数", () => {
-		assert.ok(dialogPlanBudget({ rows: 40, columns: 1 }).contentWidth >= 8);
+		// 内宽的下限归 frame.ts 管（框本身还得有个框样），这里只保证不会算出非正数
+		assert.ok(dialogPlanBudget({ rows: 40, columns: 1 }).contentWidth >= bodyTextWidth(1));
+		assert.ok(dialogPlanBudget({ rows: 40, columns: 1 }).contentWidth > 0);
 	});
 });
 
@@ -181,7 +191,7 @@ describe("truncatePlanForDialog", () => {
 		const plan = makePlan(5);
 		const result = truncatePlanForDialog(plan, { rows: 40, columns: 100 }, wrapByChars);
 		assert.equal(result, plan);
-		assert.ok(!result.includes("还有"), "不该出现截断提示");
+		assert.ok(!result.includes("more lines"), "不该出现截断提示");
 	});
 
 	it("markdown 的空行也占一行（段落间距是可读性的一部分）", () => {
@@ -200,11 +210,11 @@ describe("truncatePlanForDialog", () => {
 		const metrics = { rows: 40, columns: 100 };
 		const { budget, contentWidth } = dialogPlanBudget(metrics);
 		const exact = truncatePlanForDialog(makePlan(budget), metrics, wrapByChars);
-		assert.ok(!exact.includes("还有"), `${budget} 行刚好塞满，不该截断`);
+		assert.ok(!exact.includes("more lines"), `${budget} 行刚好塞满，不该截断`);
 
 		const over = truncatePlanForDialog(makePlan(budget + 1), metrics, wrapByChars);
 		// 提示行自己占 1 行，所以能完整留下的只有 budget-1 行，藏起来的是 2 行。
-		assert.match(over, /还有 2 行/, "多一行就该截断并点名剩下几行");
+		assert.match(over, /2 more lines/, "多一行就该截断并点名剩下几行");
 		assert.equal(dialogHeight(over, contentWidth), budget, "截断后恰好占满预算");
 	});
 
@@ -212,19 +222,19 @@ describe("truncatePlanForDialog", () => {
 		const metrics = { rows: 30, columns: 100 };
 		const result = truncatePlanForDialog(makePlan(40), metrics, wrapByChars);
 		const lines = result.split("\n");
-		assert.match(lines[lines.length - 1]!, /^… 还有 \d+ 行（上翻终端可看完整计划）$/);
+		assert.match(lines[lines.length - 1]!, /^… \d+ more lines \(scroll up to see the full plan\)$/);
 		const { budget } = dialogPlanBudget(metrics);
 		assert.ok(lines.length <= budget, `${lines.length} 行应 ≤ 预算 ${budget}`);
 	});
 
 	it("折行占多行的段落按真实高度计入预算", () => {
-		// 每行 300 字符，在 98 列下折成 4 行（wrapByChars 按字符硬断）
+		// 每行 300 字符，在 94 列下折成 4 行（wrapByChars 按字符硬断）
 		const long = "x".repeat(300);
 		const metrics = { rows: 30, columns: 100 };
 		const { budget, contentWidth } = dialogPlanBudget(metrics);
 		const result = truncatePlanForDialog(makePlan(20, long), metrics, wrapByChars);
 		assert.ok(dialogHeight(result, contentWidth) <= budget, `截断后总高应 ≤ 预算 ${budget}`);
-		assert.match(result, /还有 \d+ 行/);
+		assert.match(result, /\d+ more lines/);
 	});
 
 	it("CJK 文案按注入的折行器算高度（生产注入 pi-tui 的 wrapTextWithAnsi，逐字断行）", () => {
@@ -236,16 +246,16 @@ describe("truncatePlanForDialog", () => {
 	});
 
 	it("终端极矮（预算连一行都放不下）时只给提示行，不超预算", () => {
-		const metrics = { rows: 17, columns: 100 }; // budget = 17 - 11 - 5 = 1
+		const metrics = { rows: 19, columns: 100 }; // budget = 19 - 13 - 5 = 1
 		const { budget } = dialogPlanBudget(metrics);
 		const result = truncatePlanForDialog(makePlan(8), metrics, wrapByChars);
 		assert.ok(budget <= 1, `这个终端的预算应是 1，实际 ${budget}`);
 		assert.equal(result.split("\n").length, 1, "只有一行提示");
-		assert.match(result, /共 8 行/);
+		assert.match(result, /the plan has 8 lines/);
 	});
 
 	it("预算为 0 或负数（终端矮到放不下对话框）也不崩、不超预算", () => {
-		for (const rows of [16, 10, 1]) {
+		for (const rows of [18, 10, 1]) {
 			const metrics = { rows, columns: 100 };
 			const result = truncatePlanForDialog(makePlan(8), metrics, wrapByChars);
 			assert.equal(result.split("\n").length, 1, `rows=${rows} 应只有一行提示`);
@@ -253,7 +263,7 @@ describe("truncatePlanForDialog", () => {
 	});
 
 	it("一行超长计划按宽度截到能显示，不给用户一个空框", () => {
-		const metrics = { rows: 20, columns: 100 }; // budget = 4
+		const metrics = { rows: 22, columns: 100 }; // budget = 4
 		const result = truncatePlanForDialog("x".repeat(2000), metrics, wrapByChars);
 		assert.ok(result.length > 0);
 		assert.ok(dialogHeight(result, dialogPlanBudget(metrics).contentWidth) <= 4);

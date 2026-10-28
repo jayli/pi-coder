@@ -248,9 +248,9 @@ test("apply_patch：危险路径（~/Library）弹危险框，没有「记住」
 		const verdict = await h.call("apply_patch", { patch });
 		assert.deepEqual(verdict, {}, "同意后应放行");
 		assert.equal(h.selects.length, 1, "应当弹一次框");
-		assert.match(h.selects[0].title, /危险目录/, "~/Library 是危险档（必问可豁免）");
+		assert.match(h.selects[0].title, /dangerous directory/, "~/Library 是危险档（必问可豁免）");
 		assert.deepEqual(h.selects[0].options, ["Deny", "Allow once", "Allow for this session"], "危险目录没有「记住」选项");
-		assert.ok(h.selects[0].title.includes("可删边界之外"));
+		assert.ok(h.selects[0].title.includes("outside the deletable boundary"));
 		assert.equal(fs.existsSync(h.allowlistFile), false, "危险路径永远不落盘");
 	} finally {
 		h.cleanup();
@@ -262,7 +262,7 @@ test("apply_patch：永不删除路径（~/.zshrc）不弹框、无任何放行�
 	try {
 		const verdict = await h.call("apply_patch", { patch: `*** Delete File: ${HOME}/.zshrc\n` });
 		assert.equal(verdict.block, true, "永不删除：不给删");
-		assert.match(verdict.reason ?? "", /永不删除/, "理由要点名档位");
+		assert.match(verdict.reason ?? "", /never-delete/, "理由要点名档位");
 		assert.equal(h.selects.length, 0, "不弹框 —— 没有放行选项可给");
 		assert.equal(h.confirms.length, 0);
 		assert.equal(fs.existsSync(h.allowlistFile), false, "什么都不落盘");
@@ -289,12 +289,12 @@ test("apply_patch：永不删除子树（~/.ssh、~/.gnupg）同样 block；项�
 });
 
 test("apply_patch：永不删除与普通路径混排 —— 整份 patch 一起拒", { skip }, async () => {
-	const h = await loadHarness({ selections: ["Allow for this session（并记住该目录）"] });
+	const h = await loadHarness({ selections: ["Allow for this session (remember this directory)"] });
 	try {
 		const patch = `*** Delete File: ${HOME}/Downloads/ok.txt\n*** Delete File: ${HOME}/.zshrc\n`;
 		const verdict = await h.call("apply_patch", { patch });
 		assert.equal(verdict.block, true, "混一个永不删除路径，整份 patch 拒");
-		assert.match(verdict.reason ?? "", /永不删除/);
+		assert.match(verdict.reason ?? "", /never-delete/);
 		assert.equal(h.selects.length, 0, "不给「批准其余部分」的机会");
 		assert.equal(fs.existsSync(h.allowlistFile), false, "也不落盘");
 	} finally {
@@ -326,14 +326,14 @@ test("apply_patch：危险路径每次都问，「Allow for this session」后�
 });
 
 test("apply_patch：普通边界外路径（~/Downloads）弹普通框，`Allow for this session（并记住该目录）`后落盘且不再问", { skip }, async () => {
-	const h = await loadHarness({ selections: ["Allow for this session（并记住该目录）"] });
+	const h = await loadHarness({ selections: ["Allow for this session (remember this directory)"] });
 	const target = `${HOME}/Downloads/sbx-probe-file.txt`;
 	try {
 		const verdict = await h.call("apply_patch", { patch: `*** Delete File: ${target}\n` });
 		assert.deepEqual(verdict, {}, "同意后应放行");
 		assert.equal(h.selects.length, 1);
-		assert.deepEqual(h.selects[0].options, ["Deny", "Allow for this session（并记住该目录）", "Allow once"], "普通目录的三选项");
-		assert.ok(h.selects[0].title.includes("可删边界之外") && !h.selects[0].title.includes("危险"), "普通框不是危险框");
+		assert.deepEqual(h.selects[0].options, ["Deny", "Allow for this session (remember this directory)", "Allow once"], "普通目录的三选项");
+		assert.ok(h.selects[0].title.includes("outside the deletable boundary") && !h.selects[0].title.includes("dangerous"), "普通框不是危险框");
 		// 落盘：记住的是父目录 ~/Downloads，不是那个文件
 		const onDisk = JSON.parse(fs.readFileSync(h.allowlistFile, "utf8"));
 		assert.deepEqual(onDisk.entries.map((e: { path: string }) => e.path), [`${HOME}/Downloads`]);
@@ -341,7 +341,7 @@ test("apply_patch：普通边界外路径（~/Downloads）弹普通框，`Allow 
 		const verdict2 = await h.call("apply_patch", { patch: `*** Delete File: ${HOME}/Downloads/sbx-probe-2.txt\n` });
 		assert.deepEqual(verdict2, {});
 		assert.equal(h.selects.length, 1, "已记住的目录不再弹框");
-		assert.ok(h.notifies.some((n) => n.includes("白名单")), "命中白名单放行要 notify（不能静默）");
+		assert.ok(h.notifies.some((n) => n.includes("allowlisted")), "命中白名单放行要 notify（不能静默）");
 	} finally {
 		h.cleanup();
 	}
@@ -350,10 +350,10 @@ test("apply_patch：普通边界外路径（~/Downloads）弹普通框，`Allow 
 test("apply_patch：工具状态目录（~/.pi、~/.config、~/.claude、~/.codex）是普通档 —— 弹框可记住（用户 2026-09-25）", { skip }, async () => {
 	const h = await loadHarness({
 		selections: [
-			"Allow for this session（并记住该目录）",
-			"Allow for this session（并记住该目录）",
-			"Allow for this session（并记住该目录）",
-			"Allow for this session（并记住该目录）",
+			"Allow for this session (remember this directory)",
+			"Allow for this session (remember this directory)",
+			"Allow for this session (remember this directory)",
+			"Allow for this session (remember this directory)",
 		],
 	});
 	try {
@@ -362,8 +362,8 @@ test("apply_patch：工具状态目录（~/.pi、~/.config、~/.claude、~/.code
 		const verdict = await h.call("apply_patch", { patch: `*** Delete File: ${HOME}/.pi/agent/sbx-probe-lock.txt\n` });
 		assert.deepEqual(verdict, {}, "同意后应放行（不再是永不删除的直接拒）");
 		assert.equal(h.selects.length, 1, "应当弹一次框");
-		assert.deepEqual(h.selects[0].options, ["Deny", "Allow for this session（并记住该目录）", "Allow once"], "普通目录的三选项");
-		assert.ok(!h.selects[0].title.includes("危险"), "不是危险框");
+		assert.deepEqual(h.selects[0].options, ["Deny", "Allow for this session (remember this directory)", "Allow once"], "普通目录的三选项");
+		assert.ok(!h.selects[0].title.includes("dangerous"), "不是危险框");
 		const onDisk = JSON.parse(fs.readFileSync(h.allowlistFile, "utf8"));
 		assert.deepEqual(onDisk.entries.map((e: { path: string }) => e.path), [`${HOME}/.pi/agent`], "记住父目录");
 
@@ -397,7 +397,7 @@ test("apply_patch：拒绝（Deny）则拦截，什么都没落盘", { skip }, a
 		const patch = `*** Delete File: ${HOME}/Library/Preferences/sbx-deny.plist\n`;
 		const verdict = await h.call("apply_patch", { patch });
 		assert.equal(verdict.block, true, "拒绝后应拦截");
-		assert.match(verdict.reason ?? "", /拒绝删除/);
+		assert.match(verdict.reason ?? "", /denied deleting/);
 		assert.equal(fs.existsSync(h.allowlistFile), false);
 	} finally {
 		h.cleanup();
@@ -433,7 +433,7 @@ test("apply_patch：非交互环境 fail-closed，未授权的边界外删除直
 	try {
 		const verdict = await h.call("apply_patch", { patch: `*** Delete File: ${HOME}/Library/Preferences/sbx-headless.plist\n` });
 		assert.equal(verdict.block, true, "非交互应直接拦");
-		assert.match(verdict.reason ?? "", /非交互环境/);
+		assert.match(verdict.reason ?? "", /non-interactive session/);
 		assert.equal(h.selects.length, 0, "非交互不该有弹窗");
 		assert.equal(h.confirms.length, 0);
 	} finally {
@@ -457,8 +457,8 @@ test("apply_patch：非交互环境 + 预置白名单也拦危险路径", { skip
 	try {
 		const verdict = await h.call("apply_patch", { patch: `*** Delete File: ${HOME}/Library/Preferences/sbx-headless2.plist\n` });
 		assert.equal(verdict.block, true, "白名单里没有它 → 仍 fail-closed");
-		assert.match(verdict.reason ?? "", /非交互环境/);
-		assert.match(verdict.reason ?? "", /持久白名单：1 条/, "理由要告诉模型现在有几条白名单");
+		assert.match(verdict.reason ?? "", /non-interactive session/);
+		assert.match(verdict.reason ?? "", /Persistent allowlist: 1 entries/, "理由要告诉模型现在有几条白名单");
 	} finally {
 		h.cleanup();
 	}
@@ -469,7 +469,7 @@ test("apply_patch：非交互环境也拦永不删除路径（理由点名档位
 	try {
 		const verdict = await h.call("apply_patch", { patch: `*** Delete File: ${HOME}/.zshrc\n` });
 		assert.equal(verdict.block, true, "headless 下永不删除照样拦");
-		assert.match(verdict.reason ?? "", /永不删除/);
+		assert.match(verdict.reason ?? "", /never-delete/);
 		assert.equal(h.selects.length, 0);
 	} finally {
 		h.cleanup();
@@ -558,15 +558,15 @@ test("dangerous 模式下 /sandbox-boundary 命令说明拦截已关", { skip },
 });
 
 test("/sandbox-boundary 命令报告边界、白名单与会话豁免", { skip }, async () => {
-	const h = await loadHarness({ selections: ["Allow for this session（并记住该目录）"] });
+	const h = await loadHarness({ selections: ["Allow for this session (remember this directory)"] });
 	try {
 		await h.call("apply_patch", { patch: `*** Delete File: ${HOME}/Downloads/sbx-probe.txt\n` });
 		await h.runCommand();
 		const report = h.notifies[h.notifies.length - 1] ?? "";
-		assert.match(report, /可删边界/);
-		assert.match(report, /持久白名单/, "要列出持久白名单");
+		assert.match(report, /Deletable boundary/);
+		assert.match(report, /Persistent allowlist/, "要列出持久白名单");
 		assert.ok(report.includes(`${HOME}/Downloads`), "白名单条目要显示出来");
-		assert.match(report, /会话级豁免/);
+		assert.match(report, /Session-wide exemptions/);
 	} finally {
 		h.cleanup();
 	}

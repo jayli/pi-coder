@@ -43,7 +43,7 @@ import { Text } from "@earendil-works/pi-tui";
 import { readFileSync } from "node:fs";
 import { stat } from "node:fs/promises";
 import { homedir } from "node:os";
-import { isAbsolute, join, resolve as resolvePath } from "node:path";
+import { isAbsolute, join, relative as relativePath, resolve as resolvePath, sep } from "node:path";
 import { Type } from "typebox";
 
 import { collectCandidates } from "./candidates.ts";
@@ -114,6 +114,20 @@ export interface GlobToolDetails {
 function resolveSearchRoot(rawPath: string | undefined, cwd: string): string {
 	const target = rawPath === undefined || rawPath.trim() === "" ? "." : rawPath.trim();
 	return isAbsolute(target) ? target : resolvePath(cwd, target);
+}
+
+/**
+ * 把一条“相对搜索根”的结果路径换成**相对 cwd** 的显示路径 —— Claude Code 的 Glob 就是
+ * 这个基准（`path: "sub"` + `**\/*.ts` 在 CC 里回 `sub/a.ts{@\"\"}`，而不是 `a.ts{@\"\"}`）。
+ *
+ * 搜索根在 cwd 之外（`path: "../other"`）时给绝对路径，与 CC 的 `Aat` 同一条规则：
+ * 相对路径以 `..` 开头就退回绝对路径，否则模型拿到的相对路径无处可读。
+ */
+function toCwdRelative(cwd: string, searchRoot: string, relativeToRoot: string): string {
+	const rootFromCwd = relativePath(cwd, searchRoot).split(sep).join("/");
+	if (rootFromCwd === "") return relativeToRoot;
+	if (rootFromCwd === ".." || rootFromCwd.startsWith("../")) return resolvePath(searchRoot, relativeToRoot);
+	return `${rootFromCwd}/${relativeToRoot}`;
 }
 
 /** 把一个可选的 mtime 取法绑到具体搜索根上。 */
@@ -189,7 +203,7 @@ export function createGlobToolDefinition(cwd: string): ToolDefinition<typeof glo
 		label: TOOL_LABEL,
 		description:
 			`Find files by walking the repository index instead of the directory tree. ` +
-			`Returns paths relative to the search directory, sorted by path. Never returns .git/ internals or ` +
+			`Returns paths relative to the working directory, sorted by path. Never returns .git/ internals or ` +
 			`directories, and every pattern form works — including ones with '/' such as 'src/**/*.ts'. ` +
 			`Output is truncated to ${DEFAULT_LIMIT} results or ${DEFAULT_MAX_BYTES / 1024}KB (whichever is hit first).`,
 		// `description` 与内置 `find` 的区分点必须**逐字**出现在第一句（见 `globPromptContribution`
@@ -202,14 +216,16 @@ export function createGlobToolDefinition(cwd: string): ToolDefinition<typeof glo
 			const pattern = typeof params.pattern === "string" ? params.pattern.trim() : "";
 			if (pattern === "") throw new Error("glob: pattern is required");
 
-			const searchRoot = resolveSearchRoot(params.path, ctx?.cwd || cwd);
+			// 结果基准是 **cwd**，不是搜索根（对齐 CC）；匹配仍在搜索根内做。
+			const cwdForOutput = ctx?.cwd || cwd;
+			const searchRoot = resolveSearchRoot(params.path, cwdForOutput);
 			let rootStat;
 			try {
 				rootStat = await stat(searchRoot);
 			} catch {
-				throw new Error(`Path not found: ${searchRoot}`);
+				throw new Error(`Directory does not exist: ${params.path?.trim() || searchRoot}`);
 			}
-			if (!rootStat.isDirectory()) throw new Error(`Path not found: ${searchRoot}`);
+			if (!rootStat.isDirectory()) throw new Error(`Path is not a directory: ${params.path?.trim() || searchRoot}`);
 
 			const candidates = await collectCandidates(searchRoot, {
 				includeIgnored: params.include_ignored === true,
@@ -227,12 +243,17 @@ export function createGlobToolDefinition(cwd: string): ToolDefinition<typeof glo
 			});
 
 			if (selected.paths.length === 0) {
-				return { content: [{ type: "text", text: "No files found matching pattern" }], details: undefined };
+				// CC 的 Glob 就回这四个字（`mapToolResultToToolResultBlockParam`）。
+				return { content: [{ type: "text", text: "No files found" }], details: undefined };
 			}
 
 			const formatted = formatOutput(
-				selected.paths,
-				{ limitReached: selected.limitReached, skippedNewlines: selected.skippedNewlines },
+				selected.paths.map((relativeToRoot) => toCwdRelative(cwdForOutput, searchRoot, relativeToRoot)),
+				{
+					limitReached: selected.limitReached,
+					totalMatches: selected.totalMatches,
+					skippedNewlines: selected.skippedNewlines,
+				},
 				(text) => truncateHead(text, { maxLines: Number.MAX_SAFE_INTEGER }),
 			);
 			const details: GlobToolDetails = {};

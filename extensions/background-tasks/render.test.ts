@@ -25,6 +25,7 @@ import {
 	classifyBgNotificationOutcome,
 	classifyBgToolOutcome,
 	classifyBgWaitOutcome,
+	fitLogLine,
 	previewMoreLinesHint,
 } from "./render.ts";
 
@@ -179,5 +180,54 @@ describe("预览截断提示", () => {
 	it("单数 / 复数分别拼 line / lines", () => {
 		assert.equal(previewMoreLinesHint(1), "… (1 more line, ctrl+o to expand)");
 		assert.equal(previewMoreLinesHint(12), "… (12 more lines, ctrl+o to expand)");
+	});
+});
+
+/** 纯 ASCII 的宽度就是长度（真宽度 O(1) 的替身，测试不需要 grapheme 那套）。 */
+const charWidth = (text: string): number => text.length;
+
+const LONG_LOG_PATH = "/Users/bachi/.pi/agent/bg-tasks/01a18021-01d6-7772-a70f-50049cc64d61/bg_2.log";
+
+describe("日志行永不折行（太长就把前面换成 …）", () => {
+	it("不是日志行（没有 Log: / Full log: 前缀）原样返回", () => {
+		const line = "offset 0 → 6";
+		assert.equal(fitLogLine(line, 10, charWidth), line);
+		assert.equal(fitLogLine("Log:/no-space", 10, charWidth), "Log:/no-space");
+	});
+
+	it("放得下就一个字都不动（标签后仍是一个空格）", () => {
+		const line = `Log: ${LONG_LOG_PATH}`;
+		assert.equal(fitLogLine(line, line.length, charWidth), line);
+		assert.equal(fitLogLine(line, 500, charWidth), line);
+	});
+
+	it("放不下：去掉标签后的空格，前面换成 …，只留能塞下的尾部", () => {
+		const line = `Log: ${LONG_LOG_PATH}`;
+		const fitted = fitLogLine(line, 74, charWidth);
+		assert.equal(fitted.length, 74, `缩略后要正好吃满预算：${JSON.stringify(fitted)}`);
+		assert.ok(fitted.startsWith("Log:…"), `缩略形态是 Log:…（无空格）：${JSON.stringify(fitted)}`);
+		assert.ok(fitted.endsWith("bg_2.log"), `尾部（文件名）要留下来：${JSON.stringify(fitted)}`);
+		assert.ok(LONG_LOG_PATH.endsWith(fitted.slice("Log:…".length)), "留下的必须是原路径的连续尾部");
+	});
+
+	it("Full log: 是同一套处理（终态通知正文用这个标签）", () => {
+		const fitted = fitLogLine(`Full log: ${LONG_LOG_PATH}`, 40, charWidth);
+		assert.equal(fitted.length, 40);
+		assert.ok(fitted.startsWith("Full log:…"), JSON.stringify(fitted));
+		assert.ok(fitted.endsWith("bg_2.log"));
+	});
+
+	it("窄到只放得下省略号时退化成 `Log:…`（绝不超预算）", () => {
+		assert.equal(fitLogLine(`Log: ${LONG_LOG_PATH}`, 5, charWidth), "Log:…");
+		assert.equal(fitLogLine(`Log: ${LONG_LOG_PATH}`, 4, charWidth), "Log:…", "预算比前缀+…还小时也不折行");
+		assert.equal(fitLogLine(`Log: ${LONG_LOG_PATH}`, 0, charWidth), "Log:…");
+	});
+
+	it("按注入的宽度函数算，不按字符数（宽字符 / 转义串才算得准）", () => {
+		// 每个字符按 2 列算：预算 20 ⇒ `Log:` 4 + `…` + 最多 7 个字符
+		const wide = (text: string): number => Array.from(text).length * 2;
+		const fitted = fitLogLine(`Log: ${LONG_LOG_PATH}`, 20, wide);
+		assert.ok(wide(fitted) <= 20, `宽度不能超预算：${JSON.stringify(fitted)}`);
+		assert.ok(fitted.endsWith("g"), "尾部字符还在（宽度算法不同只是留得少一点）");
 	});
 });

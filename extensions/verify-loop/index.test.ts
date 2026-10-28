@@ -538,7 +538,7 @@ test(
 		const messages = [user("开始"), assistantText("完成了")];
 		const result = await settleWithGoal(harness, messages);
 		assert.equal(result, undefined, "评估失败应放行");
-		assert.ok(harness.notifies.some((text) => text.includes("评估失败")));
+		assert.ok(harness.notifies.some((text) => text.includes("evaluation failed")));
 	},
 );
 
@@ -712,9 +712,9 @@ test(
 		const lines = await renderMessage("gate", "第一行\n第二行\n第三行", 80, slotTheme);
 		assert.deepEqual(lines, [
 			`warning(\u2022) warning(bold(⚠ verify-loop:))`,
-			`  muted(\u2502 )第一行`,
-			`  muted(\u2502 )第二行`,
-			`  muted(\u2514 )第三行`,
+			`  dim(\u2502 )第一行`,
+			`  dim(\u2502 )第二行`,
+			`  dim(\u2514 )第三行`,
 		]);
 	},
 );

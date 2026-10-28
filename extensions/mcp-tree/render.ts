@@ -148,8 +148,8 @@ export function shapeResultLines(
 	while (last >= 0 && isBlankLine(lines[last]!)) last--;
 	if (last < 0) return [];
 
-	const pipe = `${GUTTER_LEAD}${theme.fg("muted", "\u2502 ")}`;
-	const corner = `${GUTTER_LEAD}${theme.fg("muted", "\u2514 ")}`;
+	const pipe = `${GUTTER_LEAD}${theme.fg("dim", "\u2502 ")}`;
+	const corner = `${GUTTER_LEAD}${theme.fg("dim", "\u2514 ")}`;
 
 	return lines.map((line, index) => {
 		if (index === last) return `${corner}${line}`;

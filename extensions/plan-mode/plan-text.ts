@@ -20,6 +20,7 @@
  */
 
 import type { PlanDocMode } from "./plan.ts";
+import { FRAME_HEIGHT, bodyTextWidth } from "./frame.ts";
 
 // =============================================================================
 // 批准对话框的计划截断
@@ -27,12 +28,13 @@ import type { PlanDocMode } from "./plan.ts";
 
 /**
  * 对话框除计划正文外固定占用的行数。实测 `ExtensionSelectorComponent.render(100)`
- * 的输出：上下边框 2 + 空行 4 + 标题 1 + 选项行 + 快捷键提示 1。三选一比两选一多一行，
- * 所以基数是 **11**。终端窄于 `NARROW_COLUMNS` 时提示行折成两行，再多 1 行
- * （实测 W=40 → 12）。
+ * 的输出：上下边框 2 + 空行 4 + 标题 1 + 选项行 + 快捷键提示 1，**再加正文线框的
+ * 上下两条横线 2 行**（2026-10-27 起正文进框，`frame.ts` 的 `FRAME_HEIGHT`）。
+ * 三选一比两选一多一行，所以基数是 **13**。终端窄于 `NARROW_COLUMNS` 时提示行折成
+ * 两行，再多 1 行（实测 W=40 → 14）。
  */
-const DIALOG_CHROME_LINES = 11;
-const DIALOG_CHROME_LINES_NARROW = 12;
+const DIALOG_CHROME_LINES = 11 + FRAME_HEIGHT;
+const DIALOG_CHROME_LINES_NARROW = 12 + FRAME_HEIGHT;
 const NARROW_COLUMNS = 50;
 
 /**
@@ -47,7 +49,7 @@ const NARROW_COLUMNS = 50;
  */
 const BELOW_DIALOG_RESERVE = 5;
 
-/** `Text` 的左右内边距（构造时 `paddingX = 1`），正文可用宽度 = 终端列数 - 2。 */
+/** `Text` 的左右内边距（构造时 `paddingX = 1`），对话框可用宽度 = 终端列数 - 2。 */
 const DIALOG_PADDING_X = 1;
 
 /** 截断后追加的提示行占 1 行。 */
@@ -66,7 +68,10 @@ export type WrapFn = (text: string, width: number) => string[];
 
 /** 对话框留给计划正文的行数预算与正文可用列宽。 */
 export function dialogPlanBudget(metrics: DialogMetrics): { budget: number; contentWidth: number } {
-	const contentWidth = Math.max(8, metrics.columns - DIALOG_PADDING_X * 2);
+	// 正文现在装在框里：宽度要减掉框的边框与留白，行数要减掉上下两条横线。
+	// 两个数字必须与 frame.ts 同源（那里是 geometry 的唯一出处），否则框里的正文会
+	// 二次折行、右边框被挤到下一行。
+	const contentWidth = bodyTextWidth(Math.max(1, metrics.columns - DIALOG_PADDING_X * 2));
 	const chrome = metrics.columns < NARROW_COLUMNS ? DIALOG_CHROME_LINES_NARROW : DIALOG_CHROME_LINES;
 	return { budget: metrics.rows - chrome - BELOW_DIALOG_RESERVE, contentWidth };
 }
@@ -103,7 +108,7 @@ export function truncatePlanForDialog(plan: string, metrics: DialogMetrics, wrap
 	if (total <= budget) return lines.join("\n");
 
 	// 预算连「一行 + 提示行」都放不下（终端极矮）：只给提示行，保证不超预算。
-	if (budget <= HINT_LINES) return `… 计划共 ${lines.length} 行（终端太矮放不下，上翻终端可看全文）`;
+	if (budget <= HINT_LINES) return `… the plan has ${lines.length} lines (the terminal is too short; scroll up to read it in full)`;
 
 	const usable = budget - HINT_LINES;
 	const kept: string[] = [];
@@ -126,7 +131,7 @@ export function truncatePlanForDialog(plan: string, metrics: DialogMetrics, wrap
 	}
 
 	const hidden = lines.length - fullyKept;
-	if (hidden > 0) kept.push(`… 还有 ${hidden} 行（上翻终端可看完整计划）`);
+	if (hidden > 0) kept.push(`… ${hidden} more lines (scroll up to see the full plan)`);
 	return kept.join("\n");
 }
 

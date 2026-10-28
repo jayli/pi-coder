@@ -56,7 +56,7 @@
  * 几何与 plan 块是**同一张表**：标题行从状态圆点起**顶格**（圆点是这一块的状态灯，贴着
  * 左边界块与块才分得开），正文树前面挂 **2 列**缩进（`BODY_INDENT`），于是 `•` 在列 0、
  * `│` / `└` 在列 2、正文在列 4 —— `│` 正好落在 `run_in_background` 首字母 `r` 正下方。
- * 结构符 `│` / `└` 走 `muted` 槽且**自成一段 SGR**（不让后面正文的颜色透上来），正文走
+ * 结构符 `│` / `└` 走 `dim` 槽且**自成一段 SGR**（不让后面正文的颜色透上来），正文走
  * **结果正文色**（皮肤 `vars.bashOutput`，没定义时退回 `toolOutput` 槽；
  * 用户 2026-10-06 定：与 bash 工具调用后显示的输出结果同色，而不是 `text` 槽的 fg）。
  *
@@ -265,4 +265,53 @@ export function bgResultTreePrefixes(lineCount: number, closeLast = true): strin
  */
 export function previewMoreLinesHint(hidden: number): string {
 	return `… (${hidden} more line${hidden === 1 ? "" : "s"}, ctrl+o to expand)`;
+}
+
+/**
+ * 会被缩略的标签行：只要标签后面跟一个空格就命中。
+ *
+ * `Log: ` 是本扩展三个工具结果里的标签；`Full log: ` 是终态通知正文里的同一个东西。
+ */
+export const LOG_LINE_LABELS = ["Log:", "Full log:"] as const;
+
+/**
+ * 日志路径行**永不折行**：放不下就把路径前段换成 `…`，只留装得下的尾部。
+ *
+ * 用户 2026-10-28 定：`Log: <很长的日志绝对路径>` 折行后会把树切成
+ *
+ * ```
+ * │ Log:
+ * │ /Users/…/bg_2.l
+ * │ og
+ * ```
+ *
+ * 末尾那个 `og` 是纯噪声 —— 路径本来就是要复制去用的东西，折行反而让人以为路径分两行。
+ * 现在退化成一行 `Log:…agent/bg-tasks/<session>/bg_2.log`：**去掉了标签后的空格**（与用户
+ * 给的样例一致）好给路径多留一列，且保留最有用的尾巴（文件名）。
+ *
+ * 三条规则：
+ *
+ *   1. 不是日志行（没有 `Log: ` / `Full log: ` 前缀）→ 原样返回，绝不碰别的正文。
+ *   2. 放得下（`widthOf(line) <= width`）→ 一个字都不动（含标签后那个空格）。
+ *   3. 放不下 → `Log:…` + 原路径最长的一个尾部，且**不超预算**；窄到连一个字符都放不下时
+ *      至少交出 `Log:…`（宁多一列也不把路径整个噜掉）。
+ *
+ * 宽度由调用方注入（`piTui.visibleWidth`）—— 本模块不 import pi-tui，与整个文件的取舍一致；
+ * 尾部按**码点**切（路径是 ASCII，不拆代理对）。二分是因为「尾部越长行越宽」单调。
+ */
+export function fitLogLine(line: string, width: number, widthOf: (text: string) => number): string {
+	const label = LOG_LINE_LABELS.find((candidate) => line.startsWith(`${candidate} `));
+	if (label === undefined) return line;
+	const budget = Math.max(0, Math.floor(width));
+	if (widthOf(line) <= budget) return line;
+	const head = `${label}…`;
+	const tail = Array.from(line.slice(label.length + 1));
+	let low = 0;
+	let high = tail.length;
+	while (low < high) {
+		const mid = Math.ceil((low + high) / 2);
+		if (widthOf(head + tail.slice(tail.length - mid).join("")) <= budget) low = mid;
+		else high = mid - 1;
+	}
+	return head + tail.slice(tail.length - low).join("");
 }

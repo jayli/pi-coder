@@ -121,17 +121,23 @@ async function loadHarness(): Promise<Harness> {
 	fs.mkdirSync(projectDir, { recursive: true });
 
 	// env 隔离：PI_MEMORY_DIR 覆盖记忆根（slug 仍生效，所以记忆目录是 memoryRoot/<slug>）。
+	// 布局固定为 pi（本扩展自己的旧位置）：CC 布局会多一层 `memory` 子目录，
+	// 本文件按底下的 `memoryDir` 直接读写，选 pi 布局能让断言保持最简。
 	// 注意：扩展是**每次工具调用 / 每次注入时**才读 env（不是工厂里读一次），
 	// 所以 env 必须活到 harness 用完为止 —— 在 test.after 里还原。
 	const savedDir = process.env.PI_MEMORY_DIR;
 	const savedOff = process.env.PI_MEMORY;
+	const savedLayout = process.env.PI_MEMORY_LAYOUT;
 	process.env.PI_MEMORY_DIR = memoryRoot;
+	process.env.PI_MEMORY_LAYOUT = "pi";
 	delete process.env.PI_MEMORY;
 	cleanup.push(() => {
 		if (savedDir === undefined) delete process.env.PI_MEMORY_DIR;
 		else process.env.PI_MEMORY_DIR = savedDir;
 		if (savedOff === undefined) delete process.env.PI_MEMORY;
 		else process.env.PI_MEMORY = savedOff;
+		if (savedLayout === undefined) delete process.env.PI_MEMORY_LAYOUT;
+		else process.env.PI_MEMORY_LAYOUT = savedLayout;
 	});
 
 	const loaded = await pi.discoverAndLoadExtensions([EXTENSION_PATH], projectDir, agentDir, pi.createEventBus());
@@ -144,7 +150,9 @@ async function loadHarness(): Promise<Harness> {
 		extension,
 		root,
 		projectDir,
-		memoryDir: path.join(memoryRoot, projectDir.replace(/[/.]/g, "-")),
+		// slug 用**真实路径**算（findProjectRoot 归一化符号链接，与 CC 一致）；
+		// macOS 的 `os.tmpdir()` 是 `/var/folders/...`，realpath 后是 `/private/var/folders/...`。
+		memoryDir: path.join(memoryRoot, fs.realpathSync(projectDir).replace(/[/.]/g, "-")),
 		notifies: [],
 		widgets: [],
 		selects: [],
@@ -236,7 +244,8 @@ test("memory_write 落盘 + 机械重建索引", { skip }, async () => {
 	const memoryFile = path.join(h.memoryDir, "gitlab-push-rule.md");
 	assert.ok(fs.existsSync(memoryFile), "正文文件必须落盘");
 	const text = fs.readFileSync(memoryFile, "utf-8");
-	assert.match(text, /^---\nname: gitlab-push-rule/);
+	assert.match(text, /^---\nname: "gitlab-push-rule"/, "name 写双引号（合法 YAML，CC 也能读）");
+	assert.match(text, /^description: "GitLab 拒绝非白名单邮箱提交"$/m);
 	assert.match(text, /type: project/);
 	assert.match(text, /modified: \d{4}-\d{2}-\d{2}T/);
 	assert.match(text, /\*\*Why:\*\*/);
@@ -562,9 +571,10 @@ test("正文：结果全文折行挂树，除末行外 │、末行 └，正文
 	assert.equal(lines[0]!.indexOf("Updated memory"), 4, `正文列：${JSON.stringify(lines[0])}`);
 	assert.equal(lines[1]!.indexOf("(feedback)"), 4, `末行正文列：${JSON.stringify(lines[1])}`);
 
-	// 结构符走 muted 槽、正文走 text 槽，且各自成一段 SGR（不让正文色透到结构符上）
+	// 结构符走 dim 槽（用户 2026-10-25 从 muted 改的）、正文走 text 槽，且各自成一段 SGR
+	// （不让正文色透到结构符上）
 	const painted = definition.renderResult(WRITE_RESULT, { expanded: false }, paintedTheme, renderContext()).render(80);
-	assert.match(painted[0]!, /^ {2}muted\(│ \)text\(/, `结构符 muted、正文 text：${JSON.stringify(painted[0])}`);
+	assert.match(painted[0]!, /^ {2}dim\(│ \)text\(/, `结构符 dim、正文 text：${JSON.stringify(painted[0])}`);
 });
 
 test("正文：长行折行后 └ 仍只在最后一个视觉行（碎片也算独立行）", { skip }, async () => {
@@ -682,8 +692,8 @@ test("正文：读一条记忆时四个字段名走 syntaxKeyword、值与正文
 	// 正文不受影响：仍是纯 text（无 syntaxKeyword 段）
 	const bodyLine = painted.find((line: string) => line.includes("body text"))!;
 	assert.ok(!bodyLine.includes("syntaxKeyword("), `正文不该被着色：${JSON.stringify(bodyLine)}`);
-	// 结构符仍是 muted，且颜色段顺序仍是 muted → syntaxKeyword → text
-	assert.match(painted[0]!, /^ {2}muted\(│ \)syntaxKeyword\(/, `结构符 muted、字段名 syntaxKeyword：${JSON.stringify(painted[0])}`);
+	// 结构符仍是 dim，且颜色段顺序仍是 dim → syntaxKeyword → text
+	assert.match(painted[0]!, /^ {2}dim\(│ \)syntaxKeyword\(/, `结构符 dim、字段名 syntaxKeyword：${JSON.stringify(painted[0])}`);
 });
 
 test("整块无底色、无上下边界空行：经 pi 真实组件渲染后不含背景 SGR", { skip }, async () => {

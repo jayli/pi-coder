@@ -32,7 +32,8 @@
  * 的 `(no output)`）一律用等宽缩进（`  `）对齐正文列、不再画竖线 —— 树在 `└` 那里
  * 就“落地”了。`└ ` 与它后面的正文之间有 `└ ` 自带的那一个空格。
  *
- * **`│` / `└` 是结构符，不是正文**：整棵树的竖线与拐角统一 `muted`，各自**自成一段**
+ * **`│` / `└` 是结构符，不是正文**：整棵树的竖线与拐角统一 `dim`（用户 2026-10-25 从
+ * `muted` 改的），各自**自成一段**
  * SGR（`styleCommandLine` 把前缀的颜色单独闭合在正文之前，`prefixTreeLines` 也只给前缀
  * 上色）—— 前缀绝不继承后面那个 token 的颜色（命令续行后面可能是 string / path / comment
  * 等任意 token，曾经路径那行的 `│` 就跟着 path 色飘了）。
@@ -96,14 +97,18 @@
  * pi 把 bash 输出的预览行数写死在 `core/tools/renderers/bash.js` 的
  * `const BASH_PREVIEW_LINES = 5`：模块私有常量，既没从包里导出，也不在
  * `BashToolOptions` 里，`docs/settings.md` 里也没有对应设置项 —— **没有全局配置可改**，
- * 只能在扩展里后处理（`withPreviewLimit` / `trimPreviewLines`）。
+ * 只能在扩展里接管（`withPreviewLimit` / `trimPreviewLines`）。
  *
  * 做法是拿 pi 渲好的组件做后处理而不是重写整个 resultRenderer，这样 pi 的语义
  *（截断页脚剔除、warnings、`Took Xs`、展开态、图片）全部保留，我们只动预览那一段。
- * 两个关键点：① **逐 child 渲染**而不是拿平铺行数组（平铺数组里分不清哪几行是预览）；
- * ② 裁掉的行数必须补进提示行的计数，否则「隐藏了多少行」就谎了 —— pi 给了提示行就
- * 在它那行**原地改数字**（保住 pi 的配色与真实键名），pi 没给（输出刚好 ≤ 5 行）
- * 就自建一行，否则那 1~2 行会静默消失。
+ * 三个关键点：① **逐 child 找出预览组件**（pi 1.3+ 是 `VisualLinePreview`，按它的
+ * `options.text` / `options.maxVisualLines` 稺子类型认，**不能用「没有 `setText`」这种宽泛
+ * 判据** —— `Spacer` 同样没有，2026-10 的回归就是它把 Spacer 当成了输出段、预览因此永远
+ * 停在 5 行）；② **pi 的窗口要整个关掉**（`maxVisualLines = MAX_SAFE_INTEGER`）再交给
+ * 本扩展裁 —— 它只能越裁越少，先切过就回不来了（`/bash-preview 6` 只能得 5 行，且
+ * `trimPreviewLines` 要给状态留一格、把尾部空行往上拉，都需要完整尾巴）；③ 裁掉的行数
+ * 必须补进提示行的计数 —— pi 给了提示行就在它那行**原地改数字**（保住 pi 的配色与真实
+ * 键名），pi 没给就自建一行，否则被裁的行会静默消失。
  *
  * 展开态（ctrl+o）自动不受影响：那时 pi 用的是 `new Text(...)` 而不是预览组件，
  * 鸭子判定直接跳过，完整输出一行不裁。
@@ -217,7 +222,7 @@ pi 的内置 bash 结果渲染器把输出正文写死成 `theme.fg("toolOutput"
 工具输出共用的槽**（read / grep / ls 的正文、`…` 占位符都吃它），想只调 bash 输出的颜色
 就得绕开它。做法是在**委托给内置渲染器的那个同步窗口**里把主题的 `toolOutput` 临时指向
 `bashOutput`（`withBashOutputColor()`），于是只有输出正文换色 —— 命令行（`toolTitle` +
-自绘语法高亮）、折叠提示（`muted` / `dim`）、树形 gutter（`muted`）、`Took Xs` 页脚
+自绘语法高亮）、折叠提示（`muted` / `dim`）、树形 gutter（`dim`）、`Took Xs` 页脚
 （`muted`）一律不受影响，其他工具的输出也完全不受影响（它们的渲染器不在这个窗口里跑）。
 
 注意**传给 `renderResult` 的那个 theme 参数是没用的**：pi 的 bash 渲染器签名把第二个
@@ -308,7 +313,7 @@ catppuccin 与 pi 内置 dark / light 没有，照旧走 `toolOutput`。
  * 可改门槛，`0` = 永远显示。
  *
  * 附带第四个职责：把 bash **输出预览**从 pi 内置的 5 行改成 3 行
- *（`BASH_PREVIEW_LINES` 是 pi 的模块私有常量，没导出也没设置项，只能后处理，
+ *（`BASH_PREVIEW_LINES` 是 pi 的模块私有常量，没导出也没设置项，只能接管，
  * 详见下面「输出预览行数」一节）。`/bash-preview` 可改。
  *
  * 附带第三个职责：给每条 bash 命令**强制一个执行期限**（默认 120s、上限 600s，
@@ -439,14 +444,14 @@ const DEFAULT_LINES = 2;
  */
 const COMMAND_PROMPT = "Run ";
 /**
- * 结构符（`Run ` 命令行的续行 `│ `、结果的 `└ ` / `│ `）的主题槽 —— **`muted`**。
+ * 结构符（`Run ` 命令行的续行 `│ `、结果的 `└ ` / `│ `）的主题槽 —— **`dim`**。
  *
  * 为什么不是 `toolTitle`（`Run ` 那一版用的）：命令行的续行与结果树里的拐角符是**同一棵
- * 树**的两段，颜色必须一致；`Run ` 是标题、用 `toolTitle` 正常色，树用 `muted` —— 与结果
+ * 树**的两段，颜色必须一致；`Run ` 是标题、用 `toolTitle` 正常色，树用 `dim` —— 与结果
  * 侧的 `└ `（`prefixTreeLines`）取同一个槽，于是 `Run ` / `│` / `└ ` 三层各就各位：
- * 前缀亮、结构灰。
+ * 前缀亮、结构暗。（用户 2026-10-25 定：结构符从 `muted` 改到 `dim`，比 `muted` 矮一档。）
  */
-const COMMAND_CHAIN_COLOR = "muted";
+const COMMAND_CHAIN_COLOR = "dim";
 /**
  * 树形 gutter 的竖线行：命令还没结束时的续行、执行完的续行、输出/命令的截断提示都用它
  *（见文件头「输出树形 gutter」）。2 列。
@@ -463,7 +468,7 @@ const ELLIPSIS = "…";
  * pi 把行数写死在 `core/tools/renderers/bash.js` 的 `const BASH_PREVIEW_LINES = 5`：
  * 模块私有常量，既没从包里导出（`index.d.ts` 里没有），也不在 `BashToolOptions`
  * 里，`docs/settings.md` 里也没有任何对应的设置项 —— 所以没有全局配置可改，
- * 只能在扩展里后处理。详见文件头「输出预览行数」一节。
+ * 只能在扩展里接管。详见文件头「输出预览行数」一节。
  */
 const DEFAULT_OUTPUT_PREVIEW_LINES = 3;
 
@@ -741,7 +746,7 @@ function tokenizeShellLine(line: string, openQuote: string | null): { tokens: Sh
  * 命令行前缀的上色。三类前缀三种待遇：
  *   - `Run ` —— **只把 `Run` 这个词加粗**（`toolTitle` 正常色 + bold），后面那个空格与
  *     命令正文一律不加粗（用户 2026-09-21 定的：只有 `Run` 这一个单词是标题）；
- *   - `│ ` —— **结构符**，与结果侧的 `└ ` 同一个 `muted`（`COMMAND_CHAIN_COLOR`），
+ *   - `│ ` —— **结构符**，与结果侧的 `└ ` 同一个 `dim`（`COMMAND_CHAIN_COLOR`），
  *     不加粗；
  *   - 两格缩进（命令还在跑、树还没接上）—— 原样空格、不染色；空串原样返回（同一条
  *     源行折出来的后续碎片没有前缀）。
@@ -758,7 +763,7 @@ function styleCommandPrefix(prefix: string, theme: any): string {
 
 /**
  * 给**一行命令**上色：`prefix` 整段按**结构符**上色（`Run ` = `toolTitle`、`│ ` / 两格缩进 =
- * `muted`，见 `styleCommandPrefix`），`body` 是**不含前缀**的正文，按 token 上色。高亮关掉时
+ * `dim`，见 `styleCommandPrefix`），`body` 是**不含前缀**的正文，按 token 上色。高亮关掉时
  * 正文整段 `toolTitle` + 粗体（改动前的观感，只是前缀换成了 `Run `）。
  *
  * 前缀的颜色**必须在这一段就闭合**（`\x1b[39m`，由 `theme.fg` 自己收尾）：`│ ` 是**结构符**
@@ -1211,7 +1216,7 @@ function colorizeFailureStatus(line: string, theme: any): string {
  *     同理留成空行，当作结果内部的段落间距。
  *   ③ 截断提示行（`… (N earlier lines, …)`）在正文前面，所以它挂 `│ `（“下文还没完”），
  *     `└ ` 留给正文第一行。
- *   ④ **前缀自成一段 SGR**（`theme.fg("muted", GUTTER_PIPE)` 把它单独包起来），绝不让后面
+ *   ④ **前缀自成一段 SGR**（`theme.fg("dim", GUTTER_PIPE)` 把它单独包起来），绝不让后面
  *     正文的颜色透上来 —— 拐角符 / 竖线是结构符，`└ ` 与它后面的正文因此是同一种灰。
  *   ⑤ **栅栏以上的空行也带 `│ `**（用户 2026-09-21 第二次报的：`│ … (326 earlier lines…)`
  *     与 `└ Node.js v26.4.0` 之间那个空行，光秃秃地空着就成了“断层”）。这类空行来自 pi 的
@@ -1244,9 +1249,17 @@ function prefixTreeLines(lines: string[], theme: any, isError = false): string[]
 	// 再画竖线反而像树还没完（用户 2026-09-21 第二次反馈：`[Full output:` 上面那行不该有 `│`）。
 	const pipeBlank = (i: number) => i > first && i < start;
 	return lines.map((line, i) => {
-		if (isBlank(line)) return pipeBlank(i) ? INDENT + theme.fg("muted", GUTTER_PIPE) + line : line;
-		if (i < start) return INDENT + theme.fg("muted", GUTTER_PIPE) + line;
-		if (i === start) return INDENT + theme.fg("muted", "└ ") + (isError ? colorizeFailureStatus(line, theme) : line);
+		// `└ ` 之后的空行（pi 把失败状态拼成 `${text}\n\n${status}`，那行分隔空行会落到
+		// `└ ` 与状态行之间）：不画竖线（树在那里落地了），但也不能是裸空白 —— 屏幕上就是
+		// 树中间被垦开一道。用正文续行同宽的缩进顶上，段落间距还在、栅栏不断
+		//（与用户 2026-09-21 「空行也不能把栅栏断开」同一条宗旨）。
+		if (isBlank(line)) {
+			if (pipeBlank(i)) return INDENT + theme.fg("dim", GUTTER_PIPE) + line;
+			if (i > start) return GUTTER_BODY;
+			return line;
+		}
+		if (i < start) return INDENT + theme.fg("dim", GUTTER_PIPE) + line;
+		if (i === start) return INDENT + theme.fg("dim", "└ ") + (isError ? colorizeFailureStatus(line, theme) : line);
 		return GUTTER_BODY + (isError ? colorizeFailureStatus(line, theme) : line);
 	});
 }
@@ -1297,17 +1310,70 @@ function shouldHideTimeFooter(lastChild: any, elapsedMs: number | undefined, min
 }
 
 /**
+ * pi 折叠态输出预览组件的鸭子类型（1.3+ 的 `VisualLinePreview`）：带 `options.text`、
+ * `options.maxVisualLines` 且可 `render`。
+ *
+ * 为什么不用 `instanceof`：扩展 import 到的 pi-tui 是 loader alias 指向的 npm/dist 副本，
+ * 与 pi 运行时（bundle）用的不是同一个类对象，跨模块实例的 `instanceof` 必然 false。
+ * 字段判据比「有没有 `setText`」精确得多 —— 后者会把 `Spacer` 也当成文本组件（见下）。
+ */
+function isOutputPreviewChild(child: any): boolean {
+	const options = child?.options;
+	return (
+		typeof child?.render === "function" &&
+		typeof options === "object" &&
+		options !== null &&
+		typeof options.text === "string" &&
+		typeof options.maxVisualLines === "number"
+	);
+}
+
+/**
+ * 交给 pi 预览组件的行上限：**不限制**。
+ *
+ * 裁行要全部由本扩展做，因为 pi 的窗口是从**渲染好的尾部**倒着切的，而那块文本里混着
+ * 失败状态行与它前面的段落空行 —— 一旦 pi 先切到它自己的 `BASH_PREVIEW_LINES`，被切掉的
+ * 正文就拿不回来了（`trimPreviewLines` 要给状态留一格、还要把尾部空行往上拉，都需要完整
+ * 尾巴）。同时这也修了 `/bash-preview 6` 永远只能拿到 5 行的问题。
+ *
+ * 代价只在首次渲染：组件按 width 缓存 `cachedLines`，全文只在换宽度时排一次。
+ */
+const PREVIEW_NO_TRUNCATION = Number.MAX_SAFE_INTEGER;
+
+/**
+ * 按本扩展的预算渲染预览组件，返回 `[(提示行?), ...可见行]`（不含前导空行）。
+ *
+ * 预算是**交给组件**而不是渲染后再裁：`previewLines` 会写进组件的行上限，所以
+ * `/bash-preview` 既能在 3 行与 50 行之间任意调整，也能回到 pi 内置的 5 行。改完必须
+ * `invalidate()` —— 组件按 width 缓存渲染结果，只改预算不清缓存的话当场不生效。
+ */
+function renderPreviewRows(child: any, width: number): string[] {
+	const options = child.options;
+	if (options.maxVisualLines !== PREVIEW_NO_TRUNCATION) {
+		options.maxVisualLines = PREVIEW_NO_TRUNCATION;
+		child.invalidate?.();
+	}
+	return child.render(width) as string[];
+}
+
+/**
  * 把 pi 内置 bash 渲染器的**输出预览**从 5 行裁到 `previewLines` 行，给整块结果挂上树形
- * gutter，并在短命令上丢掉耗时页脚、在无输出时补一行 `(no output)`。
+gutter，并在短命令上丢掉耗时页脚、在无输出时补一行 `(no output)`。
  *
  * pi 的行数写死在它的 `BASH_PREVIEW_LINES = 5`（模块私有常量，改不了，也没有
- * 设置项），所以只能在拿到它的组件之后做后处理。详见文件头「输出预览行数」一节。
+ * 设置项），所以只能在拿到它的组件之后接管。详见文件头「输出预览行数」一节。
  *
  * 做法：**逐个 child 渲染**而不是拿整个 Container 的平铺行数组 —— 平铺数组里分不清
  * 哪几行属于预览（预览行、warnings 行、Took 行都是纯文本 + 不同前景色，按颜色猜很
- * 脆弱）。child 结构实测过：输出非空时 `children[0]` 就是预览组件，行形状固定是
- * `["", (提示行?), ...预览行]`；后面的 warnings / `Took Xs` 都是 `Text` 实例
- *（各自的 `\n` 前缀渲染成一行空行 + 正文）。
+ * 脆弱）。child 结构实测过两个版本：pi 0.86 是一个匿名组件，自己渲染出
+ * `["", (提示行?), ...预览行]`；pi 1.3+ 拆成 `Spacer(1)` + `VisualLinePreview`，前者只
+ * 出那一行空行、后者出 `[(提示行?), ...预览行]`。两种形状都归一成前者交给
+ * `trimPreviewLines`（它的 `lines[0]` 契约就是「前导空行」）。
+ *
+ * **别再用「没有 `setText` 就当输出段」这种宽泛判据**（2026-10 的回归就是它）：`Spacer`
+ * 同样没有 `setText`，在 1.3+ 的形状里它排在真预览前面 ⇒ 被当成输出段接管，预览组件原样
+ * 透传，`previewLines` 完全没生效（界面上永远 5 行，`/bash-preview` 只改了提示行里的数字）。
+ * warnings / `Took Xs` 才是 `Text`（有 `setText`）。
  *
  * 预览组件的判定用**鸭子类型**（`typeof child.setText !== "function"`）而不是
  * `instanceof Text`：扩展 import 到的 pi-tui 是 loader alias 指向的 npm/dist 副本，
@@ -1353,6 +1419,7 @@ function withPreviewLimit(
 			if (shouldHideTimeFooter(children[children.length - 1], elapsedMs(), minTimeFooterMs)) {
 				children = children.slice(0, -1);
 			}
+			const previewIndex = children.findIndex(isOutputPreviewChild);
 			// 展开态（ctrl+o）要的就是原样完整输出：不裁行、不挂 gutter。pi 那时用的是
 			// `new Text("\n" + styledOutput)`，一个 child 装全部输出，直接透传 ——
 			// 只把失败状态那行染红（用户要的是提示见红，展开态也该红）。
@@ -1366,8 +1433,25 @@ function withPreviewLimit(
 				}
 				return out;
 			}
-			for (const child of children) {
-				const isOutput = !trimmed && typeof child.setText !== "function";
+			for (let index = 0; index < children.length; index++) {
+				const child = children[index]!;
+				// pi 1.3+ 的预览前面多一个只为出空行的 `Spacer`：空行由下面预览分支统一补，
+				// 这里跳过它，免得正文前出现两行空白。
+				if (index === previewIndex - 1 && isBlankResultLine(child.render(contentWidth)[0] ?? "")) continue;
+				if (index === previewIndex) {
+					trimmed = true;
+					out.push(
+						...trimPreviewLines(
+							["", ...renderPreviewRows(child, contentWidth)],
+							previewLines,
+							contentWidth,
+							theme,
+							isError,
+						),
+					);
+					continue;
+				}
+				const isOutput = !trimmed && previewIndex < 0 && typeof child.setText !== "function";
 				if (!isOutput) {
 					// pi 对空输出一个 child 都不加（内置渲染器的 `if (output)` 守卫），
 					// 于是用户只看见光秃的一行 `Run xxx`，分不清是“真的没输出”还是
@@ -1444,8 +1528,9 @@ function trimPreviewLines(lines: string[], previewLines: number, width: number, 
 	const window = content.slice(start, end);
 
 	// ④ 一行正文都留不下时（内容全被裁掉），把状态前面那串分隔空行补回来 —— 用户 2026-09-21
-	// 定的形状：空行要带 `│`，而不是光秃秃的空白（见文件头 ⑤）。有正文时不补：
-	// `└ ` 已经落在正文上，它下面再补一行 `│` 反而像没完。
+	// 定的形状：空行要带 `│`，而不是光秃秃的空白（见文件头 ⑤）。有正文时那串空行不丢：
+	// 它是 pi 拼 `${text}\n\n${status}` 时留的**段落间距**，安排在状态前面（见末尾的
+	// `separators` 拼接）—— 摆到 `└ ` 之下就是普通空行，不挂竖线。
 	const fillers = window.length === 0 && status !== undefined ? separators.slice(-budget) : [];
 
 	// 什么都没动（没状态、窗口就是全部内容、没补空行）→ 原样返回 `lines`：保住 pi 自己画的
@@ -1468,7 +1553,7 @@ function trimPreviewLines(lines: string[], previewLines: number, width: number, 
 			  theme.fg("muted", " to expand)");
 		rendered.push(truncateToWidth(hint, width, ELLIPSIS));
 	}
-	return [head, ...rendered, ...fillers, ...window, ...(status === undefined ? [] : [status])];
+	return [head, ...rendered, ...fillers, ...window, ...(status === undefined ? [] : [...(window.length > 0 ? separators : []), status])];
 }
 
 /** pi 的提示行用三个点（`truncateToWidth` 的省略号），本扩展统一成单个 `…`。 */
@@ -1504,7 +1589,7 @@ function isBlankResultLine(line: string): boolean {
  *      `fgAnsi` 优先、`fgColors` 兼容。两个都没有（pi 把它藏起来/改名）就自动退化成原样
  *      调用，不抛异常、只是颜色不生效。
  *   ④ 只动 `toolOutput`：命令标题 / `... (N earlier lines …)` 提示 / `Took Xs` 页脚走的是
- *      `toolTitle` / `muted`，命令行与折叠提示是扩展自绘的，一律不受影响。
+ *      `toolTitle` / `muted` / `dim`，命令行与折叠提示是扩展自绘的，一律不受影响。
  */
 function withBashOutputColor<T>(theme: any, render: () => T): T {
 	const fgAnsi = theme?.fgAnsi;
@@ -1528,7 +1613,7 @@ const SKIN_OPS: ColorOps | undefined = colorOpsFrom(piTui);
 export default function (pi: ExtensionAPI) {
 	// 折叠固定开启、保留 DEFAULT_LINES 个视觉行（原先的 `/bash-collapse` 指令已删除）。
 	// 输出预览行数：pi 内置写死 5（`BASH_PREVIEW_LINES`，模块私有常量 + 无设置项），
-	// 所以只能在扩展里后处理。/bash-preview 可改；PI_BASH_PREVIEW 启动时覆盖。
+	// 所以只能在扩展里接管。/bash-preview 可改；PI_BASH_PREVIEW 启动时覆盖。
 	let previewLines = clampPreviewLines(Number(process.env.PI_BASH_PREVIEW));
 	// 耗时页脚门槛（毫秒）：短于它的执行不画 `Took X.Xs` 那一行（详见文件头「耗时页脚门槛」）。
 	// PI_BASH_MIN_TIME_MS=0 永远显示。与 previewLines 一样在注册时读一次。
@@ -1619,7 +1704,7 @@ export default function (pi: ExtensionAPI) {
 		});
 		if (masked.length === 0) return result;
 		const note =
-			`\n\n[沙箱] 命令整体成功，但以下删除被沙箱拦下（文件仍在）：${masked.join("、")}。` +
+			`\n\n[sandbox] The command succeeded overall, but these deletes were blocked by the sandbox (the files still exist): ${masked.join(", ")}.` +
 			`如需删除，用 /sandbox-boundary allow <目录> 授权后重试。` +
 			`可删边界：${writableRoots(boundary).join("、")}`;
 		return { ...result, content: [...(result.content ?? []), { type: "text", text: note }] };
@@ -1844,9 +1929,9 @@ export default function (pi: ExtensionAPI) {
 				//
 				// 交互与非交互（headless）走同一条路：原样报错 + 一行 `[沙箱]` 提示。
 				throw new Error(
-					`${denialMessage}\n\n[沙箱] 认不出被拦的具体路径，未弹确认框；` +
-						`如确认要删，可用 /sandbox-boundary allow <目录> 授权后重试。` +
-						`\n可删边界：${writableRoots(boundary).join("、")}`,
+					`${denialMessage}\n\n[sandbox] Could not tell exactly which path was blocked, so no confirmation dialog was shown. ` +
+						`If the delete is intended, authorize the directory with /sandbox-boundary allow <dir> and retry.` +
+						`\nDeletable boundary: ${writableRoots(boundary).join(", ")}`,
 				);
 			}
 
@@ -1862,9 +1947,9 @@ export default function (pi: ExtensionAPI) {
 			// 交互与 headless 同一条路 —— 本来就没有「批准」这个动作可给。
 			if (classification.blocked.length > 0) {
 				throw new Error(
-					`${denialMessage}\n\n[沙箱] 以下路径是永不删除的身份/凭据/手写配置，任何授权方式都不放行：\n` +
-						classification.blocked.map((d) => `  ${d.path}（${d.reason}）`).join("\n") +
-						`\n如确需删除，请自己在终端执行（或 PI_SANDBOX=off 整体关掉这一层）。`,
+					`${denialMessage}\n\n[sandbox] These paths are identity/credential/hand-written config on the never-delete list; no authorization can allow them:\n` +
+						classification.blocked.map((d) => `  ${d.path} (${d.reason})`).join("\n") +
+						`\nIf you really need to delete them, run it yourself in a terminal (or turn this layer off with PI_SANDBOX=off).`,
 				);
 			}
 
@@ -1880,8 +1965,7 @@ export default function (pi: ExtensionAPI) {
 					const message = outcome.message;
 					if (looksLikeSandboxDenial(message)) {
 						throw new Error(
-							`${message}\n\n[沙箱] 已按白名单加宽仍被拒绝，可能是路径识别有误。` +
-								`可用 /sandbox-boundary allow <目录> 手动授权后重试。`,
+							`${message}\n\n[sandbox] Still blocked after widening to the allowlist; path detection may be wrong. Authorize it manually with /sandbox-boundary allow <dir> and retry.`,
 						);
 					}
 					return outcome.result as Awaited<ReturnType<typeof base.execute>>;
@@ -1889,8 +1973,7 @@ export default function (pi: ExtensionAPI) {
 					const message = err instanceof Error ? err.message : String(err);
 					if (looksLikeSandboxDenial(message)) {
 						throw new Error(
-							`${message}\n\n[沙箱] 已按白名单加宽仍被拒绝，可能是路径识别有误。` +
-								`可用 /sandbox-boundary allow <目录> 手动授权后重试。`,
+							`${message}\n\n[sandbox] Still blocked after widening to the allowlist; path detection may be wrong. Authorize it manually with /sandbox-boundary allow <dir> and retry.`,
 						);
 					}
 					throw err;
@@ -1902,17 +1985,17 @@ export default function (pi: ExtensionAPI) {
 			if (!ctx?.hasUI) {
 				const denied = [...classification.dangerous.map((d) => d.path), ...classification.ordinary];
 				throw new Error(
-					`${denialMessage}\n\n[沙箱] 这条命令要删除可删边界之外且未授权的路径，非交互环境不予升级。\n` +
-						`目标：${denied.join("、")}\n` +
-						`可删边界：${writableRoots(boundary).join("、")}\n` +
-						`持久白名单：${allowlist().roots().length} 条（/sandbox-boundary 查看）`,
+					`${denialMessage}\n\n[sandbox] This command deletes paths outside the deletable boundary without authorization; a non-interactive session will not escalate.\n` +
+						`Targets: ${denied.join(", ")}\n` +
+						`Deletable boundary: ${writableRoots(boundary).join(", ")}\n` +
+						`Persistent allowlist: ${allowlist().roots().length} entries (see /sandbox-boundary)`,
 				);
 			}
 
 			const hasDangerous = classification.dangerous.length > 0;
 			const foldPaths = (paths: readonly string[], limit = 3): string => {
 				const shown = paths.slice(0, limit).map((p) => `  ${p}`);
-				if (paths.length > limit) shown.push(`  …还有 ${paths.length - limit} 处`);
+				if (paths.length > limit) shown.push(`  …and ${paths.length - limit} more`);
 				return shown.join("\n");
 			};
 			// 弹框前先算好「将记住的范围」，在弹框里明示 —— 用户批准的是这个范围，
@@ -1926,61 +2009,61 @@ export default function (pi: ExtensionAPI) {
 				// （要永久记住它们得在没有危险路径的命令里单独走普通弹框）。
 				// pi 的 select 只有 (title, options)：正文必须拼进 title（destructive-guard 同一做法）。
 				const lines = [
-					`⚠️ ${ESCALATION_TITLE}（危险目录）`,
+					`⚠️ ${ESCALATION_TITLE} (dangerous directory)`,
 					"",
-					`命令：${truncateToWidth(command, 160)}`,
+					`Command: ${truncateToWidth(command, 160)}`,
 					"",
-					"危险路径（每次删除都会问，只能会话级豁免）：",
-					foldPaths(classification.dangerous.map((d) => `${d.path}（${d.reason}）`)),
+					"Dangerous paths (asked on every delete, session-wide exemption only):",
+					foldPaths(classification.dangerous.map((d) => `${d.path} (${d.reason})`)),
 				];
 				if (classification.ordinary.length > 0) {
-					lines.push("", "同批还有普通边界外路径（本次批准，不记住）：", foldPaths(classification.ordinary));
+					lines.push("", "Plus ordinary out-of-boundary paths (approved this time only, not remembered):", foldPaths(classification.ordinary));
 				}
-				lines.push("", "同意后命令会重新执行一次（已执行过的部分会重复）。", "选 Deny 不会删任何东西。");
+				lines.push("", "If you allow, the command runs again (parts already executed will repeat).", "Choosing Deny deletes nothing.");
 				choice = await ctx.ui.select(lines.join("\n"), ["Deny", "Allow once", "Allow for this session"]);
 			} else {
 				const lines = [
 					`⚠️ ${ESCALATION_TITLE}`,
 					"",
-					`命令：${truncateToWidth(command, 160)}`,
+					`Command: ${truncateToWidth(command, 160)}`,
 					"",
-					"要删（可删边界之外）：",
+					"To delete (outside the deletable boundary):",
 					foldPaths(classification.ordinary),
 					"",
 					ordinaryScopes.length > 0
-						? `将记住：${ordinaryScopes.join("、")}（以后这些目录下的删除不再询问）`
-						: "这些路径算不出可安全记住的范围，只能逐次批准。",
+						? `Will remember: ${ordinaryScopes.join(", ")} (deletes under these directories will not ask again)`
+						: "These paths have no safe scope to remember; they can only be approved one at a time.",
 					"",
-					"同意后命令会重新执行一次（已执行过的部分会重复）。",
-					"选 Deny 不会删任何东西。",
+					"If you allow, the command runs again (parts already executed will repeat).",
+					"Choosing Deny deletes nothing.",
 				];
 				choice = await ctx.ui.select(lines.join("\n"), [
 					"Deny",
-					"Allow for this session（并记住该目录）",
+					"Allow for this session (remember this directory)",
 					"Allow once",
 				]);
 			}
 
 			if (choice === undefined || choice === "Deny") {
 				throw new Error(
-					`${denialMessage}\n\n[沙箱] 用户拒绝删除可删边界之外的路径：` +
-						[...classification.dangerous.map((d) => d.path), ...classification.ordinary].join("、") +
-						`（可删边界：${writableRoots(boundary).join("、")}）`,
+					`${denialMessage}\n\n[sandbox] The user denied deleting paths outside the deletable boundary: ` +
+						[...classification.dangerous.map((d) => d.path), ...classification.ordinary].join(", ") +
+						` (deletable boundary: ${writableRoots(boundary).join(", ")})`,
 				);
 			}
 
 			// 按选择落授权：
-			// - `Allow for this session（并记住该目录）` → 普通路径的范围**落盘**（remember 内部
+			// - `Allow for this session (remember this directory)` → 普通路径的范围**落盘**（remember 内部
 			//   还有安全闸，危险范围落不进去）。名字里的 session 由括注与下面的 notify 共同
 			//   说清：它比 `Allow once` 多记住了目录，而且重启后仍生效。
 			// - `Allow for this session`（危险分支）→ 危险路径的会话范围进会话集合，重启即失效
 			// - `Allow once` → 只加宽这一次重跑的 profile，不进任何记忆
 			const onceRoots: string[] = [];
-			if (choice === "Allow for this session（并记住该目录）") {
+			if (choice === "Allow for this session (remember this directory)") {
 				const remembered = allowlist().remember(ordinaryScopes, "confirm", pathEnv);
 				if (remembered.length > 0)
 					ctx.ui.notify(
-						`已永久记住 ${remembered.length} 个目录（重启后仍生效），以后其下的删除不再询问`,
+						`Remembered ${remembered.length} director${remembered.length === 1 ? "y" : "ies"} for good (survives restart); deletes under them will not ask again`,
 						"info",
 					);
 				// 被安全闸挡掉的范围（算不出可记范围的）仍要放行这一次
@@ -2230,18 +2313,21 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.registerCommand("bash-preview", {
-		description: "bash 输出预览行数：off（pi 内置 5 行）| <行数 1-50>",
+		description: "bash output preview lines: off (pi's built-in 5 lines) | <lines 1-50>",
 		handler: async (args, ctx) => {
 			const arg = args.trim().toLowerCase();
 
 			if (arg === "off") {
 				previewLines = 5; // pi 的 BASH_PREVIEW_LINES，等于不裁
-				ctx.ui.notify("bash 输出预览已恢复 pi 内置的 5 行", "info");
+				ctx.ui.notify("bash output preview restored to pi's built-in 5 lines", "info");
 				return;
 			}
 
 			if (arg === "") {
-				ctx.ui.notify(`当前输出预览：前 ${previewLines} 行（pi 内置是 5 行，超出部分带 earlier lines 提示）`, "info");
+				ctx.ui.notify(
+					`Current output preview: first ${previewLines} lines (pi's built-in is 5; overflow gets the earlier-lines hint)`,
+					"info",
+				);
 				return;
 			}
 
@@ -2250,26 +2336,26 @@ export default function (pi: ExtensionAPI) {
 			const parsed = Number(arg);
 			const next = clampPreviewLines(parsed);
 			if (next !== parsed) {
-				ctx.ui.notify("用法：/bash-preview off | <行数 1-50 的整数>", "warning");
+				ctx.ui.notify("Usage: /bash-preview off | <integer 1-50 lines>", "warning");
 				return;
 			}
 
 			previewLines = next;
-			ctx.ui.notify(`bash 输出预览已改为前 ${previewLines} 行`, "info");
+			ctx.ui.notify(`bash output preview is now the first ${previewLines} lines`, "info");
 		},
 	});
 
 	// 只读查看当前生效的期限：默认值、上限、以及 env 有没有覆盖。
 	// 值在 execute 里每次调用时重算，所以这里显示的永远是下一次执行的真实期限。
 	pi.registerCommand("bash-timeout", {
-		description: "查看 bash 执行期限（默认 / 上限 / env 覆盖）",
+		description: "Show the bash execution deadline (default / max / env override)",
 		handler: async (_args, ctx) => {
 			const override = (name: string) => {
 				const value = readTimeoutEnvMs(name);
-				return value === undefined ? "未设置" : `${name}=${value}ms`;
+				return value === undefined ? "unset" : `${name}=${value}ms`;
 			};
 			ctx.ui.notify(
-				`默认 ${defaultTimeoutSeconds()}s，上限 ${maxTimeoutSeconds()}s；env：${override("BASH_DEFAULT_TIMEOUT_MS")} / ${override("BASH_MAX_TIMEOUT_MS")}（改完需重启 pi）`,
+				`default ${defaultTimeoutSeconds()}s, max ${maxTimeoutSeconds()}s; env: ${override("BASH_DEFAULT_TIMEOUT_MS")} / ${override("BASH_MAX_TIMEOUT_MS")} (restart pi to apply)`,
 				"info",
 			);
 		},

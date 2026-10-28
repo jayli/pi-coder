@@ -39,14 +39,14 @@ describe("状态行", () => {
 	});
 
 	it("plan 态：计划已提交、等用户审批时带「待批准」", () => {
-		assert.equal(formatPlanStatus(plain, { phase: "plan", pending: "# 方案" }), "⏸ plan · 待批准");
+		assert.equal(formatPlanStatus(plain, { phase: "plan", pending: "# 方案" }), "⏸ plan · awaiting approval");
 	});
 
 	it("plan 态：写文档子态带「写文档中」，且优先于「待批准」", () => {
-		assert.equal(formatPlanStatus(plain, { phase: "plan", docWriting: true }), "⏸ plan · 写文档中");
+		assert.equal(formatPlanStatus(plain, { phase: "plan", docWriting: true }), "⏸ plan · writing doc");
 		assert.equal(
 			formatPlanStatus(plain, { phase: "plan", docWriting: true, pending: "# 方案" }),
-			"⏸ plan · 写文档中",
+			"⏸ plan · writing doc",
 			"子态里 pending 仍在（写文档指令要用它），但状态行该说正在写文档",
 		);
 	});
@@ -55,10 +55,10 @@ describe("状态行", () => {
 		assert.equal(formatPlanStatus(painted, { phase: "dangerous" }), "error(☢) error(dangerous)");
 		assert.equal(formatPlanStatus(painted, { phase: "bypass" }), "success(⏵) success(bypass)");
 		assert.equal(formatPlanStatus(painted, { phase: "plan" }), "warning(⏸) warning(plan)");
-		assert.equal(formatPlanStatus(painted, { phase: "plan", pending: "x" }), "warning(⏸) warning(plan) muted(· 待批准)");
+		assert.equal(formatPlanStatus(painted, { phase: "plan", pending: "x" }), "warning(⏸) warning(plan) muted(· awaiting approval)");
 		assert.equal(
 			formatPlanStatus(painted, { phase: "plan", docWriting: true }),
-			"warning(⏸) warning(plan) accent(· 写文档中)",
+			"warning(⏸) warning(plan) accent(· writing doc)",
 		);
 	});
 

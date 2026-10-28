@@ -1,42 +1,50 @@
 /**
- * glob-tool / candidates —— 候选文件枚举的**三档**实现。零 pi 依赖（只用 node 标准库）。
+ * glob-tool / candidates —— 候选文件枚举。零 pi 依赖（只用 node 标准库）。
  *
- * ## 三档，按"精度从高到低"排序，前一档成功就不走后面
+ * ## 引擎选择（用户 2026-10-26 定：高速档默认开启，手动可回退）
  *
- * | 档 | 何时用 | 精度来源 | 实测 |
- * | --- | --- | --- | --- |
- * | 1. `git ls-files` | 目录在 git 工作树里 | git 自己的 `.gitignore` 实现 | 332 文件 53ms |
- * | 2. 裸仓库 + `--work-tree` | 无仓库但存在 `.gitignore` | 同上（git 解析 work-tree 的 ignore） | 82ms |
- * | 3. `opendir` 走查 | 上面都不行 | 本仓 `ignore.ts` 的子集 | 17 万文件 1.7s |
+ * | 引擎 | 何时用 | tracked 来源 | 磁盘来源 | 实测（394 条仓库） |
+ * | --- | --- | --- | --- | --- |
+ * | `git`（旧档） | `PI_GLOB_ENGINE=git`，或 rg 找不到 | `git ls-files` | `git ls-files --others` | 117 ms |
+ * | `rg`（默认） | rg 可用且 index 可解析 | **直接读 `.git/index`**（0.12 ms） | `rg --files` + `fd -t l` | 60 ms |
  *
- * 把"忽略语义"外包给 git 是这个设计最重要的一个取舍：`.gitignore` 的完整语义包含嵌套
- * 文件、`!` 否定、`.git/info/exclude`、全局 `core.excludesFile`、以及"父目录被忽略则子
- * 路径无法否定"这条陷阱 —— 自己实现一遍只会在这个精度上亏。而 git 已经在那儿了。
+ * 两者语义等价：`git ls-files --cached --others --exclude-standard` ≡
+ * **索引里的一切** ∪ **磁盘上未被 ignore 的**。高速档把两半分别交给最合适的工具：
  *
- * ## 为什么档 3 不用 `fs.glob`
+ * - 索引那一半**不能让 rg 顶替** —— 符号链接条目、`git add -f` 强加的已跟踪但被 ignore
+ *   的文件、已 `rm` 未 `git add` 的名字、嵌套仓库的目录条目，磁盘上要么不存在、要么
+ *   被 ignore 藏掉。所以直接 `readFileSync` + 解析索引二进制（`git-index.ts`）。
+ * - 磁盘那一半用 `rg --files --no-require-git`：`--no-require-git` 是关键词 ——
+ *   没有它，rg 在**不是 git 仓库**的目录里会完全无视 `.gitignore`（实测），于是裸仓库
+ *   兜底（`git init --bare`，46 ms）还得留着；有它，非 git 目录的 ignore 语义白送。
+ * - 符号链接 rg 不列（设计如此）且 `--follow` 会展开目标、遇断链直接报错，所以另跑一次
+ *   `fd -H -t l` 只拿链接条目本身（22 ms）。
+ * - `--hidden` 会让 rg 深入 `.git/`（实测 40 条），所以必须显式 `--glob '!.git/'`。
  *
- * 实测两个硬伤（见 spec §5.3）：① 它**无条件跳过隐藏目录的内部** —— 通配、点通配、
- * 以及"点目录 + 通配"的组合都进不去 `.hidden_dir/`，而 `hidden: true` 必须能进；② 它的
- * `exclude` 回调对同一个目录会**发两次**（`parentPath` 真值一次、`"."` 一次），于是剪枝
- * 计数与"只剪一次"的语义都不可靠。手写 `opendir` 遍历慢 60%，但三件事是确定的：
- * 点文件可控、剪枝显式、**不跟随符号链接**（`opendir` 的 Dirent 是 `lstat` 语义）。
+ * 旧的三档（git 工作树 → 裸仓库 → `opendir` 走查）全部保留：高速档任一步失败（rg / fd
+ * 定位不到、索引版本不认识、`PI_GLOB_ENGINE=git`）就静默落到它们，**绝不因为工具缺失
+ * 而报错**。
  *
  * ## 这一层不做存在性过滤
  *
  * `git ls-files --cached` 会把"已 `rm` 但没 `git add`"的文件照样列出来（实测）。这一层
  * 的契约是"枚举 git / 目录认得的名字"，存在性由 `index.ts` 的 `statMtime` 统一过滤 ——
- * 因为档 3 只枚举磁盘上存在的条目，把过滤放在这里会让三档语义不一致。
+ * 因为走查档只枚举磁盘上存在的条目，把过滤放在这里会让各档语义不一致。
  */
 
 import { execFile } from "node:child_process";
 import { opendir } from "node:fs/promises";
-import { readFileSync, existsSync, mkdtempSync, rmSync } from "node:fs";
+import { readFileSync, existsSync, lstatSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, dirname, relative as relativePath } from "node:path";
+import { locateFd, locateRipgrep } from "./bin.ts";
+import { findRepoRoot, readIndexPaths } from "./git-index.ts";
 import { createIgnoreDecider, createIgnoreMatcher, type IgnoreDecider } from "./ignore.ts";
 
 /** git 子进程的硬上限：超过就降档，不能让一次查询卡住整个会话。 */
 const GIT_TIMEOUT_MS = 10_000;
+/** 外部工具（rg / fd）的超时：与 git 同量级；超时就降档。 */
+const TOOL_TIMEOUT_MS = 10_000;
 /** `ls-files` 输出上限：17 万文件 × 平均 60 字节 ≈ 10MB，留足余量。 */
 const GIT_MAX_BUFFER = 64 * 1024 * 1024;
 /** 走查档的并发 opendir 迭代器上限（实测 16 是最佳区间；见 spec §5.3）。 */
@@ -271,12 +279,155 @@ async function collectByWalking(root: string, options: CollectOptions): Promise<
 }
 
 /**
- * 枚举 `root` 下所有候选的相对路径（posix 分隔符）。
- *
- * 顺序：git 工作树 → 裸仓库（仅当有 `.gitignore`）→ 走查。
- * 任何一档失败都静默降档；三档都不能用时以走查的异常结束。
+ * 跑一个短命外部工具（rg / fd），stdout 按 NUL 切分。任何失败（非零退出、超时、信号）
+ * 返回 `undefined` —— 调用方据此降档。
  */
-export async function collectCandidates(root: string, options: CollectOptions = {}): Promise<string[]> {
+function runTool(command: string, args: string[], cwd: string, signal: AbortSignal | undefined): Promise<string | undefined> {
+	return new Promise((resolve) => {
+		execFile(
+			command,
+			args,
+			{ cwd, timeout: TOOL_TIMEOUT_MS, maxBuffer: GIT_MAX_BUFFER, signal, encoding: "utf8" },
+			(error, stdout) => resolve(error ? undefined : stdout),
+		);
+	});
+}
+
+/** 高速档的磁盘半边：`rg --files` 的固定参数。 */
+const RG_BASE_ARGS = ["--files", "-0", "--hidden", "--glob", "!.git/"];
+
+/** 路径里是否有以点开头的段。 */
+function hasDotSegment(value: string): boolean {
+	return value.split("/").some((segment) => segment.startsWith("."));
+}
+
+/**
+ * 嵌套 git 仓库的边界：由 `files` 反推出全部目录，返回那些**目录里坐着一个 `.git`**
+ * 的前缀（`"nested"`、`"a/b"`）。
+ *
+ * 旧引擎靠的是 `git ls-files` 不会进入子仓库、只报一条 `nested/` 目录条目（随后被尾斜杠
+ * 规则丢掉），而 rg 会直接穿进去把 `nested/inner.ts` 列出来 —— 这是实测到的**唯一**语义
+ * 漂移（`/tmp/edge-verify` 的 7 处差异全是它）。要保住旧语义，就得在高速档里显式还原
+ * 这条边界：子仓库里的条目整体丢掉，只留目录名本身（与 git 的 `nested/` 一致）。
+ *
+ * 代价：需要为**出现过的每个目录**做一次 `existsSync`（3.2 万文件 / 3205 个目录实测 6.6ms）。
+ * 做不到就对不上语义 —— 而语义是这个工具存在的理由。
+ */
+function findNestedRepoPrefixes(root: string, entries: readonly string[]): string[] {
+	const directories = new Set<string>();
+	for (const entry of entries) {
+		if (entry.endsWith("/")) continue;
+		let directory = dirname(entry);
+		while (directory !== "." && directory !== "/" && directory !== "") {
+			directories.add(directory);
+			directory = dirname(directory);
+		}
+	}
+	const nested: string[] = [];
+	for (const directory of directories) {
+		if (existsSync(join(root, directory, ".git"))) nested.push(directory);
+	}
+	return nested;
+}
+
+/**
+ * 高速档：索引里的 tracked 名字 ∪ 磁盘上未忽略的文件 ∪ 符号链接条目。
+ *
+ * 返回 `undefined` 表示这条引擎用不了（rg 定位不到 / 跑挂了）—— 调用方降档。
+ * 索引解析失败**不算**不可用：那只影响 tracked 半边，磁盘半边仍然是对的。
+ */
+async function collectWithRg(root: string, options: CollectOptions): Promise<string[] | undefined> {
+	const rgCommand = locateRipgrep();
+	if (rgCommand === undefined) return undefined;
+	assertNotAborted(options.signal);
+
+	const paths = new Set<string>();
+
+	// ① tracked：直接读索引，零子进程。子目录调用时按前缀裁剪。
+	//    `hidden: false` **不过滤这一半** —— 轨道点文件（`.github/workflows/ci.yml`）
+	//    是仓库的一部分，与 `match.ts` 的 `unhide` 同一口径。
+	const repo = findRepoRoot(root);
+	if (repo !== undefined) {
+		const tracked = readIndexPaths(join(repo.gitDir, "index"));
+		if (tracked !== undefined) {
+			const prefix = relativePath(repo.root, root).split("\\").join("/");
+			for (const entry of tracked) {
+				// 目录 / gitlink 条目（尾斜杠）直接丢 —— 与 `ls-files` 分支的过滤一致。
+				if (entry.endsWith("/")) continue;
+				if (prefix === "") paths.add(entry);
+				else if (entry.startsWith(`${prefix}/`)) paths.add(entry.slice(prefix.length + 1));
+			}
+		}
+	}
+
+	// ② 磁盘半边。三个开关缺一不可，每个都对应一个实测过的坑：
+	//    `--no-require-git`  没有仓库的目录里也认 `.gitignore`（否则只能靠裸仓库兜底）；
+	//    `--no-ignore-parent` 不读**搜索根之上**的 `.gitignore` —— 加了 no-require-git 后 rg
+	//                        会一路往上找，实测 `~/.pi/agent/npm/.gitignore`（内容 `*`）把
+	//                        一次 3.2 万文件的查询滤成了 0 条，而 git 只读工作树内的；
+	//    `--no-ignore-dot`   不让 `.ignore` / `.rgignore` 生效 —— git 也不认那两个文件。
+	const rgArgs = [...RG_BASE_ARGS, "--no-require-git", "--no-ignore-parent", "--no-ignore-dot"];
+	if (options.includeIgnored) rgArgs.push("--no-ignore");
+	const fromRg = await runTool(rgCommand, rgArgs, root, options.signal);
+	if (fromRg === undefined) return undefined;
+	// `hidden` 历来**不**作用于 git 档（`git ls-files` 根本没有 hidden 概念：`.gitignore`、
+	// 未跟踪的 `.env.example` 全都列），只作用于走查档（那里是 shell 语义）。
+	// 旧档落到走查的唯一条件 = 没有仓库 **且** 没有可用的 `.gitignore`；这里照那个条件复刻，
+	// 其余情形与旧档 1/2 逐条一致（否则会凭空多出新行为）。
+	const applyHiddenFilter = options.hidden !== true && repo === undefined && findGitignore(root) === undefined;
+	const diskEntries = splitNul(fromRg).filter((entry) => !(applyHiddenFilter && hasDotSegment(entry)));
+
+	// ②b 嵌套仓库边界：git 不进入子仓库，rg 会穿进去。两种状态（实测 `/tmp/nest-*`）：
+	//       - 子仓库内的文件**不在**父索引里（未跟踪 / 子仓库被父 add 过）→ `ls-files`
+	//         只报 `nested/` 目录条目；旧档 1 随后把尾斜杠条目全丢掉 ⇒ 内部文件一个不出。
+	//       - 文件先 add、**后来**才在 `nested/` 里 `git init` → 索引里已是普通 blob，
+	//         `ls-files` 照样列 `nested/inner.ts`。
+	//     所以：**索引来的条目永远保留**，只对**磁盘拓来的**条目应用子仓库边界。
+	//     不补 `nested/` 目录条目 —— 旧档 1 会把它过滤掉（本层契约：不返回目录）。
+	const nestedPrefixes = findNestedRepoPrefixes(root, diskEntries);
+	const trackedPaths = new Set(paths);
+	const insideNested = (entry: string): boolean =>
+		nestedPrefixes.some((prefix) => entry === prefix || entry.startsWith(`${prefix}/`));
+	for (const entry of diskEntries) {
+		if (insideNested(entry) && !trackedPaths.has(entry)) continue;
+		paths.add(entry);
+	}
+	// ③ 符号链接：rg 不列（设计如此），`--follow` 会展开目标、遇到断链直接报错。
+	//    `fd -t l` 只拿链接条目本身；是否为文件由 `index.ts` 的 statMtime 判定
+	//    （指向目录的链接会被它丢掉）。
+	//
+	//    **fd 定位不到时必须整档降级**，不能“少一块但继续”：未跟踪的符号链接只有 fd 能补
+	//    （实测：`git ls-files` 会列出 `untracked_link.ts`，rg 不列），静默少掉等于改了语义。
+	//    引导代价（降级后跑 `git ls-files`，约 +50ms）比一份看起来正常、实际上漏了结果的
+	//    列表小得多。
+	const fdCommand = locateFd();
+	if (fdCommand === undefined) return undefined;
+	assertNotAborted(options.signal);
+	const fromFd = await runTool(
+		fdCommand,
+		// 两个开关与 rg 那边同一个理由：`--no-require-git` 让非仓库目录也认 `.gitignore`，
+		// `--no-ignore-parent` 阻止它读到搜索根之上的 `.gitignore`（实测漏了后者会让 715 个
+		// 符号链接全部消失：祖先 `~/.pi/agent/npm/.gitignore` 的内容就是 `*`）。
+		["-H", "-t", "l", "--no-require-git", "--no-ignore-parent", "--strip-cwd-prefix"],
+		root,
+		options.signal,
+	);
+	// fd 装了但跑挂了：同样不能当“没有链接”收场，否则会静默少掉未跟踪的符号链接。
+	if (fromFd === undefined) return undefined;
+	for (const entry of fromFd.split("\n")) {
+		if (entry === "") continue;
+		// `.git/` 里的链接没有查询价值，且会把内部结构漏给模型。
+		if (entry === ".git" || entry.startsWith(".git/")) continue;
+		if (applyHiddenFilter && hasDotSegment(entry)) continue;
+		if (insideNested(entry) && !trackedPaths.has(entry)) continue;
+		paths.add(entry);
+	}
+
+	return [...paths];
+}
+
+/** `PI_GLOB_ENGINE=git` 时的旧档：git 工作树 → 裸仓库 → 走查。 */
+async function collectWithGit(root: string, options: CollectOptions): Promise<string[]> {
 	assertNotAborted(options.signal);
 	if (await isGitWorkTree(root, options.signal)) {
 		assertNotAborted(options.signal);
@@ -292,4 +443,20 @@ export async function collectCandidates(root: string, options: CollectOptions = 
 	}
 	assertNotAborted(options.signal);
 	return await collectByWalking(root, options);
+}
+
+/**
+ * 枚举 `root` 下所有候选的相对路径（posix 分隔符）。
+ *
+ * 顺序：**rg 高速档** → git 三档（工作树 → 裸仓库 → 走查）。
+ * `PI_GLOB_ENGINE=git` 跳过高速档；高速档跑不了（rg 定位不到 / 超时 / 出错）自动降档。
+ * 旧三档都不行时以走查的异常结束。
+ */
+export async function collectCandidates(root: string, options: CollectOptions = {}): Promise<string[]> {
+	assertNotAborted(options.signal);
+	if (process.env.PI_GLOB_ENGINE?.trim() !== "git") {
+		const fast = await collectWithRg(root, options);
+		if (fast !== undefined) return fast;
+	}
+	return await collectWithGit(root, options);
 }

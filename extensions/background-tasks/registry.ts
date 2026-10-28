@@ -165,7 +165,7 @@ export function formatTaskLine(task: BackgroundTask, now: number): string {
 }
 
 export function formatTaskList(tasks: readonly BackgroundTask[], now: number): string {
-	if (tasks.length === 0) return "没有后台任务。";
+	if (tasks.length === 0) return "No background tasks.";
 	return tasks.map((task) => formatTaskLine(task, now)).join("\n");
 }
 
@@ -383,11 +383,11 @@ export function createRegistry(options: RegistryOptions = {}): Registry {
 
 		killTask(id: string, signal: NodeJS.Signals = "SIGTERM"): { ok: boolean; reason?: string } {
 			const task = tasks.get(id);
-			if (!task) return { ok: false, reason: `没有这个任务：${id}` };
-			if (task.status !== "running") return { ok: false, reason: `${id} 已经${task.status}，不需要杀` };
+			if (!task) return { ok: false, reason: `No such task: ${id}` };
+			if (task.status !== "running") return { ok: false, reason: `${id} is already ${task.status}; nothing to kill` };
 			task.killRequested = true;
 			const sent = signalGroup(task, signal);
-			if (!sent) return { ok: false, reason: `${id} 的进程已经不在了（可能刚退出）` };
+			if (!sent) return { ok: false, reason: `The process for ${id} is already gone (it may have just exited)` };
 			// 宽限期后补 SIGKILL：SIGTERM 被忽略的任务不能一直挂着。
 			if (task.killTimer) clearTimeout(task.killTimer);
 			task.killTimer = armTimer(() => {

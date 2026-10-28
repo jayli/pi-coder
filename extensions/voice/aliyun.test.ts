@@ -244,7 +244,7 @@ test("writeAliyunKey: 文件不存在时按 v2 最小骨架新建", () => {
 test("writeAliyunKey: keystore 损坏时抛错且不覆盖原文件", () => {
 	const file = path.join(tempDir("pi-voice-keystore-"), "apikey.json");
 	fs.writeFileSync(file, "{ broken");
-	assert.throws(() => writeAliyunKey(file, "sk-x"), /不是合法 JSON/);
+	assert.throws(() => writeAliyunKey(file, "sk-x"), /is not valid JSON/);
 	assert.equal(fs.readFileSync(file, "utf8"), "{ broken", "损坏的文件不该被覆盖");
 });
 
@@ -333,7 +333,7 @@ test("synthesizeSpeech: 非 2xx / 没有 audio.url 都抛错，并把 code/messa
 	const empty = makeFetch(() => jsonResponse({ output: { audio: {} } }));
 	await assert.rejects(
 		() => synthesizeSpeech({ text: "x", apiKey: "sk", fetchImpl: empty.fetchImpl }),
-		/没有 output\.audio\.url/,
+		/has no output\.audio\.url/,
 	);
 });
 
@@ -473,7 +473,7 @@ test("AliyunSpeaker: 云端失败只报一次错，不启动 afplay", async () =
 	speaker.speak("念不出来的一句。");
 	await waitFor(() => errors.length > 0, "错误回调");
 	assert.equal(spawn.calls.length, 0, "失败不该启动播放器");
-	assert.match(errors[0], /^阿里云口播失败：HTTP 429：Throttling quota$/);
+	assert.match(errors[0], /^HTTP 429：Throttling quota$/);
 	assert.equal(speaker.speaking, false);
 	assert.deepEqual(states, [true, false]);
 });
@@ -575,7 +575,7 @@ test("router: 云端失败 → 提示一次并用 say 念同一段文本", async
 	await waitFor(() => router.say.calls.length === 1, "say 兜底");
 	assert.deepEqual(router.say.calls, [{ text: "兜底念这一句。", options: { voice: "Meijia" } }]);
 	assert.equal(router.errors.length, 1);
-	assert.match(router.errors[0], /阿里云口播失败：HTTP 401：InvalidApiKey bad key（退回系统 say）/);
+	assert.match(router.errors[0], /HTTP 401：InvalidApiKey bad key \(falling back to system say\)/);
 	assert.equal(router.spawn.calls.length, 0, "合成都没成功，不该启动 afplay");
 });
 
