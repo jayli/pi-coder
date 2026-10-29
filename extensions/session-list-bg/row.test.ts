@@ -13,11 +13,15 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+	CURRENT_SESSION_SLOT,
 	DEFAULT_BG_SLOT,
 	DEFAULT_TITLE_SLOT,
+	LIST_HEADER_LINE_COUNT,
 	SELECTED_ROW_SLOT,
+	repaintListRows,
 	repaintSelectedRow,
 	repaintSelectedRows,
+	repaintUnselectedRow,
 	resolveRowPaintOptions,
 	resolveSessionListBgEnabled,
 	resolveSessionListBgSlot,
@@ -31,6 +35,10 @@ const BG_RESET = "\u001b[49m";
 const FULL_RESET = "\u001b[0m";
 const ACCENT = "\u001b[38;2;140;218;255m";
 const DIM = "\u001b[38;2;109;109;109m";
+/** 命名会话那一行正文的颜色（pi 的 `messageColor = "warning"`）。 */
+const WARNING = "\u001b[38;2;255;184;108m";
+/** 滚动提示行（`fg("muted", …)`）。 */
+const MUTED = "\u001b[38;2;153;153;153m";
 const FG_RESET = "\u001b[39m";
 
 /** 去掉所有零宽序列，只留可见字符。 */
@@ -348,4 +356,135 @@ test("没有强调色槽时只去粗体、不染色", () => {
 	const bodyMarks = marks.slice(start, end).filter((mark) => mark.char.trim().length > 0);
 	assert.equal(bodyMarks.length > 0, true);
 	assert.equal(bodyMarks.some((mark) => mark.accent), false, "正文没有被染成 accent");
+});
+
+/* -------------------------- 第五轮：只有选中行才带 accent（用户 2026-10-28） */
+
+/**
+ * pi 给**当前会话**那一行的正文写死 `fg("accent", …)`，与是否选中无关
+ * （`isCurrent ? "accent" : hasName ? "warning" : null`）。下面是它在未选中时的真实字节形状：
+ * 没有底色前缀、正文被 accent 包着、行尾仍是 `dim`。
+ */
+const UNSELECTED_CURRENT =
+	"  " + `${DIM}${FG_RESET}` + `${ACCENT}当前会话很长的标题` + `${FULL_RESET}…${FULL_RESET}` +
+	"  " + `${DIM}42 now${FG_RESET}`;
+
+/**
+ * 选中行的形状（`SessionList.render` 的完整一行）：光标 `› ` 是 accent、树前缀与行尾是 dim、
+ * 正文被粗体包着，底色在最外层。
+ */
+const SELECTED_ROW =
+	OLD +
+	`${ACCENT}› ${FG_RESET}${DIM}${FG_RESET}` +
+	`${BOLD_ON}短会话名字` +
+	" ".repeat(10) +
+	BOLD_OFF +
+	`${DIM}3 now${FG_RESET}` +
+	BG_RESET;
+
+test("根因对照：pi 的当前会话行在未选中时正文也是 accent", () => {
+	// 先证明装置复现了用户看到的现象，否则下面的「洗掉」是空转。
+	assert.equal(UNSELECTED_CURRENT.startsWith(OLD), false, "未选中行没有底色前缀");
+	assert.equal(UNSELECTED_CURRENT.includes(ACCENT), true, "未选中行的正文确实带着 accent");
+});
+
+test("非选中行：accent 洗回终端默认前景色，别的颜色一个不动", () => {
+	const out = repaintUnselectedRow(UNSELECTED_CURRENT, ACCENT);
+	assert.equal(out.includes(ACCENT), false, "accent 没了");
+	assert.equal(out.includes(FG_RESET), true, "换成了默认前景色");
+	assert.equal(out.includes(`${DIM}42 now${FG_RESET}`), true, "行尾的 dim 原样保留");
+	assert.equal(plain(out), plain(UNSELECTED_CURRENT), "可见字符一个不动");
+});
+
+test("非选中行：warning / error / dim 不被洗（那是状态色，不是选中信号）", () => {
+	const line = "  " + `${DIM}${FG_RESET}` + `${WARNING}命名会话` + `${FG_RESET}` + `${DIM}3 1h${FG_RESET}`;
+	assert.equal(repaintUnselectedRow(line, ACCENT), line, "没有 accent 就原样返回");
+});
+
+test("非选中行：accent 缺省 / 空串时原样返回（皮肤没这个槽）", () => {
+	assert.equal(repaintUnselectedRow(UNSELECTED_CURRENT, undefined), UNSELECTED_CURRENT);
+	assert.equal(repaintUnselectedRow(UNSELECTED_CURRENT, ""), UNSELECTED_CURRENT);
+});
+
+/**
+ * 列表层：`[搜索框, "", 会话行…, (滚动提示行)]`。搜索框那一行里也有 accent（提示符/补全），
+ * 但它在会话行之前，**必须**不被动；空行也是。
+ */
+const SEARCH_LINE = `${ACCENT}Search: ${FG_RESET}`;
+const SCROLL_LINE = `  ${MUTED}(1/12)${FG_RESET}`;
+const LIST = [SEARCH_LINE, "", SELECTED_ROW, UNSELECTED_CURRENT, SCROLL_LINE];
+
+const LIST_OPTIONS = { from: OLD, to: NEW, accent: ACCENT, currentSessionAccent: ACCENT };
+
+test("列表层：选中行换色去粗体、非选中行洗 accent、搜索框与滚动提示行不动", () => {
+	const out = repaintListRows(LIST, LIST_OPTIONS);
+	assert.equal(out[0], SEARCH_LINE, "搜索框那一行逐字节不变");
+	assert.equal(out[1], "", "空行不变");
+	assert.equal(hasBold(out[2] ?? ""), false, "选中行不再有粗体");
+	assert.equal((out[2] ?? "").startsWith(NEW), true, "选中行换成新底色");
+	assert.equal((out[3] ?? "").includes(ACCENT), false, "非选中行的 accent 被洗掉");
+	assert.equal(out[4], SCROLL_LINE, "滚动提示行（muted）不动");
+	assert.deepEqual(out.map(plain), LIST.map(plain), "所有行可见字符逐字节不变");
+	assert.deepEqual(
+		out.map(visibleWidth),
+		LIST.map(visibleWidth),
+		"所有行可见宽度不变（pi-tui 超宽直接抛）",
+	);
+});
+
+test("列表层：没有一行需要改时返回原数组引用（差分渲染）", () => {
+	const lines = [SEARCH_LINE, "", SCROLL_LINE];
+	assert.equal(repaintListRows(lines, LIST_OPTIONS), lines);
+});
+
+/**
+ * 找不到那条空行 ⇒ 布局已经变了（pi 的 `SessionList.render` 总是紧跟着 push 一个 `""`）。
+ * 此时按 `LIST_HEADER_LINE_COUNT` 跳过开头、宁可少重绘也不能把搜索框当会话行洗一遍。
+ */
+test("列表层：找不到那条空行时退回固定行数（宁可不动，不把搜索框当会话行）", () => {
+	const lines = [SEARCH_LINE, SELECTED_ROW];
+	const out = repaintListRows(lines, LIST_OPTIONS);
+	assert.equal(out[0], SEARCH_LINE, "搜索框那一行逐字节不变");
+	assert.equal(LIST_HEADER_LINE_COUNT, 2);
+	// 行数比头的两行还少时没什么可重绘的 —— 这是布局不认识时的保守行为。
+	assert.equal(out[1], SELECTED_ROW, "认不出布局就不动");
+	assert.equal(repaintListRows(lines, LIST_OPTIONS), lines, "原数组引用也不变");
+});
+
+test("取色：洗非选中行用的 accent 与选中行正文槽无关", () => {
+	const source: RowColorSource = {
+		getBgAnsi: (slot: string) => {
+			if (slot === SELECTED_ROW_SLOT) return OLD;
+			if (slot === DEFAULT_BG_SLOT) return NEW;
+			throw new Error("no");
+		},
+		getFgAnsi: (slot: string) => {
+			if (slot === CURRENT_SESSION_SLOT) return ACCENT;
+			throw new Error("no");
+		},
+	};
+	// `PI_SESSION_LIST_TITLE=off`：选中行不染色，但当前会话行的 accent 照样该洗掉。
+	const options = resolveRowPaintOptions(source, DEFAULT_BG_SLOT, "");
+	assert.ok(options);
+	assert.equal(options.accent, undefined, "选中行不染色");
+	assert.equal(options.currentSessionAccent, ACCENT, "洗色用的 accent 仍然拿到");
+	assert.equal(CURRENT_SESSION_SLOT, "accent", "pi 写死的槽名");
+	assert.equal((repaintListRows(LIST, options)[3] ?? "").includes(ACCENT), false);
+});
+
+test("取色：皮肤没有 accent 槽时不洗（不猜颜色）", () => {
+	const source: RowColorSource = {
+		getBgAnsi: (slot: string) => {
+			if (slot === SELECTED_ROW_SLOT) return OLD;
+			if (slot === DEFAULT_BG_SLOT) return NEW;
+			throw new Error("no");
+		},
+		getFgAnsi: () => {
+			throw new Error("no");
+		},
+	};
+	const options = resolveRowPaintOptions(source);
+	assert.ok(options);
+	assert.equal(options.currentSessionAccent, undefined);
+	assert.equal(repaintListRows(LIST, options)[3], UNSELECTED_CURRENT, "没拿到就不动");
 });

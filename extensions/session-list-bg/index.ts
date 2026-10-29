@@ -13,6 +13,11 @@
  *    （全属性复位，连底色一起清掉）。逐字节证据与推演见 `row.ts` 的文件头。
  * 3. 正文**去掉加粗、改用 `accent` 颜色**（用户 2026-10-28 同一轮追加）；行尾的消息数与时间
  *    仍然走 `dim`，不跟着变色。
+ * 3b. **只有选中行才带 accent**（用户 2026-10-28 第五轮）：pi 把「这是当前会话」直接画成
+ *    正文的 accent 色（`isCurrent ? "accent" : hasName ? "warning" : null`，与是否选中无关），
+ *    而默认排序把当前会话排在第一项 ⇒ 光标移走之后第一项仍然亮着。这一半必须在**列表层**
+ *    做（`sessionList.render` 的输出形状里会话行是结构性的）：外层组件的行里还夹着边框与抬头，
+ *    那些**也**是 accent，在那一层无从分辨。
  * 4. 列表顶部**搜索框的提示符**从 pi-tui 默认的 `> ` 换成 `Search: `（用户 2026-10-28 定）。
  *    它跟底色无关，但同样只能从 `SessionSelectorComponent` 的原型拿到那个 `Input` 实例 ——
  *    逻辑在 `search-prompt.ts`。
@@ -31,6 +36,11 @@
  * 里的文件内私有类，包根不导出；`SessionSelectorComponent` 在包根导出，且它的 `render()`
  * 继承自 `Container`，直接透传 `sessionList.render()` 的行数组。
  *
+ * **会话行那一半打在 `sessionList.render` 上**（实例方法，在构造后懒装、`/reload` 后重装）：
+ * 那是唯一能分辨「这是会话行」的地方 —— 外层 `render` 的输出是
+ * `[空行, 边框, 空行, 抬头, 空行, 搜索框, "", 会话行…, 空行, 边框]`，边框与抬头同样带
+ * `accent` 前景色，在那一层洗色会把边框一起洗掉。
+ *
  * ## 什么时候装
  *
  * 模块求值时就装（`statusline` 的 footer 补丁同款做法）：它在 pi 的 TUI 创建之前跑完，
@@ -45,7 +55,8 @@
  *
  * ## 约束
  *
- * - 只换 `prototype.render`，不碰实例、不碰 pi 内部状态、不读任何私有字段；
+ * - 只包 `prototype.render`（提示符）与那个列表实例的 `render`（会话行），不碰 pi 内部状态；
+ *   读私有字段只有一条：`this.sessionList`（拿不到就只是这个特性不生效）。
  * - 幂等：`/reload` 会重新求值模块，新实例先**更新**记录里的槽位再返回，不叠 wrapper；
  * - 任何异常都当「没打上」（渲染 tick 里抛出去没人接得住，会把 pi 打死 ——
  *   `user-message-bar` 2026-09-20 实测）；
@@ -58,7 +69,7 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { SessionSelectorComponent } from "@earendil-works/pi-coding-agent";
 
 import {
-	repaintSelectedRows,
+	repaintListRows,
 	resolveRowPaintOptions,
 	resolveSessionListBgEnabled,
 	resolveSessionListBgSlot,
@@ -73,6 +84,9 @@ import { applySearchPrompt, resolveSearchPrompt } from "./search-prompt.ts";
  */
 const PATCH_KEY = Symbol.for("litellm-any.pi-session-list-bg.state");
 
+/** 列表实例上的记账（按实例而不是原型：`sessionList` 是个普通字段，`SessionList` 类不导出）。 */
+const LIST_PATCH_KEY = Symbol.for("litellm-any.pi-session-list-bg.list");
+
 interface RowPatchState {
 	/** 目标底色槽位名（`PI_SESSION_LIST_BG` 可改）。 */
 	slot: string;
@@ -81,6 +95,15 @@ interface RowPatchState {
 	/** 搜索框提示符（`PI_SESSION_LIST_PROMPT` 可改；空串 = 保留 pi 的 `> `）。 */
 	prompt: string;
 	/** 渲染时取皮肤（`session_start` 后换成活的皮肤，见下方 `installSessionListBg`）。 */
+	theme: () => RowColorSource | undefined;
+}
+
+/** 会话行重绘挂在**列表实例**上的记账（`Symbol.for` 全局键，`/reload` 后仍认得出装过）。 */
+interface ListPatchState {
+	original: (width: number) => string[];
+	/** 目标底色槽位名（跟着原型补丁的那份状态走，两份永远同值）。 */
+	slot: string;
+	titleSlot: string;
 	theme: () => RowColorSource | undefined;
 }
 
@@ -133,17 +156,11 @@ export function installSessionListBg(options: InstallOptions): boolean {
 		// 提示符要在**渲染之前**写进那个 `Input`：`Input.render` 直接拿 `this.prompt` 算宽度。
 		// 拿不到实例（形状不认识）时 `applySearchPrompt` 自己安静返回 false，不会抛进渲染 tick。
 		applySearchPrompt(this, state.prompt);
-		const lines = (original as (...args: unknown[]) => string[]).apply(this, args);
-		if (!Array.isArray(lines) || lines.length === 0) return lines;
-		try {
-			const paint = resolveRowPaintOptions(safeTheme(state.theme), state.slot, state.titleSlot);
-			// 拿不到皮肤 / 皮肤缺槽 → 原样返回（这一帧不改，也不报错）
-			if (!paint) return lines;
-			return repaintSelectedRows(lines, paint);
-		} catch {
-			// 渲染 tick 里的异常没人接得住，宁可这一帧不重绘
-			return lines;
-		}
+		// 会话行那一半打在**列表实例**上（能分辨“哪行是会话行”的唯一位置）；装不上就只是少
+		// 那个特性。必须在 `original` 之前跑：这里装的是列表自己的 `render`，外层这一次
+		// 调用就会走它。
+		installListPaint(this, state);
+		return (original as (...args: unknown[]) => string[]).apply(this, args);
 	};
 
 	prototype[PATCH_KEY] = state;
@@ -158,6 +175,68 @@ function safeTheme(read: () => RowColorSource | undefined): RowColorSource | und
 	} catch {
 		return undefined;
 	}
+}
+
+/**
+ * 把会话行那一半接到**列表实例**的 `render` 上（染色 + 去粗体 + 去 accent 那一半）。
+ *
+ * 为什么不放外层：外层组件的输出是
+ *
+ *     [空行, 边框, 空行, 抬头, 空行, 搜索框, "", 会话行…, 空行, 边框]
+ *
+ * 而边框（`DynamicBorder(s => fg("accent", s))`）与抬头同样带 accent 前景色 —— 在那一层
+ * 洗色会连边框一起洗。列表层的输出形状是结构性的（`[搜索框, "", 会话行…, (滚动提示行)]`），
+ * 首个空行之后的全部当行处理就够了（详见 `row.ts` 的 `repaintListRows`）。
+ *
+ * 装在**实例**上而不是原型上：`SessionList` 是 pi 的文件内私有类，包根不导出，拿不到原型；
+ * 而这个实例是外层组件自己在构造函数里 `new` 的（`this.sessionList`）。
+ *
+ * 幂等：挂在实例上的状态里存了原 `render`，重复调用（每帧都会调）只**更新槽位与取色源**，
+ * 不叠包装（`/reload` 后重新拿到的是同一个实例，见 `LIST_PATCH_KEY`）。
+ */
+function installListPaint(selector: unknown, state: RowPatchState): void {
+	if (selector === null || typeof selector !== "object") return;
+	let list: unknown;
+	try {
+		list = (selector as Record<string, unknown>).sessionList;
+	} catch {
+		return;
+	}
+	if (list === null || typeof list !== "object") return;
+
+	const existing = (list as Record<symbol, unknown>)[LIST_PATCH_KEY] as ListPatchState | undefined;
+	if (existing !== undefined) {
+		existing.slot = state.slot;
+		existing.titleSlot = state.titleSlot;
+		existing.theme = state.theme;
+		return;
+	}
+
+	const original = (list as Record<string, unknown>).render;
+	if (typeof original !== "function") return;
+
+	const patch: ListPatchState = {
+		original: original as (width: number) => string[],
+		slot: state.slot,
+		titleSlot: state.titleSlot,
+		theme: state.theme,
+	};
+
+	(list as Record<string, unknown>).render = function (this: unknown, ...args: unknown[]): string[] {
+		const lines = patch.original.apply(this, args as [number]);
+		if (!Array.isArray(lines) || lines.length === 0) return lines;
+		try {
+			const paint = resolveRowPaintOptions(safeTheme(patch.theme), patch.slot, patch.titleSlot);
+			// 拿不到皮肤 / 皮肤缺槽 → 原样返回（这一帧不改，也不报错）
+			if (!paint) return lines;
+			return repaintListRows(lines, paint);
+		} catch {
+			// 渲染 tick 里的异常没人接得住，宁可这一帧不重绘
+			return lines;
+		}
+	};
+
+	(list as Record<symbol, unknown>)[LIST_PATCH_KEY] = patch;
 }
 
 export default function (pi: ExtensionAPI): void {

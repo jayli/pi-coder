@@ -69,6 +69,34 @@
  * 这正是用户要求的「除了 `11 5h` 那段，其余全部 accent」。
  *
  * 皮肤没有 `accent` 槽时只去掉粗体、不染新色（宁可少一层观感，也不自造颜色）。
+ *
+ * ## 第五件事：**只有选中行**才带 accent（`repaintListRows`）
+ *
+ * 用户报的现象：`/resume` 默认选中第一项，那一项是 accent 高亮；往下选其他项时，**第一项
+ * 的 accent 去不掉**，永远亮着。
+ *
+ * 根因不在本扩展，而是 pi 的两条叠加：
+ *
+ *     let messageColor = null;
+ *     isConfirmingDelete ? (messageColor = "error")
+ *     : isCurrent        ? (messageColor = "accent")   // ← 与是否选中**无关**
+ *     : hasName          ? (messageColor = "warning")
+ *
+ * `isCurrent` 就是「这一行是当前正在用的会话」，与光标在哪没有任何关系。而 `/resume` 的默认
+ * 排序（threaded/recent）把当前会话排在第一项、`selectedIndex` 默认也是 0 ⇒ 打开时看起来
+ * 「选中的第一项是 accent」；光标移走之后那个 accent 仍在，用户看到的就成了「第一项永远高亮」。
+ *
+ * 用户要的口径是「只有**选中行**才 accent」⇒ 非选中行上**恰好等于**皮肤 `accent` 的前景色
+ * 换成终端默认前景色（`\x1b[39m`，pi 给普通行本来就不写字面颜色）。`warning`（命名会话）与
+ * `error`（删除确认）**不动**：那是状态色，不是「选中」的信号。
+ *
+ * 换回默认前景色而不是 `theme.getFgAnsi("text")`：pi 给普通行的正文**根本不写颜色**，跟着
+ * 兄弟行走才是逐字节一致的观感（`text` 槽在有的皮肤里比终端默认更亮，会显得当前会话行更白）。
+ *
+ * 这一半必须在**列表层**做：`SessionList.render` 的输出是
+ * `[搜索框, "", …会话行, (还有更多时的滚动提示行)]`，行的范围是明摆着的；而外层组件
+ * 的 `render` 输出里还夹着边框、抬头、提示键，非选中行与它们没有任何可靠区别（pi 的正文
+ * 颜色解码全靠上下文），猜错就会把边框或抬头的 accent 一起洗掉。
  */
 
 /** 默认新底色：用户 prompt / 用户消息框的底色（用户 2026-10-28 定）。 */
@@ -76,6 +104,18 @@ export const DEFAULT_BG_SLOT = "userMessageBg";
 
 /** 选中行正文颜色槽：`accent`（用户 2026-10-28 定）。 */
 export const DEFAULT_TITLE_SLOT = "accent";
+
+/**
+ * pi 给**当前会话**那一行正文上的颜色（`SessionList.render` 里 `isCurrent` 分支写死的槽名）。
+ * 非选中行要把这个颜色洗回终端默认前景色（用户 2026-10-28 第五轮：「只有选中行才 accent」）。
+ */
+export const CURRENT_SESSION_SLOT = "accent";
+
+/**
+ * `SessionList.render` 在会话行之前先 push 的两行：搜索框本身 + 一条空行。
+ * 找不到那条空行时（pi 改了这段布局）按这个数量退着切。
+ */
+export const LIST_HEADER_LINE_COUNT = 2;
 
 /** 选中行原本用的底色槽（pi 的 `SessionList.render` 里写死）。 */
 export const SELECTED_ROW_SLOT = "selectedBg";
@@ -129,10 +169,15 @@ export interface RowPaintOptions {
 	/** 换成的底色 ANSI（通常是 `theme.getBgAnsi("userMessageBg")`）。 */
 	readonly to: string;
 	/**
-	 * 正文的强调色 ANSI（通常是 `theme.getFgAnsi("accent")`）。
+	 * 选中行正文的强调色 ANSI（通常是 `theme.getFgAnsi("accent")`）。
 	 * 缺省 / 空串 → 只把粗体去掉，正文用皮肤默认前景色。
 	 */
 	readonly accent?: string;
+	/**
+	 * pi 给**当前会话**行正文上的 accent ANSI（`theme.getFgAnsi("accent")`）。
+	 * 非选中行上的这个颜色会被洗回终端默认前景色；缺省 / 空串 → 非选中行原样不动。
+	 */
+	readonly currentSessionAccent?: string;
 }
 
 /**
@@ -245,6 +290,61 @@ function patchBody(body: string, bg: string, accent: string): string {
 	return out;
 }
 
+/**
+ * 把一个**非选中行**正文里的 accent 换回终端默认前景色（用户 2026-10-28 第五轮）。
+ *
+ * pi 把「这是当前会话」这个状态直接画成正文的 accent 色，与是否被选中无关 ⇒ 光标移走之后
+ * 那一行仍然亮着。判据只认**恰好等于**皮肤 accent 的整条前景色序列（`theme.getFgAnsi("accent")`
+ * 的返回值），所以 `warning`（命名会话）、`error`（删除确认）、`dim`（树前缀与行尾消息数/时间）
+ * 一个字节都不动；没有这个东西的行原样返回。
+ *
+ * 直接换成 `\x1b[39m` 而不是再写一个颜色：pi 给普通行的正文压根不写颜色，跟着兄弟走才是
+ * 逐字节一致的观感。可见字符一个不动（只换 SGR），宽度不受影响。
+ */
+export function repaintUnselectedRow(line: string, accent: string | undefined): string {
+	if (accent === undefined || accent.length === 0) return line;
+	if (!line.includes(accent)) return line;
+	return line.split(accent).join(FG_RESET);
+}
+
+/**
+ * 对 `SessionList.render` 的**整份输出**做重绘：选中行换底色 + 去粗体 + 上强调色，其余会话行
+ * 把 accent 洗回默认前景色。
+ *
+ * 为什么在列表层而不是外层组件：列表的输出形状是
+ *
+ *     [搜索框, "", 会话行…, (滚动提示行)]
+ *
+ * 行的范围是结构性的（搜索框那行、空行之后全部当行处理），而外层 `SessionSelectorComponent.render`
+ * 的输出里夹着边框、抬头、快捷键提示 —— 那些行**也**带 accent（边框是 `fg("accent", …)`），
+ * 在那一层无从分辨，猜错就会把边框洗成默认色。
+ *
+ * 头两行（搜索框本身）一概不碰：`Input` 里有硬件/伪光标序列，改它没有意义。最后那条滚动
+ * 提示行是 `muted`，落进「非选中行」分支也只是原样返回。
+ */
+export function repaintListRows(lines: readonly string[], options: RowPaintOptions): string[] {
+	const start = rowsStartIndex(lines);
+	let changed = false;
+	const out = lines.map((line, index) => {
+		if (index < start) return line;
+		const next = line.startsWith(options.from)
+			? repaintSelectedRow(line, options)
+			: repaintUnselectedRow(line, options.currentSessionAccent);
+		if (next !== line) changed = true;
+		return next;
+	});
+	return changed ? out : (lines as string[]);
+}
+
+/**
+ * 会话行的起始下标：搜索框之后那条空行（`SessionList.render` 的第二行）的下一个。
+ * 找不到空行时退回 `LIST_HEADER_LINE_COUNT`（pi 改了布局也不至于把搜索框当会话行）。
+ */
+function rowsStartIndex(lines: readonly string[]): number {
+	const blank = lines.findIndex((line, index) => index > 0 && line === "");
+	return blank >= 0 ? blank + 1 : LIST_HEADER_LINE_COUNT;
+}
+
 /** 只设置前景色的 SGR（`38;5` / `38;2` / `3x`），其余（`4x` 底色、`1`/`2` 属性）返回 `false`。 */
 function isForegroundOnly(token: string): boolean {
 	const body = token.slice(2, -1); // 去掉 `\x1b[` 与 `m`
@@ -256,6 +356,8 @@ function isForegroundOnly(token: string): boolean {
 /**
  * 对一次 `render()` 的所有行做重绘。没有一行被改动时**返回原数组**（差分渲染按引用比较，
  * 每帧造新数组会让它以为整块都变了）。
+ *
+ * ⚠️ 仅供单测使用：生产路径走 `repaintListRows`（多了一个「非选中行洗 accent」的判定）。
  */
 export function repaintSelectedRows(lines: readonly string[], options: RowPaintOptions): string[] {
 	let changed = false;
@@ -284,7 +386,15 @@ export function resolveRowPaintOptions(
 	const to = readSlot(source, slot, "getBgAnsi");
 	if (from === undefined || to === undefined) return undefined;
 	const accent = titleSlot.length > 0 ? readSlot(source, titleSlot, "getFgAnsi") : undefined;
-	return accent === undefined ? { from, to } : { from, to, accent };
+	// 洗非选中行用的 accent **与 `titleSlot` 无关**：pi 永远写 `fg("accent", …)` 表示「当前会话」，
+	// 用户把选中行正文换成别的槽（`PI_SESSION_LIST_TITLE=mdLink`）时那个颜色照样得洗掉。
+	const currentSessionAccent = readSlot(source, CURRENT_SESSION_SLOT, "getFgAnsi");
+	const options: RowPaintOptions = { from, to };
+	return {
+		...options,
+		...(accent === undefined ? {} : { accent }),
+		...(currentSessionAccent === undefined ? {} : { currentSessionAccent }),
+	};
 }
 
 /** 读一个颜色槽，失败（皮肤没这个槽 / 非 TUI / 读色方法本身可缺）返回 `undefined`。 */

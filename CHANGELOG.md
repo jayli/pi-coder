@@ -2,6 +2,19 @@
 
 All notable changes to this package. The extensions themselves are snapshot copies from the author's pi environment; their individual histories live in that repository.
 
+## 2.5.6 — 2026-10-29
+
+Snapshot sync of the upstream `clients/pi` window `22ddb5a..4f120ca` (two commits). Suite **2418 → 2436** tests, extension count unchanged at 41. Both changes are refinements of extensions this package already ships: `explored-group` now collapses consecutive identical rows into one with a `× N` marker, and `session-list-bg` keeps `accent` on the selected `/resume` row only. No privacy regressions: the scrub was re-applied to every incoming file and to the handbook, now recorded as delta 7's fifth pass.
+
+### Added
+
+- **`explored-group` collapses consecutive identical rows** — when the rendered row is byte-identical, it is shown once with a trailing `× N` (e.g. `└ Git show × 4`) instead of repeated. The criterion is the **rendered row**, not the arguments: `git show` and `git show --stat` are two commands but one line of text. The fingerprint includes the source, so a native `read` never collapses into a bash-escaped `Read` phrase. Only consecutive runs count, the marker takes the `muted` slot and rides the entry's last line, and the shrink budget reserves its width first so an exactly-full row is not pushed into a wrap. Deduplicated rows stop consuming the row budget, and a repeated file segment inside one merged `read` row (same path, same line range) is dropped the same way.
+- **`session-list-bg` keeps `accent` on the selected row only** — pi paints the row of the *current session* in `accent` regardless of cursor position (`isCurrent ? "accent" : hasName ? "warning" : null`), and `/resume` sorts the current session first, so moving the cursor down left the first row lit. Every row pixel in exactly that colour is now washed back to the terminal default foreground; `warning`, `error` and `dim` are untouched. This half patches the list instance's `render` rather than the selector's, because the selector output interleaves borders and a header that are also `accent` and would be washed with it.
+
+### Changed
+
+- `docs/extensions.md` documents both behaviours; `docs/development.md` records the measured 2.5.6 row (2436 tests, 2417 pass) and reconciles the +18 file by file. The single failure and the cancelled case are the unchanged recorded baseline: a stale `/启动默认模型/` assertion upstream missed in `bd872d8`, and `theme-extra/colors.test.ts`'s equivalence case under `--test-force-exit`.
+
 ## 2.5.5 — 2026-10-29
 
 Snapshot sync of the upstream `clients/pi` window `9882724..22ddb5a` (2026-10-26 → 2026-10-29, 45 commits). Extension count **40 → 41**, suite **2251 → 2418** tests. One new extension (`session-list-bg/`), a reworked `thinking-collapse` (`/rainbow` and its rainbow renderer retired, `/think-tail` and the settled-block summary line in), the user-message header removed and replaced by a bold first-line marker, a new `glob` candidate engine built on `.git/index` + `rg` + `fd`, three-stage shrinking for `Explored` member rows, and a frame around the plan-mode dialogs. No privacy regressions: the scrub was re-applied to every incoming file and to the handbook, now recorded as delta 7's fourth pass.

@@ -65,6 +65,27 @@
  *
  * 缩到地板仍装不下（极窄终端、超长正则模式）才退回下面的 break-all 折行。
  *
+ * ## 重复行收成一行 + `× N`（用户 2026-10-29 定）
+ *
+ * 连续几个操作**渲染出来的那一行完全一样**时，不再追加显示，而是收成一行、在行尾标 `× N`：
+ *
+ *     • Explored                      • Explored
+ *       └ Git show          ⇒           └ Git show × 4
+ *         Git show                      Git log          ← 中间换了别的行就断开，各算各的
+ *         Git show × 2
+ *         Git log
+ *
+ * 判据是**渲染出来的那一行**（不是 args）：`git show` 与 `git show --stat` 的短语都是
+ * `Git show`，屏幕上看不出差别，对读者就不是两条事实。`× N` 用 `muted` 槽压暗（它是注脚，
+ * 不该抢动词的注意力），且**只算连续**——中间隔了一行别的操作就重新起算。
+ *
+ * 重复的行收成**一行**，行尾带 `× N`（`GROUP_MAX_ROWS` / `… +N` 按收完之后的剩余行数算）；
+ * 带标记的行会按标记宽度多缩几个字符，免得标记自己撑出一行。
+ *
+ * 同一个 `read` 合并行里重复出现的**同一个文件**（同路径、同行号区间）也收成一处 ——
+ * 读者只需要知道「读过它」一次（读不同区间是不同的事实，照旧各算各的）。这是**静默**的，
+ * 不带 `× N`：标记属于整行，不属于行里的某个名字。
+ *
  * ## 行合并：连续的 `read` 按来源分段合成一行
  *
  * 用户明确要求：「一次性读两个文件」显示成 `└ Read a, b`。规则：
@@ -165,6 +186,12 @@ interface RowEntry {
 	 * 所以同一行里只会有一种来源，用第一个成员的 `toolName` 判定就够。
 	 */
 	boldVerb: string | null;
+	/**
+	 * 与**紧邻的上一条**条目渲染结果完全相同、被收成一行时的次数（≥2 才写，缺省 = 一次）。
+	 *
+	 * 见文件头「重复行收成一行 + `× N`」：只算**连续**的重复；行尾的 `× N` 由 `paintRow` 拼。
+	 */
+	repeat?: number;
 }
 
 /** 折行后的最终行。 */
@@ -174,6 +201,8 @@ interface OutputRow {
 	boldVerb: string | null;
 	/** 来自 read 条目（原生或 bash）→ 行号区间要上色（见 `paintReadSpans`）。 */
 	isRead: boolean;
+	/** 重复标记（` × N`，含前导空格）；挂在条目的最后一行上，由 `paintRow` 压暗。 */
+	suffix?: string;
 }
 
 /**
@@ -200,6 +229,65 @@ export function nativeVerbFor(toolName: string): string | null {
 	}
 }
 
+/**
+ * 收掉同一个 `read` 合并行里重复的**文件段**（同路径 + 同行号区间），保留首次出现的位置。
+ *
+ * 静默合并、不带 `× N`：标记是整行级的注脚（见文件头），行里的某个名字重复了几次读者不需要数。
+ * 读**不同区间**是不同的事实（`Read a.ts 100` / `Read a.ts 200`），照旧各算各的。
+ */
+function dedupeReadPieces(pieces: readonly PhrasePiece[]): PhrasePiece[] {
+	const seen = new Set<string>();
+	const out: PhrasePiece[] = [];
+	let segment: PhrasePiece[] = [];
+	const flushSegment = () => {
+		if (segment.length === 0) return;
+		const key = joinPieces(segment);
+		if (!seen.has(key)) {
+			seen.add(key);
+			if (out.length > 0) out.push({ text: JOINER });
+			out.push(...segment);
+		}
+		segment = [];
+	};
+	for (const piece of pieces) {
+		if (isJoiner(piece)) flushSegment();
+		else segment.push(piece);
+	}
+	flushSegment();
+	return out;
+}
+
+/**
+ * 条目的身份指纹：**渲染出来的那一行**（含来源，因为加粗与否只由它决定）。
+ *
+ * 用渲染结果而不是 args 作判据：`git show` 与 `git show --stat` 是两条命令、同一行文字，
+ * 屏幕上分不出来，重复显示就没有多给任何信息（用户 2026-10-29 的「展示的结果完全一样」）。
+ * 来源必须进指纹：原生 read 与 bash 转义 Read 短语一样，但一个是粗体一个不是 ——
+ * 收成一行就等于让 bash 那次冒充原生调用。
+ */
+function entryKey(entry: RowEntry): string {
+	return `${entry.isRead ? "read" : "row"}|${entry.boldVerb ?? ""}|${entry.pieces
+		.map((piece) => `${piece.shrink ?? "fixed"}:${piece.text}`)
+		.join("\u0000")}`;
+}
+
+/** 把**连续**且指纹相同的条目收成一条，次数记在 `repeat` 上（见文件头）。 */
+function collapseRepeats(entries: RowEntry[]): RowEntry[] {
+	const out: RowEntry[] = [];
+	let lastKey: string | undefined;
+	for (const entry of entries) {
+		const key = entryKey(entry);
+		const previous = out[out.length - 1];
+		if (previous && key === lastKey) {
+			previous.repeat = (previous.repeat ?? 1) + 1;
+			continue;
+		}
+		out.push(entry);
+		lastKey = key;
+	}
+	return out;
+}
+
 function buildEntries(group: Group, cwd: string | undefined): RowEntry[] {
 	const entries: RowEntry[] = [];
 	let reads: PhrasePiece[] = [];
@@ -207,7 +295,7 @@ function buildEntries(group: Group, cwd: string | undefined): RowEntry[] {
 	let readsAreNative = false;
 	const flush = () => {
 		if (readCount === 0) return;
-		entries.push({ pieces: [{ text: "Read " }, ...reads], isRead: true, boldVerb: readsAreNative ? "Read" : null });
+		entries.push({ pieces: [{ text: "Read " }, ...dedupeReadPieces(reads)], isRead: true, boldVerb: readsAreNative ? "Read" : null });
 		reads = [];
 		readCount = 0;
 		readsAreNative = false;
@@ -232,7 +320,7 @@ function buildEntries(group: Group, cwd: string | undefined): RowEntry[] {
 		entries.push({ pieces: labelPiecesFor(member, cwd), isRead: false, boldVerb: nativeVerbFor(member.toolName) });
 	}
 	flush();
-	return entries;
+	return collapseRepeats(entries);
 }
 
 /**
@@ -281,58 +369,72 @@ function isJoiner(piece: PhrasePiece): boolean {
 function layoutRows(entries: RowEntry[], budget: number): OutputRow[] {
 	const rows: OutputRow[] = [];
 	for (const entry of entries) {
-		if (!entry.isRead) {
-			const fitted = shrinkPieces(entry.pieces, budget, visibleWidth).pieces;
-			// 折行后只有**第一行**还带着那个动词，续行没有词可加粗（与 read 的 `prefixed` 同义）
-			hardWrap(joinPieces(fitted), budget).forEach((text, index) => {
-				rows.push({ text, boldVerb: index === 0 ? entry.boldVerb : null, isRead: false });
-			});
-			continue;
-		}
-		// read 合并行：整行先缩（多文件按宽度均摊），装不下再按文件分行。
-		// 缩的预算含 `Read `（它确实占列），但切分前要剥掉 —— 动词由下面的 `prefixed` 画。
+		const copies = entry.repeat ?? 1;
+		// 重复标记占列，所以要按「预算减标记宽度」缩 —— 不预扣的话标记自己会把行撑宽。
+		const suffix = copies > 1 ? ` × ${copies}` : "";
+		const entryRows = layoutEntry(entry, Math.max(1, budget - visibleWidth(suffix)));
+		// **只画一份**（这就是用户要的「不要再追加显示了」），标记挂在最后一行上。
+		entryRows.forEach((row, index) => {
+			rows.push({ ...row, suffix: index === entryRows.length - 1 && suffix !== "" ? suffix : undefined });
+		});
+	}
+	return rows;
+}
+
+/** 一个条目 → 它自己的行（不含重复标记；重复标记由 `layoutRows` 统一挂上）。 */
+function layoutEntry(entry: RowEntry, budget: number): OutputRow[] {
+	const rows: OutputRow[] = [];
+	if (!entry.isRead) {
 		const fitted = shrinkPieces(entry.pieces, budget, visibleWidth).pieces;
-		const body = fitted[0]?.text === "Read " && !fitted[0].shrink ? fitted.slice(1) : fitted;
-		const chunks: Chunk[] = splitReadPieces(body)
-			.flatMap((piece) =>
-				wrapReadPiece(piece, Math.max(1, budget - "Read ".length), budget)
-					.map((text, index) => ({ text, startsItem: index === 0 })));
-		let current = "";
-		// 当前行要不要画 `Read ` 前缀：只有「本行从一个新文件开始」时才画。
-		// 同一个文件的折行续块独占一行且不带前缀（用户 2026-10-07 定）。
-		let prefixed = false;
-		const flush = () => {
-			if (current === "") return;
-			rows.push({
-				text: prefixed ? `Read ${current}` : current,
-				boldVerb: prefixed ? entry.boldVerb : null,
-				isRead: true,
-			});
-			current = "";
-			prefixed = false;
-		};
-		for (const chunk of chunks) {
-			if (!chunk.startsItem) {
-				// 续块：先把属于自己的首行收掉，自己独占一行、不带前缀
-				flush();
-				current = chunk.text;
-				prefixed = false;
-				continue;
-			}
-			if (prefixed) {
-				const candidate = `${current}${JOINER}${chunk.text}`;
-				if (visibleWidth(`Read ${candidate}`) <= budget) {
-					current = candidate;
-					continue;
-				}
-			}
-			// 来的是新文件：续块行不让它搭车，一律从新的一行（带 Read）开始
+		// 折行后只有**第一行**还带着那个动词，续行没有词可加粗（与 read 的 `prefixed` 同义）
+		hardWrap(joinPieces(fitted), budget).forEach((text, index) => {
+			rows.push({ text, boldVerb: index === 0 ? entry.boldVerb : null, isRead: false });
+		});
+		return rows;
+	}
+	// read 合并行：整行先缩（多文件按宽度均摊），装不下再按文件分行。
+	// 缩的预算含 `Read `（它确实占列），但切分前要剥掉 —— 动词由下面的 `prefixed` 画。
+	const fitted = shrinkPieces(entry.pieces, budget, visibleWidth).pieces;
+	const body = fitted[0]?.text === "Read " && !fitted[0].shrink ? fitted.slice(1) : fitted;
+	const chunks: Chunk[] = splitReadPieces(body)
+		.flatMap((piece) =>
+			wrapReadPiece(piece, Math.max(1, budget - "Read ".length), budget)
+				.map((text, index) => ({ text, startsItem: index === 0 })));
+	let current = "";
+	// 当前行要不要画 `Read ` 前缀：只有「本行从一个新文件开始」时才画。
+	// 同一个文件的折行续块独占一行且不带前缀（用户 2026-10-07 定）。
+	let prefixed = false;
+	const flush = () => {
+		if (current === "") return;
+		rows.push({
+			text: prefixed ? `Read ${current}` : current,
+			boldVerb: prefixed ? entry.boldVerb : null,
+			isRead: true,
+		});
+		current = "";
+		prefixed = false;
+	};
+	for (const chunk of chunks) {
+		if (!chunk.startsItem) {
+			// 续块：先把属于自己的首行收掉，自己独占一行、不带前缀
 			flush();
 			current = chunk.text;
-			prefixed = true;
+			prefixed = false;
+			continue;
 		}
+		if (prefixed) {
+			const candidate = `${current}${JOINER}${chunk.text}`;
+			if (visibleWidth(`Read ${candidate}`) <= budget) {
+				current = candidate;
+				continue;
+			}
+		}
+		// 来的是新文件：续块行不让它搭车，一律从新的一行（带 Read）开始
 		flush();
+		current = chunk.text;
+		prefixed = true;
 	}
+	flush();
 	return rows;
 }
 
@@ -458,16 +560,20 @@ function paintSearchSeparator(text: string, theme: any): string {
  * 2026-10-07 扩到 `Search` / `Find` / `List`），其后的路径 / 模式不加粗；行号区间按上面
  * `paintReadSpans` 的口径上色（原生与 bash 的 Read 一视同仁）。
  *
+ * 重复标记（` × N`）走 `muted` 槽（用户 2026-10-29 定）—— 它是注脚，不该抢正文的注意力，
+ * 所以最后贴上、不参与上色与加粗。
+ *
  * 上色走 `theme.bold` / `theme.fg`；这里也是整块唯一上色的地方 ——
  * `layoutRows` 只传标志不拼 ANSI（理由见那边的注释）。
  */
 function paintRow(row: OutputRow, theme: any): string {
 	const withSpans = row.isRead ? paintReadSpans(row.text, theme) : row.text;
 	const text = paintSearchSeparator(withSpans, theme);
+	const suffix = row.suffix === undefined ? "" : theme.fg("muted", row.suffix);
 	const verb = row.boldVerb;
 	// 动词必然在行首；对不上（短语生不出来而退回工具名的兜底行）就不加粗：宁可不加，不能加错
-	if (!verb || !text.startsWith(verb)) return text;
-	return `${theme.bold(verb)}${text.slice(verb.length)}`;
+	if (!verb || !text.startsWith(verb)) return `${text}${suffix}`;
+	return `${theme.bold(verb)}${text.slice(verb.length)}${suffix}`;
 }
 
 /**

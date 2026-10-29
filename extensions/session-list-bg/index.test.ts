@@ -188,19 +188,24 @@ async function fireSessionStart(extension: LoadedExtension, theme: unknown): Pro
 	for (const handler of handlers) await handler({ type: "session_start" }, { ui: { theme } });
 }
 
-/** 假会话：`SessionManager.list` 的返回形状里，`SessionList.render` 真正读的那几个字段。 */
-function fakeSessions(): unknown[] {
+/**
+ * 假会话：`SessionManager.list` 的返回形状里，`SessionList.render` 真正读的那几个字段。
+ *
+ * **第一项是当前会话**（`currentSessionFilePath` 指它）：这正是用户报的那个场景 —— `/resume`
+ * 默认选中第一项，而第一项恰好是当前会话（pi 对它无条件上 accent，与是否选中无关）。
+ */
+function fakeSessions(paths: { current: string; named: string; plain: string }): unknown[] {
 	const now = Date.now();
 	return [
 		{
-			path: "/tmp/session-list-bg-a.jsonl",
+			path: paths.current,
 			firstMessage: LONG_TITLE,
 			messageCount: MESSAGE_COUNT,
 			modified: new Date(now),
 			cwd: "/Users/bachi/jaylli/litellm-any",
 		},
 		{
-			path: "/tmp/session-list-bg-b.jsonl",
+			path: paths.named,
 			name: SHORT_TITLE,
 			firstMessage: "短标题",
 			messageCount: 3,
@@ -208,13 +213,25 @@ function fakeSessions(): unknown[] {
 			cwd: "/Users/bachi/jaylli/litellm-any",
 		},
 		{
-			path: "/tmp/session-list-bg-c.jsonl",
+			path: paths.plain,
 			firstMessage: "第三个会话",
 			messageCount: 7,
 			modified: new Date(now - 9_000_000),
 			cwd: "/Users/bachi/jaylli/litellm-any",
 		},
 	];
+}
+
+/** 三条真存在的临时会话文件路径（`SessionList` 用它们判断“哪一行是当前会话”）。 */
+function sessionPaths(): { current: string; named: string; plain: string } {
+	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-session-list-bg-sessions-"));
+	const paths = {
+		current: path.join(dir, "current.jsonl"),
+		named: path.join(dir, "named.jsonl"),
+		plain: path.join(dir, "plain.jsonl"),
+	};
+	for (const file of Object.values(paths)) fs.writeFileSync(file, "");
+	return paths;
 }
 
 /**
@@ -225,9 +242,13 @@ function fakeSessions(): unknown[] {
  * （它继承 `Container`，内部再拼 header + 列表 + 边框）—— 这也是本扩展包的就是它的原因。
  * 渲染内层列表会绕开补丁，那就不算端到端了。
  */
-async function mountSessionList(): Promise<{ render(width: number): string[] }> {
+async function mountSessionList(): Promise<{
+	render(width: number): string[];
+	getSessionList(): { handleInput(data: string): void };
+}> {
 	assert.ok(pi);
-	const sessions = fakeSessions();
+	const paths = sessionPaths();
+	const sessions = fakeSessions(paths);
 	const loader = async () => sessions;
 	const selector = new pi.SessionSelectorComponent(
 		loader,
@@ -237,7 +258,7 @@ async function mountSessionList(): Promise<{ render(width: number): string[] }> 
 		() => {},
 		() => {},
 		{},
-		undefined,
+		paths.current,
 	);
 	// 构造函数的第一次 loadScope 是异步的（await loader 之后才 setSessions）。
 	await new Promise((resolve) => setTimeout(resolve, 50));
@@ -641,18 +662,117 @@ test("PI_SESSION_LIST_TITLE=off：只去粗体、不染色", { skip, timeout: 30
 
 		await fireSessionStart(extension, theme);
 		const after = (await mountSessionList()).render(WIDTH);
-		const afterSelected = after.find((line) => line.startsWith(userBg));
-		assert.ok(afterSelected);
-		assert.equal(afterSelected.includes(BOLD_ON), false, "粗体照样去掉");
+		// 第一项是**当前会话**，pi 本来就把它的正文画成 accent（与选中无关）；`TITLE=off` 只
+		// 表示“不去粗体 + 不自造颜色”，所以要在一条普通会话上验“没被染色”。
+		const selectedCurrent = after.find((line) => line.startsWith(userBg));
+		assert.ok(selectedCurrent);
+		assert.equal(selectedCurrent.includes(BOLD_ON), false, "粗体照样去掉");
 
-		const marks = scanLine(afterSelected, accent);
+		const deselect = await mountSessionList();
+		await fireSessionStart(extension, theme);
+		deselect.getSessionList().handleInput("\u001b[B");
+		const afterDown = deselect.render(WIDTH);
+		const selectedPlain = afterDown.find((line) => line.startsWith(userBg));
+		assert.ok(selectedPlain, "光标移到了第二项");
+		assert.equal(plain(selectedPlain).includes(SHORT_TITLE), true, "选中的是那条命名会话之外的行");
+
+		const marks = scanLine(selectedPlain, accent);
 		const { start, end } = bodyRange(marks);
 		const bodyMarks = marks.slice(start, end).filter((mark) => mark.char.trim().length > 0);
 		assert.equal(bodyMarks.length > 0, true);
 		assert.equal(bodyMarks.some((mark) => mark.accent), false, "正文没有被染成 accent");
-		assert.equal(plain(afterSelected), plain(beforeSelected));
 	} finally {
 		delete process.env.PI_SESSION_LIST_TITLE;
+		workspace.cleanup();
+	}
+});
+
+/* ---------------------------- 第五轮：只有选中行才带 accent（用户 2026-10-28） */
+
+/**
+ * 用户报的现象：`/resume` 默认选中第一项（= 当前会话），往下选其他项时第一项的 accent
+ * **去不掉**。根因在 pi：`isCurrent ? "accent" : hasName ? "warning" : null` —— 当前会话
+ * 那一行无条件上 accent，与光标在哪无关。
+ *
+ * 这是本轮的主用例：走真加载器 + 真 `SessionSelectorComponent`，键盘真的往下按。
+ */
+test("只有选中行带 accent：光标下移后，停在第一项的当前会话不再高亮", { skip, timeout: 30_000 }, async () => {
+	const workspace = makeWorkspace();
+	try {
+		const extension = await loadExtension(workspace);
+		pi!.initTheme("pi-coder-1337");
+		const theme = liveTheme();
+		const accent = theme.getFgAnsi("accent");
+		const userBg = theme.getBgAnsi("userMessageBg");
+		const firstTitle = plain(LONG_TITLE);
+
+		// A：补丁前 —— 阳性对照：当前会话回退成未选中后，正文仍然带着 accent（这就是 bug）。
+		const beforeList = await mountSessionList();
+		beforeList.getSessionList().handleInput("\u001b[B");
+		const before = beforeList.render(WIDTH);
+		const beforeCurrentRow = before.find((line) => plain(line).includes(firstTitle.slice(0, 10)));
+		assert.ok(beforeCurrentRow, "第一项（当前会话）还在列表里");
+		assert.equal(beforeCurrentRow.startsWith(userBg), false, "它已经不再是选中行（没底色）");
+		assert.equal(beforeCurrentRow.includes(accent), true, "bug 证据：未选中的当前会话仍然带着 accent");
+
+		// B：打过补丁之后 —— 同一个操作，accent 只应该出现在光标所在那一行。
+		await fireSessionStart(extension, theme);
+		const afterList = await mountSessionList();
+		afterList.getSessionList().handleInput("\u001b[B");
+		const after = afterList.render(WIDTH);
+
+		const afterCurrentRow = after.find((line) => plain(line).includes(firstTitle.slice(0, 10)));
+		assert.ok(afterCurrentRow);
+		assert.equal(afterCurrentRow.includes(accent), false, "第一项不再是当前会话的高亮色");
+		assert.equal(afterCurrentRow.startsWith(userBg), false, "它仍然不是选中行");
+		assert.equal(plain(afterCurrentRow), plain(beforeCurrentRow), "可见字符不变");
+		assert.equal(visibleWidth(afterCurrentRow), visibleWidth(beforeCurrentRow), "可见宽度不变");
+
+		// 会话行里只有一行（光标那行）带 accent；列表里其他带 accent 的都是抬头/边框。
+		const selected = after.filter((line) => line.startsWith(userBg));
+		assert.equal(selected.length, 1, "只有一行被选中");
+		const tailPattern = /\d+ \S+\s*$/;
+		const rowsWithAccent = after.filter(
+			(line) => tailPattern.test(plain(line)) && plain(line).startsWith("\u203a ") && line.includes(accent),
+		);
+		assert.equal(rowsWithAccent.length, 1, "只有选中那一行带 accent");
+
+		// 再回到顶部：第一项重新选中时 accent 又要回来（不是把它永久洗白）。
+		afterList.getSessionList().handleInput("\u001b[A");
+		const backToTop = afterList.render(WIDTH);
+		const topRow = backToTop.find((line) => plain(line).includes(firstTitle.slice(0, 10)));
+		assert.ok(topRow);
+		assert.equal(topRow.startsWith(userBg), true, "回到顶部后它又是选中行");
+		assert.equal(topRow.includes(accent), true, "选中行正文仍然是 accent");
+	} finally {
+		workspace.cleanup();
+	}
+});
+
+/** 边框与抬头**也**是 accent（`DynamicBorder(s => fg("accent", s))`）—— 不能被洗掉。 */
+test("边框与抬头仍是 accent（洗色只作用于会话行）", { skip, timeout: 30_000 }, async () => {
+	const workspace = makeWorkspace();
+	try {
+		const extension = await loadExtension(workspace);
+		pi!.initTheme("pi-coder-1337");
+		const theme = liveTheme();
+		const accent = theme.getFgAnsi("accent");
+
+		const before = (await mountSessionList()).render(WIDTH);
+		await fireSessionStart(extension, theme);
+		const after = (await mountSessionList()).render(WIDTH);
+
+		const borderIndexes = after.flatMap((line, index) => (/^\u2500+$/.test(plain(line).trim()) ? [index] : []));
+		assert.equal(borderIndexes.length, 2, "两条边框都在");
+		for (const index of borderIndexes) {
+			assert.equal(after[index], before[index], `第 ${index} 行（边框）逐字节不变`);
+			assert.equal((after[index] ?? "").includes(accent), true, "边框仍然是 accent");
+		}
+		// 窄终端下抬头会被截成 `Resume S ◉ Current Folder …`，只认开头那几个字。
+		const headerIndex = after.findIndex((line) => plain(line).includes("Resume S"));
+		assert.ok(headerIndex >= 0, `抬头行找不到（前 6 行：${JSON.stringify(after.slice(0, 6).map(plain))}）`);
+		assert.equal((after[headerIndex] ?? "").includes(accent), true, "抬头里的 accent 也原样保留");
+	} finally {
 		workspace.cleanup();
 	}
 });

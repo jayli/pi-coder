@@ -527,7 +527,7 @@ test("decideSpeak: 整段都是编号的结论不该只剩噪音", () => {
 });
 
 test("cleanSummaryText: 模型不守约、摘下编号时机械层兼底", () => {
-	const raw = "已经提交并推送了（commit `e752224`，+232/−57 到两个目标远端）。";
+	const raw = "已经提交并推送了（commit `e752224`，+232/−57 到两个远端）。";
 	const cleaned = cleanSummaryText(raw);
 	assert.ok(!/e752224|232|57/.test(cleaned), `摘要里的编号也要剥：${cleaned}`);
 	assert.ok(cleaned.includes("已经提交并推送了"), cleaned);

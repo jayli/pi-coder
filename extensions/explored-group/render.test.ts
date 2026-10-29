@@ -1238,3 +1238,113 @@ test("render：连续 glob + grep 并进同一个 Explored，且 glob 不切断�
 	// 第二个成员在同组里（同一个组的组长是 g1，所以 g2 自己的块渲染 0 行）
 	assert.deepEqual(renderBlock("grep", "g2", { pattern: "registerTool", path: "clients/pi" }), []);
 });
+
+test("重复：连续两次一样的 `Git show` 收成一行并带 `× 2`（用户 2026-10-29 定）", { skip }, () => {
+	// 用户原话：「如果有两个连续的操作展示的结果是完全一样的，就不要再追加显示了，而显示一个 ×N」。
+	// 判据是**渲染出来的那一行**（不是 args）：`git show` 与 `git show --stat` 短语一样，
+	// 屏幕上看不出差别，对读者就不是两个事实。
+	reset();
+	const cmd = BASH("git show");
+	replay([
+		{ type: "toolCall", id: "r1", name: "bash", arguments: cmd },
+		{ type: "toolCall", id: "r2", name: "bash", arguments: cmd },
+		{ type: "toolCall", id: "r3", name: "bash", arguments: cmd },
+		{ type: "toolCall", id: "r4", name: "bash", arguments: cmd },
+	]);
+	assert.deepEqual(renderBlock("bash", "r1", cmd), ["• Explored", "  └ Git show × 4"]);
+	// 成员块照样隐身（次数只出现在组长那一行里）
+	assert.deepEqual(renderBlock("bash", "r2", cmd), []);
+});
+
+test("重复：`× N` 用 muted 槽（用户 2026-10-29 定）", { skip }, () => {
+	pi!.initTheme("pi-coder-1337", false);
+	// 1337 主题的 `muted` = vars.gutterIgnored = #999999（`dim` 是更暗的 comment #6d6d6d，别混）
+	const MUTED = "\u001b[38;2;153;153;153m";
+	const OFF = "\u001b[39m";
+	reset();
+	const cmd = BASH("git show");
+	replay([
+		{ type: "toolCall", id: "m1", name: "bash", arguments: cmd },
+		{ type: "toolCall", id: "m2", name: "bash", arguments: cmd },
+	]);
+	const line = renderBlockRaw("bash", "m1", cmd)[1]!;
+	assert.ok(line.includes(`${MUTED} × 2${OFF}`), `× 2 应为 muted：${JSON.stringify(line)}`);
+});
+
+test("重复：只合并**连续**的同一行，隔开之后各算各的次数", { skip }, () => {
+	// 用户的约束是「两个**连续**的操作」—— `Git show` → `Git log` → `Git show` 是两个事实
+	// （中间看一眼 log 再回来），不能算 ×2。
+	reset();
+	replay([
+		{ type: "toolCall", id: "x1", name: "bash", arguments: BASH("git show") },
+		{ type: "toolCall", id: "x2", name: "bash", arguments: BASH("git log") },
+		{ type: "toolCall", id: "x3", name: "bash", arguments: BASH("git show") },
+	]);
+	assert.deepEqual(renderBlock("bash", "x1", BASH("git show")), [
+		"• Explored",
+		"  └ Git show",
+		"    Git log",
+		"    Git show",
+	]);
+});
+
+test("重复：`× N` 占的列不把行撑宽（窄终端下重复行仍装得下）", { skip }, () => {
+	// 标记是行尾追加的，所以缩略预算必须先**预扣**标记宽度 —— 否则 80 列的终端上
+	// 已经刚好装满的那一行加上 ` × 12` 就多出 5 列，又被推回折行。
+	reset();
+	const cmd = BASH("grep -rn 'a-fairly-long-pattern-string-here-ok' some/rather/long/nested/directory/path");
+	replay(Array.from({ length: 12 }, (_, i) => ({ type: "toolCall", id: `n${i}`, name: "bash", arguments: cmd })));
+	for (const width of [60, 70, 80]) {
+		const lines = renderBlock("bash", "n0", cmd, false, width);
+		assert.equal(lines.length, 2, `width=${width} 应只有组头 + 1 行：${JSON.stringify(lines)}`);
+		assert.ok(lines[1]!.endsWith("× 12"), `应有 × 12：${JSON.stringify(lines[1])}`);
+		for (const line of lines) {
+			const visible = [...line].length; // fixture 全 ASCII
+			assert.ok(visible <= width, `width=${width} 超宽 ${visible}：${JSON.stringify(line)}`);
+		}
+	}
+});
+
+test("重复：判据是渲染结果而不是 args（`git show` 与 `git show --stat` 收成一行）", { skip }, () => {
+	// 用户的口径是「**展示的结果**完全一样」：两条命令在树上长得一模一样，读者看不出区别，
+	// 重复显示就没多给任何信息。这一条钉住判据用哪一层：拿 args 比就收不起来。
+	reset();
+	const a = BASH("git show");
+	const b = BASH("git show --stat");
+	replay([
+		{ type: "toolCall", id: "y1", name: "bash", arguments: a },
+		{ type: "toolCall", id: "y2", name: "bash", arguments: b },
+	]);
+	assert.deepEqual(renderBlock("bash", "y1", a), ["• Explored", "  └ Git show × 2"]);
+});
+
+test("重复：read 合并行里的重复文件名也收成一处（`Read a.ts, b.ts` 不再出现两次 b.ts）", { skip }, () => {
+	// 合并行里同一个文件出现两次，读者也只需要知道「读过它」一次。多次读不同区间是**不同**的行
+	// （`Read a.ts 100` / `Read a.ts 200` 是两条事实），所以这里只合并完全相同的段。
+	reset();
+	replay([
+		{ type: "toolCall", id: "d1", name: "read", arguments: READ("/tmp/a.ts") },
+		{ type: "toolCall", id: "d2", name: "read", arguments: READ("/tmp/b.ts") },
+		{ type: "toolCall", id: "d3", name: "read", arguments: READ("/tmp/b.ts") },
+		{ type: "toolCall", id: "d4", name: "read", arguments: READ("/tmp/a.ts") },
+	]);
+	assert.deepEqual(renderBlock("read", "d1", READ("/tmp/a.ts")), [
+		"• Explored",
+		"  └ Read /tmp/a.ts, /tmp/b.ts",
+	]);
+	// 重复的**整行** read（写成 `× N` 那种）不可达：连续的 read 总是先被合成同一个合并行，
+	// 而那个合并行里的重复段由上面的 dedupeReadPieces 静默收掉（用户只需要知道「读过它」一次）。
+});
+
+test("重复：次数算的是被收掉的那些行，`… +N` 折的是收完之后的剩余行", { skip }, () => {
+	// 两笔账必须分开：`× N` 是「重复了几次」，`… +N` 是「还有几行没显示」。
+	reset();
+	const content = [];
+	for (let i = 0; i < 4; i++) content.push({ type: "toolCall", id: `a${i}`, name: "bash", arguments: BASH("git show") });
+	for (let i = 0; i < 6; i++) content.push({ type: "toolCall", id: `b${i}`, name: "bash", arguments: BASH(`grep -n needle${i} file${i}.ts`) });
+	replay(content);
+	const lines = renderBlock("bash", "a0", BASH("git show"));
+	assert.equal(lines[1], "  └ Git show × 4");
+	// 4 次重复只占 1 行，加上 6 条 search 共 7 行 > GROUP_MAX_ROWS(5) ⇒ 隐藏 2 行
+	assert.ok(lines.some((l) => l === "    … +2"), `折叠计数应按收完后的行数算：${JSON.stringify(lines)}`);
+});
